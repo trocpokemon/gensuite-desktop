@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0f766e"/><stop offset="1" stop-color="#052e2b"/></linearGradient><radialGradient id="r"><stop stop-color="#6ee7b7" stop-opacity=".55"/><stop offset="1" stop-color="#6ee7b7" stop-opacity="0"/></radialGradient></defs>
+  <rect width="960" height="540" fill="url(#g)"/><circle cx="760" cy="80" r="300" fill="url(#r)"/>
+  <path d="M184 284c-40-44-109-14-109 45 0 75 109 132 109 132s109-57 109-132c0-59-69-89-109-45z" fill="#34d399" opacity=".92"/>
+  <path d="M184 284c18 37 30 75 38 113 39-71 95-123 165-157" fill="none" stroke="#ecfdf5" stroke-width="18" stroke-linecap="round"/>
+  <g fill="#d1fae5" opacity=".9"><circle cx="500" cy="206" r="56"/><rect x="418" y="281" width="164" height="32" rx="16"/><rect x="484" y="215" width="32" height="164" rx="16"/></g>
+  <path d="M654 369h218" stroke="#a7f3d0" stroke-width="15" stroke-linecap="round" opacity=".65"/><path d="M694 414h178" stroke="#a7f3d0" stroke-width="15" stroke-linecap="round" opacity=".35"/>
+</svg>
