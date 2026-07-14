@@ -9,6 +9,7 @@ export function TitleBar() {
       <div className="flex select-none items-baseline font-sans text-white">
         <span className="text-[15px] font-extrabold tracking-[-0.04em]">GENSUITE</span>
         <span className="ml-1.5 text-[9px] font-bold uppercase tracking-[0.14em] text-teal-300/75">Desktop</span>
+        <span className="ml-2 text-[10px] font-medium tabular-nums text-white/30">v{__APP_VERSION__}</span>
       </div>
       <div className="titlebar-controls no-drag flex items-center gap-xs">
         <button
