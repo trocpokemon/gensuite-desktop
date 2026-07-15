@@ -1,7 +1,7 @@
 {
   "name": "gensuite-desktop",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "GenSuite Desktop - topic-driven YouTube production studio (Content, Storyboard, Voice, Video)",
   "author": "GenSuite",
   "main": "dist-electron/main.js",
