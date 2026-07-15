@@ -17,6 +17,15 @@ function ytdlpBinary(): string {
   return path.join(base, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
 }
 
+// YouTube extraction now requires a JS runtime to solve its player challenge.
+// We bundle Deno so it works offline without the user installing anything.
+function denoBinary(): string {
+  const base = app.isPackaged
+    ? path.join(process.resourcesPath, 'resources', 'deno')
+    : path.join(app.getAppPath(), 'resources', 'deno');
+  return path.join(base, process.platform === 'win32' ? 'deno.exe' : 'deno');
+}
+
 export function registerYtdlpIpc(): void {
   ipcMain.handle('ytdlp:download', async (e, args: YtdlpDownloadArgs): Promise<string> => {
     const { projectId, url } = args;
@@ -53,10 +62,26 @@ export function registerYtdlpIpc(): void {
       '--newline',
       '-o', outTemplate,
       '--print', 'after_move:filepath',
-      url,
     ];
 
-    const child = spawn(binary, ytArgs, { cwd: sourceDir, stdio: ['ignore', 'pipe', 'pipe'] });
+    // YouTube extraction now needs a JS runtime to solve its player challenge.
+    // We bundle Deno and expose it via PATH rather than `--js-runtimes deno:<path>`,
+    // because a Windows path (C:\…) contains a colon that yt-dlp misparses as the
+    // runtime/path separator. Prepending the deno dir to PATH lets the bare
+    // `--js-runtimes deno` resolve it. Skip if missing (non-YouTube sources still work).
+    const deno = denoBinary();
+    const childEnv = { ...process.env };
+    if (await fs.access(deno).then(() => true).catch(() => false)) {
+      ytArgs.push('--js-runtimes', 'deno');
+      // Windows exposes PATH as `Path`; reuse the existing key (any case) so we
+      // don't leave two conflicting entries the child might read inconsistently.
+      const pathKey = Object.keys(childEnv).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+      childEnv[pathKey] = `${path.dirname(deno)}${path.delimiter}${childEnv[pathKey] ?? ''}`;
+    }
+
+    ytArgs.push(url);
+
+    const child = spawn(binary, ytArgs, { cwd: sourceDir, stdio: ['ignore', 'pipe', 'pipe'], env: childEnv });
 
     return await new Promise<string>((resolve, reject) => {
       let stderr = '';

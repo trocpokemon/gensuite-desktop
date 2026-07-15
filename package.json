@@ -62,7 +62,8 @@
     },
     "files": [
       "dist",
-      "dist-electron"
+      "dist-electron",
+      "build/icon.png"
     ],
     "extraResources": [
       {
@@ -71,18 +72,21 @@
       }
     ],
     "win": {
+      "icon": "build/icon.png",
       "target": [
         "nsis",
         "portable"
       ]
     },
     "mac": {
+      "icon": "build/icon.png",
       "target": [
         "dmg",
         "zip"
       ]
     },
     "linux": {
+      "icon": "build/icon.png",
       "target": [
         "AppImage",
         "deb"

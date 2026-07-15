@@ -37,6 +37,7 @@ function createWindow(): void {
     minWidth: 1024,
     minHeight: 700,
     backgroundColor: '#131314',
+    icon: path.join(__dirname, '../build/icon.png'),
     show: false,
     frame: false,
     titleBarStyle: 'hidden',
