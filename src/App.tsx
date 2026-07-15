@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
-import { BookOpenText, Clapperboard, Film, Home, Languages, LayoutTemplate, LogOut, Mic, Settings as SettingsIcon } from 'lucide-react';
+import { BookOpenText, Clapperboard, Film, Home, Languages, LayoutTemplate, LogOut, Mic } from 'lucide-react';
 import { TitleBar } from './components/TitleBar';
-import { LowSpecBanner } from './components/LowSpecBanner';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ProjectHome } from './components/ProjectHome';
 import { SignInScreen } from './auth/SignInScreen';
@@ -54,7 +53,7 @@ export default function App() {
 
   return (
     <div className="app-background flex h-full flex-col bg-background text-text">
-      <TitleBar />
+      <TitleBar onOpenSettings={authStatus === 'signedIn' ? () => setSettingsOpen(true) : undefined} />
       {authStatus !== 'signedIn' ? (
         authStatus === 'loading' ? (
           <div className="flex flex-1 items-center justify-center text-text/50">Đang kiểm tra đăng nhập…</div>
@@ -64,7 +63,6 @@ export default function App() {
       ) : (
         <>
           <UpdateBanner />
-          <LowSpecBanner onGoCloud={() => setSettingsOpen(true)} />
           {!hydrated ? <div className="flex flex-1 items-center justify-center text-text/50">Đang tải thư viện dự án…</div> : home ? <ProjectHome /> : (
             <div className="flex min-h-0 flex-1">
               <nav className="flex w-64 shrink-0 flex-col border-r border-white/10 bg-[#1c1c1d] px-3 pb-4 pt-5 shadow-[8px_0_32px_rgba(0,0,0,0.08)]">
@@ -86,9 +84,8 @@ export default function App() {
                     return <li key={id}><button onClick={() => setStep(id)} className={`group flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[13px] font-semibold transition ${active ? 'bg-white/10 text-white' : 'text-white/50 hover:bg-white/5 hover:text-white'}`}><Icon size={17} className={active ? 'text-emerald-400' : 'text-white/30'} />{label}</button></li>;
                   })}
                 </ul>
-                <button onClick={() => setSettingsOpen(true)} className="mt-4 flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-semibold text-white/45 hover:bg-white/5 hover:text-white"><SettingsIcon size={17} /> Cài đặt</button>
                 {authEmail && (
-                  <div className="mt-1 flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-[11px] text-white/35">
+                  <div className="mt-4 flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-[11px] text-white/35">
                     <span className="truncate" title={authEmail}>{authEmail}</span>
                     <button onClick={signOut} title="Đăng xuất" className="shrink-0 rounded p-1 text-white/40 hover:bg-white/5 hover:text-white"><LogOut size={14} /></button>
                   </div>

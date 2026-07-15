@@ -9,6 +9,8 @@ export interface EngineOption<T extends string> {
   hint?: string;
   /** Marks a premium/cloud option — gets the warm accent treatment. */
   premium?: boolean;
+  /** Small pill shown after the label: green "Free" or amber "Cloud". */
+  badge?: 'free' | 'cloud';
   icon?: ReactNode;
 }
 
@@ -42,6 +44,17 @@ export function EngineToggle<T extends string>({ label, value, options, onChange
             >
               {opt.icon}
               {opt.label}
+              {opt.badge && (
+                <span
+                  className={`inline-flex h-4 min-w-[38px] items-center justify-center rounded px-1.5 text-[9px] font-bold uppercase leading-none tracking-wide ${
+                    opt.badge === 'free'
+                      ? 'bg-emerald-500/20 text-emerald-300'
+                      : 'bg-amber-400/15 text-amber-300'
+                  }`}
+                >
+                  {opt.badge === 'free' ? 'Free' : 'Cloud'}
+                </span>
+              )}
             </button>
           );
         })}

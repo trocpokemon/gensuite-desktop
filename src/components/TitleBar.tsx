@@ -1,8 +1,8 @@
-import { Minus, Square, X } from 'lucide-react';
+import { Minus, Settings as SettingsIcon, Square, X } from 'lucide-react';
 
 // Custom frameless title bar. The draggable region is marked via the
 // app-region CSS (see index.css); buttons opt out so they stay clickable.
-export function TitleBar() {
+export function TitleBar({ onOpenSettings }: { onOpenSettings?: () => void }) {
   const w = window.gensuite?.window;
   return (
     <div className="titlebar drag flex h-10 shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#171718]/95 px-4 backdrop-blur-xl">
@@ -12,6 +12,16 @@ export function TitleBar() {
         <span className="ml-2 text-[10px] font-medium tabular-nums text-white/30">v{__APP_VERSION__}</span>
       </div>
       <div className="titlebar-controls no-drag flex items-center gap-xs">
+        {onOpenSettings && (
+          <button
+            onClick={onOpenSettings}
+            className="mr-1 grid h-7 w-9 place-items-center rounded-md text-white/45 transition-colors hover:bg-white/10 hover:text-white"
+            aria-label="Cài đặt"
+            title="Cài đặt"
+          >
+            <SettingsIcon size={15} />
+          </button>
+        )}
         <button
           onClick={() => w?.minimize()}
           className="grid h-7 w-9 place-items-center rounded-md text-white/45 transition-colors hover:bg-white/10 hover:text-white"

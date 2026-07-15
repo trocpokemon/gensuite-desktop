@@ -257,8 +257,8 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
             label="Bộ nhận dạng"
             value={transcriptionEngine}
             options={[
-              { value: 'local', label: 'Whisper Local', hint: 'Miễn phí, chạy trên máy, tải model lần đầu' },
-              { value: 'cloud', label: 'GenSuite STT', hint: 'Trả phí, chính xác cao, cần GenSuite API key', premium: true },
+              { value: 'local', label: 'Whisper Local', hint: 'Miễn phí, chạy trên máy, tải model lần đầu', badge: 'free' },
+              { value: 'cloud', label: 'GenSuite', hint: 'Trả phí, chính xác cao, cần GenSuite API key', premium: true, badge: 'cloud' },
             ]}
             onChange={setTranscriptionEngine}
           />
@@ -289,8 +289,8 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
             label="Bộ dịch"
             value={scriptEngine === 'gensuite' ? 'paid' : 'free'}
             options={[
-              { value: 'free', label: 'Google AI Studio', hint: 'Miễn phí, cần Google AI Studio API key' },
-              { value: 'paid', label: 'GenSuite', hint: 'Trả phí, dùng model Gemini qua GenSuite', premium: true },
+              { value: 'free', label: 'Google AI Studio', hint: 'Miễn phí, cần Google AI Studio API key', badge: 'free' },
+              { value: 'paid', label: 'GenSuite', hint: 'Trả phí, dùng model Gemini qua GenSuite', premium: true, badge: 'cloud' },
             ]}
             onChange={(v) => setTranslatePaid(v === 'paid')}
           />

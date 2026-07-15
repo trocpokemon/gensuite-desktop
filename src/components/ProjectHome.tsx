@@ -46,14 +46,15 @@ export function ProjectHome() {
             </span>
           </button>
 
-          <button onClick={() => setCreating(true)} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-emerald-400/[0.12] via-teal-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-emerald-400/40">
+          <div aria-disabled className="hero-tool relative cursor-not-allowed overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-emerald-400/[0.12] via-teal-400/[0.04] to-transparent p-6 text-left opacity-40 grayscale">
+            <span className="absolute right-4 top-4 rounded-full border border-amber-400/30 bg-amber-400/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-300">Sắp ra mắt</span>
             <div className="mb-4 inline-flex rounded-xl bg-emerald-400/15 p-3 text-emerald-300"><Sparkles size={24} /></div>
             <h2 className="text-lg font-bold text-white">Tạo dự án nội dung</h2>
             <p className="mt-1.5 text-sm leading-5 text-white/50">Từ chủ đề đến video hoàn chỉnh: viết kịch bản, storyboard, lồng giọng và xuất video.</p>
             <span className="mt-4 inline-flex items-center gap-1.5 text-xs font-bold text-emerald-300">
               <Plus size={14} /> Bắt đầu từ chủ đề
             </span>
-          </button>
+          </div>
         </div>
 
         <div className="mb-6 flex items-center justify-between gap-4">
