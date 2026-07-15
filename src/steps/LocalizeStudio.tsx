@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, FileVideo, KeyRound, Languages, Loader2, Link2, Mic, Play, Subtitles, Upload, Wand2 } from 'lucide-react';
+import { Check, ChevronDown, FileVideo, KeyRound, Languages, Loader2, Link2, Mic, Play, RotateCcw, Subtitles, Upload, Wand2 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { EngineToggle } from '../components/EngineToggle';
@@ -44,7 +44,7 @@ const POSITION_LABELS: Record<SubtitlePosition, string> = { top: 'Trên', middle
 // The paid translation flow uses GenSuite's Gemini model; free uses Google AI Studio directly.
 const GENSUITE_TRANSLATE_MODEL = 'google-ai-studio/gemini-3.1-flash-lite';
 
-type Stage = 'idle' | 'download' | 'transcribe' | 'translate' | 'voice' | 'merge' | 'done' | 'error';
+type Stage = 'idle' | 'download' | 'transcribe' | 'translate' | 'voice' | 'voice-error' | 'merge' | 'done' | 'error';
 
 export function LocalizeStudio({ onOpenSettings }: Props) {
   const project = useProjectStore((state) => state.project);
@@ -73,14 +73,19 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
   const [transcribePhase, setTranscribePhase] = useState('');
   const [modelPercent, setModelPercent] = useState<number | null>(null);
   const [voiceProgress, setVoiceProgress] = useState({ done: 0, total: 0 });
+  const [voiceErrorMsg, setVoiceErrorMsg] = useState('');
   const [mergePercent, setMergePercent] = useState(0);
   const [resultPath, setResultPath] = useState('');
   const [missingKey, setMissingKey] = useState<string | null>(null);
   const [error, setError] = useState('');
 
-  const running = stage !== 'idle' && stage !== 'done' && stage !== 'error';
+  const running = stage !== 'idle' && stage !== 'done' && stage !== 'error' && stage !== 'voice-error';
   const runningRef = useRef(running);
   runningRef.current = running;
+
+  // Source path is captured once at the start of a run so the voice/merge steps
+  // (and any retry of a failed scene) can reuse it without re-downloading.
+  const srcRef = useRef('');
 
   useEffect(() => window.gensuite.ytdlp.onProgress((p) => {
     if (p.projectId !== project.id) return;
@@ -163,15 +168,39 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
       useProjectStore.getState().setLanguages({ sourceLanguage, targetLanguage });
       useProjectStore.getState().buildScenesFromTranscript(translated);
 
-      // 4 · Voice each scene sequentially (cloud jobs and edge-tts both dislike
-      // being hammered in parallel).
-      setStage('voice');
-      const scenes = useProjectStore.getState().project.scenes;
-      setVoiceProgress({ done: 0, total: scenes.length });
-      const voice = getVoiceProvider(settings.voiceEngine, keys);
-      const cfg = settings.voiceConfigs[settings.voiceEngine];
-      for (let i = 0; i < scenes.length; i += 1) {
-        const scene = scenes[i];
+      srcRef.current = src;
+      await voiceAndMerge();
+    } catch (err) {
+      const service = missingKeyService(err);
+      if (service) setMissingKey(service);
+      else setError(errorMessage(err));
+      setStage('error');
+    }
+  };
+
+  // Voice every scene, then merge. Scenes that already have an audioPath are
+  // skipped, so this doubles as the resume path: after a scene fails (e.g. edge-tts
+  // rate-limit), "Thử lại" re-runs this and only the unfinished scenes are voiced.
+  const voiceAndMerge = async () => {
+    const store = useProjectStore.getState();
+    const settings = store.project.settings;
+    const projectId = store.project.id;
+    const src = srcRef.current;
+
+    // 4 · Voice each scene sequentially (cloud jobs and edge-tts both dislike
+    // being hammered in parallel). A failure parks the run at 'voice-error'
+    // rather than discarding the scenes already voiced.
+    setStage('voice');
+    setVoiceErrorMsg('');
+    const scenes = useProjectStore.getState().project.scenes;
+    const voice = getVoiceProvider(settings.voiceEngine, keys);
+    const cfg = settings.voiceConfigs[settings.voiceEngine];
+    const doneCount = () => useProjectStore.getState().project.scenes.filter((s) => s.audioPath).length;
+    setVoiceProgress({ done: doneCount(), total: scenes.length });
+    for (let i = 0; i < scenes.length; i += 1) {
+      const scene = scenes[i];
+      if (scene.audioPath) continue; // already voiced (fresh run skips nothing, retry skips the done ones)
+      try {
         const result = await voice.synthesize({
           projectId, segmentId: scene.id, text: scene.narration,
           voiceId: cfg.voiceId, modelId: cfg.modelId, language: cfg.language,
@@ -180,24 +209,40 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
           pitch: cfg.pitch, volume: cfg.volume, deliveryMode: cfg.deliveryMode,
         });
         useProjectStore.getState().updateScene(scene.id, { audioPath: result.audioPath, audioDuration: result.durationSec });
-        setVoiceProgress({ done: i + 1, total: scenes.length });
+        setVoiceProgress({ done: doneCount(), total: scenes.length });
+      } catch (err) {
+        const service = missingKeyService(err);
+        if (service) { setMissingKey(service); setStage('error'); return; }
+        setVoiceErrorMsg(errorMessage(err));
+        setVoiceProgress({ done: doneCount(), total: scenes.length });
+        setStage('voice-error');
+        return;
       }
+    }
 
-      // 5 · Merge the dubbed lines back over the original video.
-      setStage('merge');
-      const finalScenes = useProjectStore.getState().project.scenes;
-      const redubSegments = finalScenes
-        .filter((s) => s.audioPath && typeof s.sourceStart === 'number' && typeof s.sourceEnd === 'number')
-        .map((s) => ({ audioPath: s.audioPath as string, sourceStart: s.sourceStart as number, sourceEnd: s.sourceEnd as number, text: s.narration }));
-      if (!redubSegments.length) throw new Error('Không có câu thoại nào để lồng tiếng.');
-      const out = await window.gensuite.ffmpeg.redub({
-        projectId, sourceVideoPath: src, segments: redubSegments,
-        subtitles: settings.subtitle.enabled, subtitleConfig: settings.subtitle,
-      });
-      if (!out) { setStage('idle'); return; } // save dialog cancelled
-      useProjectStore.getState().setDubbedVideo(out);
-      setResultPath(out);
-      setStage('done');
+    // 5 · Merge the dubbed lines back over the original video.
+    setStage('merge');
+    const finalScenes = useProjectStore.getState().project.scenes;
+    const redubSegments = finalScenes
+      .filter((s) => s.audioPath && typeof s.sourceStart === 'number' && typeof s.sourceEnd === 'number')
+      .map((s) => ({ audioPath: s.audioPath as string, sourceStart: s.sourceStart as number, sourceEnd: s.sourceEnd as number, text: s.narration }));
+    if (!redubSegments.length) throw new Error('Không có câu thoại nào để lồng tiếng.');
+    const out = await window.gensuite.ffmpeg.redub({
+      projectId, sourceVideoPath: src, segments: redubSegments,
+      subtitles: settings.subtitle.enabled, subtitleConfig: settings.subtitle,
+    });
+    if (!out) { setStage('idle'); return; } // save dialog cancelled
+    useProjectStore.getState().setDubbedVideo(out);
+    setResultPath(out);
+    setStage('done');
+  };
+
+  // Retry after a scene failed mid-voicing: continue from where it stopped.
+  const retryVoice = async () => {
+    setError('');
+    setMissingKey(null);
+    try {
+      await voiceAndMerge();
     } catch (err) {
       const service = missingKeyService(err);
       if (service) setMissingKey(service);
@@ -389,6 +434,22 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
         </div>
       )}
       {error && <p className="mb-5 rounded-xl border border-red-400/20 bg-red-400/5 p-3 text-sm text-red-300">{error}</p>}
+
+      {/* Voice failed mid-run: keep the scenes already voiced, let the user retry
+          just the unfinished ones without restarting the whole pipeline. */}
+      {stage === 'voice-error' && (
+        <div className="mb-5 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-5">
+          <p className="text-sm font-semibold text-amber-200">Lồng tiếng bị gián đoạn ở đoạn {voiceProgress.done + 1}/{voiceProgress.total}</p>
+          {voiceErrorMsg && <p className="mt-2 text-xs leading-5 text-amber-200/70">{voiceErrorMsg}</p>}
+          <p className="mt-2 text-xs text-amber-200/60">{voiceProgress.done} đoạn đã xong sẽ được giữ lại. Bấm thử lại để tiếp tục từ đoạn bị lỗi.</p>
+          <button
+            onClick={retryVoice}
+            className="mt-4 inline-flex items-center gap-2 rounded-lg bg-amber-300 px-4 py-2.5 text-xs font-bold text-black hover:bg-amber-200"
+          >
+            <RotateCcw size={14} /> Thử lại đoạn này
+          </button>
+        </div>
+      )}
 
       {/* Progress / result */}
       {running && (
