@@ -49,7 +49,7 @@ const DEFAULT_SETTINGS: ProjectSettings = {
   aspectRatio: '16:9',
   tone: 'Kể chuyện truyền cảm',
   voiceId: '',
-  transcriptionEngine: 'cloud',
+  transcriptionEngine: 'local',
   whisperModel: 'base',
   subtitle: { ...DEFAULT_SUBTITLE },
   music: { ...DEFAULT_MUSIC },

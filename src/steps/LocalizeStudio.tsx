@@ -56,7 +56,6 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
   const patchSettings = useProjectStore((state) => state.patchSettings);
   const keys = useSettingsStore((state) => state.keys);
 
-  const transcriptionEngine = project.settings.transcriptionEngine;
   const whisperModel = project.settings.whisperModel;
   const scriptEngine = project.settings.scriptEngine;
   const sub = project.settings.subtitle;
@@ -153,7 +152,7 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
 
       // 2 · Transcribe.
       setStage('transcribe');
-      const transcriber = getTranscriptionProvider(settings.transcriptionEngine, keys);
+      const transcriber = getTranscriptionProvider('local', keys);
       const segments = await transcriber.transcribe({
         projectId, sourcePath: src, model: settings.whisperModel, language: sourceLanguage,
       });
@@ -300,10 +299,9 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
         <div className="mb-4">
           <EngineToggle<TranscriptionEngine>
             label="Bộ nhận dạng"
-            value={transcriptionEngine}
+            value="local"
             options={[
               { value: 'local', label: 'Whisper Local', hint: 'Miễn phí, chạy trên máy, tải model lần đầu', badge: 'free' },
-              { value: 'cloud', label: 'GenSuite', hint: 'Trả phí, chính xác cao, cần GenSuite API key', premium: true, badge: 'cloud' },
             ]}
             onChange={setTranscriptionEngine}
           />
@@ -315,14 +313,12 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
               {SOURCE_LANGUAGES.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}
             </select>
           </label>
-          {transcriptionEngine === 'local' && (
-            <label className="block space-y-1.5">
-              <span className="text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Model</span>
-              <select value={whisperModel} onChange={(e) => setWhisperModel(e.target.value as WhisperModelName)} disabled={running} className="field-surface w-full rounded-xl px-3 py-2.5 text-sm outline-none">
-                {WHISPER_MODELS.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}
-              </select>
-            </label>
-          )}
+          <label className="block space-y-1.5">
+            <span className="text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Model</span>
+            <select value={whisperModel} onChange={(e) => setWhisperModel(e.target.value as WhisperModelName)} disabled={running} className="field-surface w-full rounded-xl px-3 py-2.5 text-sm outline-none">
+              {WHISPER_MODELS.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}
+            </select>
+          </label>
         </div>
       </section>
 

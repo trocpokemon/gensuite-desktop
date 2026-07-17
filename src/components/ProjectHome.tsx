@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Copy, Film, FolderOpen, Languages, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
+import { Copy, Film, FolderOpen, Languages, LogOut, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
+import { useAuthStore } from '../store/authStore';
 
 const STEP_LABEL: Record<string, string> = {
   topic: 'Chọn chủ đề', content: 'Viết nội dung', storyboard: 'Storyboard', voice: 'Giọng đọc', timeline: 'Xuất video', localize: 'Dịch & lồng tiếng',
@@ -13,6 +14,8 @@ export function ProjectHome() {
   const openProject = useProjectStore((state) => state.openProject);
   const deleteProject = useProjectStore((state) => state.deleteProject);
   const duplicateProject = useProjectStore((state) => state.duplicateProject);
+  const authEmail = useAuthStore((state) => state.email);
+  const signOut = useAuthStore((state) => state.signOut);
   const [query, setQuery] = useState('');
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
@@ -30,10 +33,19 @@ export function ProjectHome() {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto px-10 py-10">
       <div className="mx-auto max-w-6xl">
-        <header className="mb-8">
-          <div className="mb-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-400">GenSuite Studio</div>
-          <h1 className="text-4xl font-bold tracking-[-0.05em]">Bạn muốn làm gì hôm nay?</h1>
-          <p className="mt-3 text-sm text-text/50">Chọn một trong hai luồng để bắt đầu, hoặc mở lại một dự án bên dưới.</p>
+        <header className="mb-8 flex items-start justify-between gap-4">
+          <div>
+            <div className="mb-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-400">GenSuite Studio</div>
+            <h1 className="text-4xl font-bold tracking-[-0.05em]">Bạn muốn làm gì hôm nay?</h1>
+            <p className="mt-3 text-sm text-text/50">Chọn một trong hai luồng để bắt đầu, hoặc mở lại một dự án bên dưới.</p>
+          </div>
+          {authEmail && (
+            <div className="flex shrink-0 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-white/60">
+              <span className="grid h-6 w-6 place-items-center rounded-full bg-emerald-400/15 text-[11px] font-bold uppercase text-emerald-300">{authEmail.charAt(0)}</span>
+              <span className="max-w-[180px] truncate" title={authEmail}>{authEmail}</span>
+              <button onClick={signOut} title="Đăng xuất" className="shrink-0 rounded-md p-1 text-white/40 hover:bg-white/5 hover:text-white"><LogOut size={14} /></button>
+            </div>
+          )}
         </header>
 
         <div className="mb-10 grid grid-cols-1 gap-4 md:grid-cols-2">
