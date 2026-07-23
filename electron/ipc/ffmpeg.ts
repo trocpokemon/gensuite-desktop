@@ -698,10 +698,16 @@ export function registerFfmpegIpc(): void {
       videoArgs.push('-map', '0:v', '-c:v', 'copy');
     }
 
+    // A long video yields a huge filter graph (one chain per line + amix), which
+    // overflows Windows' ~32k command-line limit and fails with ENAMETOOLONG.
+    // Write the graph to a temp file and pass it via -filter_complex_script.
+    const filterScriptPath = path.join(os.tmpdir(), `gensuite-dub-${projectId}-${Date.now()}.filter`);
+    await fs.writeFile(filterScriptPath, filters.join(';'), 'utf8');
+
     const ffArgs = [
       '-y',
       ...inputs,
-      '-filter_complex', filters.join(';'),
+      '-filter_complex_script', filterScriptPath,
       ...videoArgs,
       '-map', '[adub]',
       '-c:a', 'aac',
@@ -713,7 +719,10 @@ export function registerFfmpegIpc(): void {
     ];
 
     const child = spawn(binary, ffArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
-    const cleanupSubs = () => { if (assPath) fs.unlink(assPath).catch(() => {}); };
+    const cleanupSubs = () => {
+      if (assPath) fs.unlink(assPath).catch(() => {});
+      fs.unlink(filterScriptPath).catch(() => {});
+    };
 
     return await new Promise<string>((resolve, reject) => {
       let stderr = '';
