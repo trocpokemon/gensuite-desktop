@@ -89,11 +89,11 @@ async function probeDuration(audioPath: string): Promise<number> {
     let stderr = '';
     child.stdout?.on('data', (data) => { stdout += String(data); });
     child.stderr?.on('data', (data) => { stderr += String(data); });
-    child.on('error', (error) => reject(new Error(`Không thể chạy FFprobe: ${error.message}`)));
+    child.on('error', () => reject(new Error('Không thể đọc thông tin tệp media.')));
     child.on('close', (code) => {
       const duration = Number.parseFloat(stdout.trim());
       if (code === 0 && Number.isFinite(duration) && duration > 0) resolve(duration);
-      else reject(new Error(`Không đọc được thời lượng audio: ${stderr.slice(-300)}`));
+      else reject(new Error('Không đọc được thời lượng audio.'));
     });
   });
 }
@@ -417,7 +417,7 @@ function buildRedubAssFile(segments: RedubSegment[], w: number, h: number, cfg: 
 export function registerFfmpegIpc(): void {
   ipcMain.handle('ffmpeg:export', async (e, args: ExportArgs): Promise<string | null> => {
     const { projectId, scenes, ratio } = args;
-    if (!scenes?.length) throw new Error('ffmpeg:export needs at least one scene');
+    if (!scenes?.length) throw new Error('Cần ít nhất một phân cảnh để xuất video.');
     const win = BrowserWindow.fromWebContents(e.sender);
 
     const binary = ffmpegBinary();
@@ -429,7 +429,7 @@ export function registerFfmpegIpc(): void {
         ...scenes.flatMap((scene) => [fs.access(scene.imagePath), fs.access(scene.audioPath)]),
       ]);
     } catch {
-      throw new Error('Không thể xuất video: thiếu FFmpeg hoặc file media/audio của một phân cảnh.');
+      throw new Error('Không thể xuất video vì một số tệp media hoặc audio không khả dụng.');
     }
 
     win?.webContents.send('ffmpeg:progress', { projectId, timeSec: 0, phase: 'preparing' });
@@ -585,7 +585,7 @@ export function registerFfmpegIpc(): void {
       });
       child.on('error', (err) => {
         cleanupSubs();
-        reject(new Error(`Không thể khởi động FFmpeg: ${err.message}`));
+        reject(new Error('Không thể khởi động quá trình xuất video.'));
       });
       child.on('close', (code) => {
         cleanupSubs();
@@ -599,7 +599,7 @@ export function registerFfmpegIpc(): void {
           shell.showItemInFolder(outPath);
           resolve(outPath);
         } else {
-          reject(new Error(`FFmpeg exited ${code}: ${stderr.slice(-600)}`));
+          reject(new Error('Quá trình xuất video không hoàn tất. Hãy kiểm tra các tệp đầu vào và thử lại.'));
         }
       });
     });
@@ -610,8 +610,8 @@ export function registerFfmpegIpc(): void {
   // source window and anchored at the original start time.
   ipcMain.handle('ffmpeg:redub', async (e, args: RedubArgs): Promise<string | null> => {
     const { projectId, sourceVideoPath, segments } = args;
-    if (!sourceVideoPath) throw new Error('ffmpeg:redub needs a source video');
-    if (!segments?.length) throw new Error('ffmpeg:redub needs at least one segment');
+    if (!sourceVideoPath) throw new Error('Cần chọn video nguồn trước khi lồng tiếng.');
+    if (!segments?.length) throw new Error('Không có đoạn lời thoại nào để lồng tiếng.');
     const win = BrowserWindow.fromWebContents(e.sender);
 
     const binary = ffmpegBinary();
@@ -624,7 +624,7 @@ export function registerFfmpegIpc(): void {
         ...segments.map((seg) => fs.access(seg.audioPath)),
       ]);
     } catch {
-      throw new Error('Không thể lồng tiếng: thiếu FFmpeg hoặc file video gốc/audio.');
+      throw new Error('Không thể lồng tiếng vì video nguồn hoặc một số tệp audio không khả dụng.');
     }
 
     win?.webContents.send('ffmpeg:progress', { projectId, timeSec: 0, phase: 'preparing' });
@@ -750,7 +750,7 @@ export function registerFfmpegIpc(): void {
       });
       child.on('error', (err) => {
         cleanupSubs();
-        reject(new Error(`Không thể khởi động FFmpeg: ${err.message}`));
+        reject(new Error('Không thể khởi động quá trình hoàn thiện video.'));
       });
       child.on('close', (code) => {
         cleanupSubs();
@@ -764,7 +764,7 @@ export function registerFfmpegIpc(): void {
           shell.showItemInFolder(outPath);
           resolve(outPath);
         } else {
-          reject(new Error(`FFmpeg exited ${code}: ${stderr.slice(-600)}`));
+          reject(new Error('Không thể hoàn thiện video. Hãy kiểm tra các tệp đầu vào và thử lại.'));
         }
       });
     });

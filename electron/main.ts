@@ -12,6 +12,7 @@ import { registerMusicIpc } from './ipc/music';
 import { registerCharacterIpc } from './ipc/character';
 import { registerYtdlpIpc } from './ipc/ytdlp';
 import { registerWhisperIpc } from './ipc/whisper';
+import { registerFilesIpc } from './ipc/files';
 import { registerUpdater, startUpdateChecks } from './updater';
 
 // Vite injects these in dev; undefined in a packaged build.
@@ -94,6 +95,9 @@ function registerWindowIpc(): void {
     // Only allow http(s) so a compromised renderer can't launch arbitrary protocols.
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
   });
+  ipcMain.on('shell:showItemInFolder', (_e, filePath: string) => {
+    if (path.isAbsolute(filePath)) shell.showItemInFolder(filePath);
+  });
 }
 
 function registerIpc(): void {
@@ -109,6 +113,7 @@ function registerIpc(): void {
   registerCharacterIpc();
   registerYtdlpIpc();
   registerWhisperIpc();
+  registerFilesIpc();
 }
 
 function registerProjectFileProtocol(): void {

@@ -364,6 +364,23 @@ export interface YtdlpProgress {
   phase?: 'downloading' | 'merging' | 'complete';
 }
 
+export interface PickTextResult {
+  name: string;
+  content: string;
+}
+
+export interface SaveTextArgs {
+  content: string;
+  defaultName: string;
+  /** File extensions without a leading dot. */
+  extensions: string[];
+}
+
+export interface SaveCopyArgs {
+  sourcePath: string;
+  defaultName?: string;
+}
+
 /** Extract a 16kHz mono WAV from the source media for whisper. */
 export interface WhisperExtractArgs {
   projectId: string;
@@ -429,6 +446,8 @@ export interface GensuiteBridge {
   shell: {
     /** Open a URL in the user's default external browser. */
     openExternal(url: string): void;
+    /** Reveal a generated/downloaded file in the OS file manager. */
+    showItemInFolder(filePath: string): void;
   };
   hardware: {
     scan(): Promise<HardwareInfo>;
@@ -482,6 +501,14 @@ export interface GensuiteBridge {
     /** Open a file picker and copy a local video/audio into <project>/source/. Returns null if cancelled. */
     import(projectId: string): Promise<string | null>;
     onProgress(cb: (p: YtdlpProgress) => void): () => void;
+  };
+  files: {
+    /** Pick a UTF-8 text or SRT file. */
+    pickText(): Promise<PickTextResult | null>;
+    /** Save generated UTF-8 text through the native save dialog. */
+    saveText(args: SaveTextArgs): Promise<string | null>;
+    /** Copy a generated media file to a location chosen by the user. */
+    saveCopy(args: SaveCopyArgs): Promise<string | null>;
   };
   whisper: {
     /** Extract a 16kHz mono WAV for transcription. Returns the absolute WAV path. */

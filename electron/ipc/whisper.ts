@@ -57,7 +57,7 @@ async function ensureModel(model: WhisperModelName, win: BrowserWindow | null): 
   emit(win, { phase: 'downloading-model', percent: 0, model });
 
   const resp = await fetch(modelUrl(model));
-  if (!resp.ok || !resp.body) throw new Error(`Tải model whisper thất bại: ${resp.status}`);
+  if (!resp.ok || !resp.body) throw new Error('Không thể chuẩn bị dữ liệu nhận dạng. Hãy kiểm tra kết nối và thử lại.');
   const total = Number(resp.headers.get('content-length')) || 0;
 
   // Write to a temp file first so an interrupted download never leaves a
@@ -103,7 +103,7 @@ function parseWhisperJson(raw: string): TranscriptSegment[] {
 export function registerWhisperIpc(): void {
   ipcMain.handle('whisper:extract', async (e, args: WhisperExtractArgs): Promise<string> => {
     const { projectId, sourcePath } = args;
-    if (!projectId || !sourcePath) throw new Error('whisper:extract missing args');
+    if (!projectId || !sourcePath) throw new Error('Thiếu thông tin tệp nguồn để nhận dạng.');
     if (!(await fileExists(sourcePath))) throw new Error('Không tìm thấy file nguồn để trích audio.');
 
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -121,8 +121,8 @@ export function registerWhisperIpc(): void {
       ], { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
       let stderr = '';
       child.stderr?.on('data', (d) => { stderr += String(d); });
-      child.on('error', (err) => reject(new Error(`Không thể chạy FFmpeg: ${err.message}`)));
-      child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg trích audio lỗi ${code}: ${stderr.slice(-300)}`)));
+      child.on('error', () => reject(new Error('Không thể chuẩn bị âm thanh từ tệp nguồn.')));
+      child.on('close', (code) => code === 0 ? resolve() : reject(new Error('Không thể chuẩn bị âm thanh từ tệp nguồn.')));
     });
     return wavPath;
   });
@@ -141,12 +141,12 @@ export function registerWhisperIpc(): void {
 
   ipcMain.handle('whisper:transcribe', async (e, args: WhisperTranscribeArgs): Promise<TranscriptSegment[]> => {
     const { projectId, wavPath, model, language } = args;
-    if (!projectId || !wavPath) throw new Error('whisper:transcribe missing args');
+    if (!projectId || !wavPath) throw new Error('Thiếu thông tin âm thanh để nhận dạng.');
     if (!(await fileExists(wavPath))) throw new Error('Không tìm thấy file WAV đã trích.');
 
     const win = BrowserWindow.fromWebContents(e.sender);
     const binary = whisperBinary();
-    if (!(await fileExists(binary))) throw new Error('Không tìm thấy whisper.cpp. Kiểm tra resources/whisper/.');
+    if (!(await fileExists(binary))) throw new Error('Không thể khởi tạo bộ nhận dạng. Vui lòng cài lại ứng dụng.');
 
     const modelFile = await ensureModel(model, win);
     emit(win, { phase: 'transcribing', model });
@@ -165,15 +165,15 @@ export function registerWhisperIpc(): void {
       const child = spawn(binary, whisperArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
       let stderr = '';
       child.stderr?.on('data', (d) => { stderr += String(d); });
-      child.on('error', (err) => reject(new Error(`Không thể chạy whisper: ${err.message}`)));
-      child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`whisper lỗi ${code}: ${stderr.slice(-400)}`)));
+      child.on('error', () => reject(new Error('Không thể khởi động bộ nhận dạng. Vui lòng thử lại.')));
+      child.on('close', (code) => code === 0 ? resolve() : reject(new Error('Không thể nhận dạng lời thoại từ tệp này.')));
     });
 
     const jsonPath = `${outBase}.json`;
     const raw = await fs.readFile(jsonPath, 'utf-8').catch(() => '');
-    if (!raw) throw new Error('whisper không tạo ra kết quả JSON.');
+    if (!raw) throw new Error('Không thể đọc kết quả nhận dạng. Vui lòng thử lại.');
     const segments = parseWhisperJson(raw);
-    if (!segments.length) throw new Error('whisper không nhận dạng được lời thoại nào.');
+    if (!segments.length) throw new Error('Không nhận dạng được lời thoại nào trong tệp nguồn.');
     emit(win, { phase: 'complete', model });
     return segments;
   });

@@ -30,6 +30,7 @@ const bridge: GensuiteBridge = {
   },
   shell: {
     openExternal: (url: string) => ipcRenderer.send('shell:openExternal', url),
+    showItemInFolder: (filePath: string) => ipcRenderer.send('shell:showItemInFolder', filePath),
   },
   hardware: {
     scan: () => ipcRenderer.invoke('hardware:scan'),
@@ -86,6 +87,11 @@ const bridge: GensuiteBridge = {
       ipcRenderer.on('ytdlp:progress', listener);
       return () => ipcRenderer.removeListener('ytdlp:progress', listener);
     },
+  },
+  files: {
+    pickText: () => ipcRenderer.invoke('files:pickText'),
+    saveText: (args) => ipcRenderer.invoke('files:saveText', args),
+    saveCopy: (args) => ipcRenderer.invoke('files:saveCopy', args),
   },
   whisper: {
     extract: (args: WhisperExtractArgs) => ipcRenderer.invoke('whisper:extract', args),

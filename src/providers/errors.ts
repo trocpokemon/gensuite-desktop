@@ -36,5 +36,19 @@ export function errorMessage(err: unknown): string {
   if (isNetworkError(msg)) {
     return 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng (hoặc tường lửa/VPN) rồi thử lại.';
   }
+  // Dependency errors can cross the IPC boundary. Never expose implementation
+  // names, internal paths, raw command output, or stack-like diagnostics in UI.
+  if (/yt-?dlp|resources[\\/]ytdlp|source-%\(id\)/i.test(msg)) {
+    return 'Không thể tải video từ liên kết này. Hãy kiểm tra liên kết hoặc thử lại sau.';
+  }
+  if (/whisper(?:\.cpp)?|ggml|resources[\\/]whisper/i.test(msg)) {
+    return 'Không thể nhận dạng lời thoại. Hãy kiểm tra tệp nguồn hoặc thử lại với chất lượng khác.';
+  }
+  if (/ffmpeg|ffprobe|codec|encoder|decoder/i.test(msg)) {
+    return 'Không thể xử lý tệp media. Hãy kiểm tra định dạng tệp và thử lại.';
+  }
+  if (/\b(?:stderr|stdout|stack trace)\b|(?:[A-Z]:\\|\/)(?:[^\s]+[\\/]){2,}/i.test(msg)) {
+    return 'Đã xảy ra lỗi khi xử lý. Vui lòng thử lại.';
+  }
   return msg;
 }

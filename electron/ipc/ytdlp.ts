@@ -127,7 +127,7 @@ function denoBinary(): string {
 export function registerYtdlpIpc(): void {
   ipcMain.handle('ytdlp:download', async (e, args: YtdlpDownloadArgs): Promise<string> => {
     const { projectId, url } = args;
-    if (!projectId || !url) throw new Error('ytdlp:download missing args');
+    if (!projectId || !url) throw new Error('Thiếu thông tin cần thiết để tải video.');
 
     let parsed: URL;
     try {
@@ -145,7 +145,7 @@ export function registerYtdlpIpc(): void {
     try {
       await fs.access(binary);
     } catch {
-      throw new Error('Không tìm thấy yt-dlp. Kiểm tra resources/ytdlp/.');
+      throw new Error('Không thể khởi tạo bộ tải video. Vui lòng cài lại ứng dụng.');
     }
 
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -216,10 +216,10 @@ export function registerYtdlpIpc(): void {
         });
 
         child.stderr?.on('data', (d) => { stderr += String(d); });
-        child.on('error', (err) => reject(new Error(`Không thể chạy yt-dlp: ${err.message}`)));
+        child.on('error', () => reject(new Error('Không thể khởi động bộ tải video. Vui lòng thử lại.')));
         child.on('close', async (code) => {
           if (code !== 0) {
-            reject(new Error(`yt-dlp lỗi ${code}: ${stderr.slice(-400)}`));
+            reject(new Error('Không thể tải video từ liên kết này. Hãy kiểm tra liên kết hoặc thử lại sau.'));
             return;
           }
           // Fall back to scanning the source dir if --print gave nothing usable.
@@ -234,7 +234,7 @@ export function registerYtdlpIpc(): void {
             finalPath = candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.full ?? '';
           }
           if (!finalPath) {
-            reject(new Error('yt-dlp tải xong nhưng không tìm thấy file nguồn.'));
+            reject(new Error('Đã tải xong nhưng không thể hoàn thiện tệp video. Vui lòng thử lại.'));
             return;
           }
           emit({ projectId, percent: 100, phase: 'complete' });
@@ -261,7 +261,7 @@ export function registerYtdlpIpc(): void {
   // Let the user pick a local video/audio file and copy it into <project>/source/.
   // Returns the copied absolute path, or null when cancelled.
   ipcMain.handle('ytdlp:import', async (e, projectId: string): Promise<string | null> => {
-    if (!projectId) throw new Error('ytdlp:import missing projectId');
+    if (!projectId) throw new Error('Thiếu thông tin cần thiết để nhập tệp.');
     const win = BrowserWindow.fromWebContents(e.sender);
 
     const picked = await dialog.showOpenDialog(win!, {

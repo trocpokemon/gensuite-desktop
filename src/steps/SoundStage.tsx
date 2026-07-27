@@ -148,7 +148,7 @@ export function SoundStage({ onOpenSettings }: Props) {
   const footer = (
     <>
       <button onClick={allDone ? () => setStep('storyboard') : synthesizeAll} disabled={bulkBusy || Object.values(busy).some(Boolean)} className="primary-action flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-45">{bulkBusy ? <Loader2 size={16} className="animate-spin" /> : allDone ? <ArrowRight size={16} /> : <Sparkles size={16} />}{bulkBusy ? `Đang tạo ${Math.max(1, bulkCurrentIndex + 1)}/${project.scenes.length}…` : allDone ? 'Sang bước Storyboard' : 'Tạo giọng cho tất cả'}</button>
-      <p className="text-[10px] leading-4 text-white/25">Thay đổi engine, giọng hoặc thông số sẽ yêu cầu tạo lại audio để giữ project đồng nhất.</p>
+      <p className="text-[10px] leading-4 text-white/25">Thay đổi nguồn giọng, giọng đọc hoặc thông số sẽ yêu cầu tạo lại audio để giữ dự án đồng nhất.</p>
     </>
   );
 

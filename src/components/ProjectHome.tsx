@@ -1,13 +1,23 @@
 import { useState } from 'react';
-import { Copy, Film, FolderOpen, Languages, LogOut, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
+import { Copy, Download, FileText, Film, FolderOpen, Languages, LogOut, Mic, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { useAuthStore } from '../store/authStore';
+import { QuickToolWorkspace, type QuickToolId } from './QuickToolWorkspace';
 
 const STEP_LABEL: Record<string, string> = {
   topic: 'Chọn chủ đề', content: 'Viết nội dung', storyboard: 'Storyboard', voice: 'Giọng đọc', timeline: 'Xuất video', localize: 'Dịch & lồng tiếng',
 };
 
-export function ProjectHome() {
+interface Props { onOpenSettings: () => void; }
+
+const QUICK_TOOLS: Array<{ id: QuickToolId; title: string; description: string; icon: typeof Download; color: string }> = [
+  { id: 'download', title: 'Tải video', description: 'Tải video từ liên kết', icon: Download, color: 'text-cyan-300 bg-cyan-400/10' },
+  { id: 'voice', title: 'Tạo Voice AI', description: 'Chuyển văn bản thành giọng nói', icon: Mic, color: 'text-violet-300 bg-violet-400/10' },
+  { id: 'srt', title: 'Xuất SRT', description: 'Tạo phụ đề từ video hoặc audio', icon: FileText, color: 'text-amber-300 bg-amber-400/10' },
+  { id: 'translate', title: 'Dịch', description: 'Dịch văn bản hoặc tệp SRT', icon: Languages, color: 'text-emerald-300 bg-emerald-400/10' },
+];
+
+export function ProjectHome({ onOpenSettings }: Props) {
   const projects = useProjectStore((state) => state.projects);
   const createProject = useProjectStore((state) => state.createProject);
   const createLocalizeProject = useProjectStore((state) => state.createLocalizeProject);
@@ -19,6 +29,7 @@ export function ProjectHome() {
   const [query, setQuery] = useState('');
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
+  const [quickTool, setQuickTool] = useState<QuickToolId | null>(null);
 
   const visible = projects.filter((project) =>
     `${project.name} ${project.topicName}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
@@ -48,7 +59,7 @@ export function ProjectHome() {
           )}
         </header>
 
-        <div className="mb-10 grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="mb-7 grid grid-cols-1 gap-4 md:grid-cols-2">
           <button onClick={() => createLocalizeProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-400/[0.12] via-indigo-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-sky-400/40">
             <div className="mb-4 inline-flex rounded-xl bg-sky-400/15 p-3 text-sky-300"><Languages size={24} /></div>
             <h2 className="text-lg font-bold text-white">Dịch & lồng tiếng video</h2>
@@ -68,6 +79,21 @@ export function ProjectHome() {
             </span>
           </div>
         </div>
+
+        <section className="mb-10" aria-labelledby="quick-tools-title">
+          <div className="mb-3 flex items-center gap-3">
+            <h2 id="quick-tools-title" className="text-xs font-bold uppercase tracking-[0.16em] text-white/35">Công cụ nhanh</h2>
+            <div className="h-px flex-1 bg-white/[0.07]" />
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {QUICK_TOOLS.map(({ id, title, description, icon: Icon, color }) => (
+              <button key={id} onClick={() => setQuickTool(id)} className="group flex items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.025] p-3.5 text-left transition hover:-translate-y-0.5 hover:border-white/[0.16] hover:bg-white/[0.045]">
+                <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${color}`}><Icon size={19} /></span>
+                <span className="min-w-0"><span className="block text-sm font-bold text-white/85">{title}</span><span className="mt-1 block truncate text-[11px] text-white/35">{description}</span></span>
+              </button>
+            ))}
+          </div>
+        </section>
 
         <div className="mb-6 flex items-center justify-between gap-4">
           <h2 className="text-sm font-bold uppercase tracking-[0.14em] text-white/40">Dự án của bạn</h2>
@@ -127,6 +153,7 @@ export function ProjectHome() {
           </div>
         </div>
       )}
+      {quickTool && <QuickToolWorkspace tool={quickTool} onClose={() => setQuickTool(null)} onOpenSettings={onOpenSettings} />}
     </main>
   );
 }

@@ -29,10 +29,10 @@ const SOURCE_LANGUAGES: Array<[string, string]> = [
 ];
 
 const WHISPER_MODELS: Array<[WhisperModelName, string]> = [
-  ['tiny', 'Tiny · nhanh nhất, kém chính xác'],
-  ['base', 'Base · cân bằng (khuyến nghị)'],
-  ['small', 'Small · chính xác hơn, chậm hơn'],
-  ['medium', 'Medium · chính xác nhất, nặng'],
+  ['tiny', 'Nhanh nhất'],
+  ['base', 'Cân bằng · Khuyến nghị'],
+  ['small', 'Chính xác hơn'],
+  ['medium', 'Chính xác cao nhất'],
 ];
 
 const FONT_CHOICES = ['Arial', 'Times New Roman', 'Tahoma', 'Verdana', 'Georgia', 'Segoe UI'];
@@ -255,7 +255,7 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
       case 'download': return downloadPhase === 'merging' ? 'Đang ghép video tải về…' : `Đang tải video ${Math.round(downloadPercent)}%`;
       case 'transcribe':
         return transcribePhase === 'extracting' ? 'Đang trích âm thanh…'
-          : transcribePhase === 'downloading-model' ? `Đang tải model nhận dạng${modelPercent !== null ? ` ${modelPercent}%` : '…'}`
+          : transcribePhase === 'downloading-model' ? `Đang chuẩn bị dữ liệu nhận dạng${modelPercent !== null ? ` ${modelPercent}%` : '…'}`
           : transcribePhase === 'transcribing' ? 'Đang nhận dạng lời thoại…' : 'Đang nhận dạng…';
       case 'translate': return 'Đang dịch lời thoại…';
       case 'voice': return `Đang lồng tiếng ${voiceProgress.done}/${voiceProgress.total}…`;
@@ -301,7 +301,7 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
             label="Bộ nhận dạng"
             value="local"
             options={[
-              { value: 'local', label: 'Whisper Local', hint: 'Miễn phí, chạy trên máy, tải model lần đầu', badge: 'free' },
+              { value: 'local', label: 'Trên thiết bị', hint: 'Miễn phí, xử lý trực tiếp trên thiết bị', badge: 'free' },
             ]}
             onChange={setTranscriptionEngine}
           />
@@ -314,7 +314,7 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
             </select>
           </label>
           <label className="block space-y-1.5">
-            <span className="text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Model</span>
+            <span className="text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Chất lượng nhận dạng</span>
             <select value={whisperModel} onChange={(e) => setWhisperModel(e.target.value as WhisperModelName)} disabled={running} className="field-surface w-full rounded-xl px-3 py-2.5 text-sm outline-none">
               {WHISPER_MODELS.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}
             </select>
@@ -331,7 +331,7 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
             value={scriptEngine === 'gensuite' ? 'paid' : 'free'}
             options={[
               { value: 'free', label: 'Google AI Studio', hint: 'Miễn phí, cần Google AI Studio API key', badge: 'free' },
-              { value: 'paid', label: 'GenSuite', hint: 'Trả phí, dùng model Gemini qua GenSuite', premium: true, badge: 'cloud' },
+              { value: 'paid', label: 'GenSuite', hint: 'Dịch vụ xử lý nâng cao của GenSuite', premium: true, badge: 'cloud' },
             ]}
             onChange={(v) => setTranslatePaid(v === 'paid')}
           />

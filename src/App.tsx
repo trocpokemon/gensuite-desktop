@@ -63,7 +63,7 @@ export default function App() {
       ) : (
         <>
           <UpdateBanner />
-          {!hydrated ? <div className="flex flex-1 items-center justify-center text-text/50">Đang tải thư viện dự án…</div> : home ? <ProjectHome /> : (
+          {!hydrated ? <div className="flex flex-1 items-center justify-center text-text/50">Đang tải thư viện dự án…</div> : home ? <ProjectHome onOpenSettings={() => setSettingsOpen(true)} /> : (
             <div className="flex min-h-0 flex-1">
               <nav className="flex w-64 shrink-0 flex-col border-r border-white/10 bg-[#1c1c1d] px-3 pb-4 pt-5 shadow-[8px_0_32px_rgba(0,0,0,0.08)]">
                 <button onClick={goHome} className="mb-5 flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold text-white/45 hover:bg-white/5 hover:text-white"><Home size={15} /> Tất cả dự án</button>
