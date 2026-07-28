@@ -81,6 +81,8 @@ const bridge: GensuiteBridge = {
   },
   ytdlp: {
     download: (args: YtdlpDownloadArgs) => ipcRenderer.invoke('ytdlp:download', args),
+    loginDouyin: () => ipcRenderer.invoke('ytdlp:douyinLogin'),
+    clearDouyinSession: () => ipcRenderer.invoke('ytdlp:douyinClearSession'),
     import: (projectId: string) => ipcRenderer.invoke('ytdlp:import', projectId),
     onProgress: (cb: (p: YtdlpProgress) => void) => {
       const listener = (_e: unknown, p: YtdlpProgress) => cb(p);

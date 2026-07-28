@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, FileVideo, KeyRound, Languages, Loader2, Link2, Mic, Play, RotateCcw, Subtitles, Upload, Wand2 } from 'lucide-react';
+import { Check, ChevronDown, FileVideo, KeyRound, Languages, Loader2, Link2, LogIn, Mic, Play, RotateCcw, Subtitles, Trash2, Upload, Wand2 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { EngineToggle } from '../components/EngineToggle';
@@ -7,7 +7,7 @@ import { VoiceConfigPanel } from '../components/VoiceConfigPanel';
 import { getTranscriptionProvider } from '../providers/transcription';
 import { getScriptProvider } from '../providers/script';
 import { getVoiceProvider } from '../providers/voice';
-import { missingKeyService, serviceLabel, errorMessage } from '../providers/errors';
+import { missingKeyService, serviceLabel, errorMessage, isDouyinLoginRequired } from '../providers/errors';
 import type { SubtitleConfig, SubtitlePosition, TranscriptionEngine, WhisperModelName } from '../shared/types';
 
 interface Props { onOpenSettings: () => void; }
@@ -77,6 +77,9 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
   const [resultPath, setResultPath] = useState('');
   const [missingKey, setMissingKey] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [douyinLoginRequired, setDouyinLoginRequired] = useState(false);
+  const [douyinLoginBusy, setDouyinLoginBusy] = useState(false);
+  const [douyinSessionCleared, setDouyinSessionCleared] = useState(false);
 
   const running = stage !== 'idle' && stage !== 'done' && stage !== 'error' && stage !== 'voice-error';
   const runningRef = useRef(running);
@@ -131,6 +134,8 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
     if (running) return;
     setError('');
     setMissingKey(null);
+    setDouyinLoginRequired(false);
+    setDouyinSessionCleared(false);
     setResultPath('');
     setDownloadPercent(0);
     setMergePercent(0);
@@ -172,8 +177,43 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
     } catch (err) {
       const service = missingKeyService(err);
       if (service) setMissingKey(service);
+      else if (isDouyinLoginRequired(err)) setDouyinLoginRequired(true);
       else setError(errorMessage(err));
       setStage('error');
+    }
+  };
+
+  const loginDouyin = async () => {
+    if (douyinLoginBusy || running) return;
+    setDouyinLoginBusy(true);
+    setError('');
+    setDouyinSessionCleared(false);
+    try {
+      const authenticated = await window.gensuite.ytdlp.loginDouyin();
+      if (!authenticated) {
+        setError('Chưa hoàn tất đăng nhập Douyin. Hãy thử lại khi bạn sẵn sàng.');
+        return;
+      }
+      setDouyinLoginRequired(false);
+      await run();
+    } catch {
+      setError('Không thể mở cửa sổ đăng nhập Douyin. Vui lòng thử lại.');
+    } finally {
+      setDouyinLoginBusy(false);
+    }
+  };
+
+  const clearDouyinSession = async () => {
+    if (douyinLoginBusy || running) return;
+    setDouyinLoginBusy(true);
+    setError('');
+    try {
+      await window.gensuite.ytdlp.clearDouyinSession();
+      setDouyinSessionCleared(true);
+    } catch {
+      setError('Không thể xóa phiên Douyin. Vui lòng thử lại.');
+    } finally {
+      setDouyinLoginBusy(false);
     }
   };
 
@@ -427,6 +467,21 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
         <div className="mb-5 flex items-center justify-between rounded-xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm">
           <span className="flex items-center gap-2"><KeyRound size={16} /> Thiếu API key cho {serviceLabel(missingKey)}.</span>
           <button onClick={onOpenSettings} className="rounded-lg bg-amber-300 px-3 py-2 text-xs font-bold text-black">Mở Cài đặt</button>
+        </div>
+      )}
+      {douyinLoginRequired && (
+        <div className="mb-5 rounded-xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
+          <p className="flex items-center gap-2 font-semibold"><LogIn size={16} /> Douyin cần xác nhận phiên truy cập</p>
+          <p className="mt-2 text-xs leading-5 text-amber-100/65">Một cửa sổ Douyin riêng sẽ mở để bạn tự đăng nhập. Ứng dụng không đọc mật khẩu hoặc dữ liệu từ trình duyệt chính.</p>
+          {douyinSessionCleared && <p className="mt-2 text-xs text-emerald-300">Đã xóa phiên cũ. Bạn có thể đăng nhập lại.</p>}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button onClick={() => void loginDouyin()} disabled={douyinLoginBusy} className="inline-flex items-center gap-2 rounded-lg bg-amber-300 px-4 py-2.5 text-xs font-bold text-black disabled:opacity-50">
+              {douyinLoginBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} Đăng nhập Douyin
+            </button>
+            <button onClick={() => void clearDouyinSession()} disabled={douyinLoginBusy} className="inline-flex items-center gap-2 rounded-lg border border-amber-200/20 px-3 py-2.5 text-xs font-semibold text-amber-100/70 disabled:opacity-50">
+              <Trash2 size={14} /> Xóa phiên cũ
+            </button>
+          </div>
         </div>
       )}
       {error && <p className="mb-5 rounded-xl border border-red-400/20 bg-red-400/5 p-3 text-sm text-red-300">{error}</p>}

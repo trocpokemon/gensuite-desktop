@@ -3,6 +3,12 @@
 // raw error. Any other Error is shown as-is.
 
 const PREFIX = 'MISSING_KEY:';
+const DOUYIN_LOGIN_REQUIRED = 'DOUYIN_LOGIN_REQUIRED';
+
+export function isDouyinLoginRequired(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes(DOUYIN_LOGIN_REQUIRED);
+}
 
 export function missingKeyService(err: unknown): string | null {
   const msg = err instanceof Error ? err.message : String(err);
@@ -33,6 +39,9 @@ function isNetworkError(msg: string): boolean {
 
 export function errorMessage(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes(DOUYIN_LOGIN_REQUIRED)) {
+    return 'Douyin cần xác nhận phiên truy cập. Hãy đăng nhập để tiếp tục.';
+  }
   if (isNetworkError(msg)) {
     return 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng (hoặc tường lửa/VPN) rồi thử lại.';
   }

@@ -498,6 +498,10 @@ export interface GensuiteBridge {
   ytdlp: {
     /** Download a video by URL into <project>/source/. Returns the absolute file path. */
     download(args: YtdlpDownloadArgs): Promise<string>;
+    /** Open an isolated Douyin sign-in window after explicit user consent. */
+    loginDouyin(): Promise<boolean>;
+    /** Remove the isolated Douyin session retained by the app. */
+    clearDouyinSession(): Promise<void>;
     /** Open a file picker and copy a local video/audio into <project>/source/. Returns null if cancelled. */
     import(projectId: string): Promise<string | null>;
     onProgress(cb: (p: YtdlpProgress) => void): () => void;

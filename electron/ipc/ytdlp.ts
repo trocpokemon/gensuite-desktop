@@ -1,8 +1,8 @@
 import { ipcMain, BrowserWindow, app, dialog, session } from 'electron';
 import type { Cookie } from 'electron';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import fsSync from 'node:fs';
 import path from 'node:path';
 import { projectDir } from './project';
 import { ffmpegBinary } from './ffmpeg';
@@ -34,16 +34,28 @@ function normalizeSourceUrl(raw: string): string {
   return raw;
 }
 
-// Chrome v127+ seals cookies with App-Bound Encryption that yt-dlp's DPAPI path
-// can't unseal (issue #10927), so `--cookies-from-browser` is unreliable. Instead
-// we load Douyin inside a hidden Electron window on a persistent partition: Douyin
-// sets guest cookies (notably `ttwid`) on the first page load — no login needed —
-// which we read straight from that session (no OS-level decryption) and write as a
-// Netscape cookies.txt that yt-dlp reads via `--cookies`. The partition persists so
-// the cookies survive across runs and we only re-harvest when they're missing/stale.
+// Keep Douyin state in an isolated application session instead of reading the
+// user's primary browser profile. Each download exports only the required state
+// to a unique short-lived file, which is removed when the attempt finishes.
 const DOUYIN_PARTITION = 'persist:douyin';
+const DOUYIN_LOGIN_REQUIRED = 'DOUYIN_LOGIN_REQUIRED';
+const DOUYIN_REQUIRED_COOKIE_NAMES = new Set(['ttwid', 's_v_web_id']);
+const DOUYIN_AUTH_COOKIE_NAMES = new Set([
+  'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard', 'uid_tt', 'uid_tt_ss',
+  'passport_auth_status', 'passport_auth_status_ss',
+]);
+const DOUYIN_REFRESH_COOKIE_NAMES = new Set([
+  'ttwid', 's_v_web_id', '__ac_nonce', '__ac_signature', 'msToken',
+]);
+
+let douyinLoginWindow: BrowserWindow | null = null;
+let douyinLoginPromise: Promise<boolean> | null = null;
 
 function douyinCookiesPath(): string {
+  return path.join(app.getPath('temp'), `gensuite-douyin-${process.pid}-${randomUUID()}.txt`);
+}
+
+function legacyDouyinCookiesPath(): string {
   return path.join(app.getPath('userData'), 'douyin-cookies.txt');
 }
 
@@ -52,6 +64,7 @@ function douyinCookiesPath(): string {
 function toNetscapeCookies(cookies: Cookie[]): string {
   const lines = ['# Netscape HTTP Cookie File', ''];
   for (const c of cookies) {
+    if (!c.name || [c.domain, c.path, c.name, c.value].some((value) => /[\t\r\n]/.test(value ?? ''))) continue;
     // hostOnly cookies bind to the exact domain; others (leading-dot) match
     // subdomains. yt-dlp uses column 2 to decide, so mirror Electron's flag.
     const includeSub = c.hostOnly ? 'FALSE' : 'TRUE';
@@ -64,20 +77,38 @@ function toNetscapeCookies(cookies: Cookie[]): string {
   return lines.join('\n') + '\n';
 }
 
-// Read the guest cookies from the persistent Douyin session and write cookies.txt.
-// Returns how many cookies were written.
-async function writeDouyinCookies(): Promise<number> {
+function cookieIsFresh(cookie: Cookie): boolean {
+  return cookie.session || !cookie.expirationDate || cookie.expirationDate > Date.now() / 1000 + 60;
+}
+
+function hasRequiredDouyinCookies(cookies: Cookie[]): boolean {
+  return [...DOUYIN_REQUIRED_COOKIE_NAMES].every((name) => cookies.some((cookie) => cookie.name === name && cookieIsFresh(cookie)));
+}
+
+function hasDouyinLogin(cookies: Cookie[]): boolean {
+  return cookies.some((cookie) => DOUYIN_AUTH_COOKIE_NAMES.has(cookie.name) && cookieIsFresh(cookie));
+}
+
+async function getDouyinCookies(): Promise<Cookie[]> {
   const ses = session.fromPartition(DOUYIN_PARTITION);
-  const cookies = await ses.cookies.get({ domain: 'douyin.com' });
-  await fs.writeFile(douyinCookiesPath(), toNetscapeCookies(cookies), 'utf8');
-  return cookies.length;
+  return await ses.cookies.get({ domain: 'douyin.com' });
+}
+
+// Export only Douyin-domain cookies into a short-lived file used by one download.
+// The persistent browser partition retains the session; this plaintext file is
+// removed in a finally block as soon as the download attempt finishes.
+async function writeDouyinCookies(filePath: string): Promise<boolean> {
+  const cookies = await getDouyinCookies();
+  if (!hasRequiredDouyinCookies(cookies)) return false;
+  await fs.writeFile(filePath, toNetscapeCookies(cookies), { encoding: 'utf8', mode: 0o600 });
+  return true;
 }
 
 // Silently load Douyin in a hidden window so it sets its guest cookies, then
-// harvest them into cookies.txt. No login and no user interaction needed — the
-// `ttwid` cookie that unblocks yt-dlp is set on the first page load. Resolves with
-// the cookie count once `ttwid` appears (or after a timeout, using whatever's set).
-function harvestDouyinCookies(): Promise<number> {
+// harvest them into a temporary cookies file. No login or user interaction is
+// needed. Resolve only when the minimum verification cookies are present; never
+// persist an empty/partial file that would poison future attempts.
+function harvestDouyinCookies(filePath: string): Promise<boolean> {
   return new Promise((resolve) => {
     const bgWin = new BrowserWindow({
       show: false,
@@ -94,25 +125,137 @@ function harvestDouyinCookies(): Promise<number> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      let count = 0;
-      try { count = await writeDouyinCookies(); } catch { /* keep any prior file */ }
+      let written = false;
+      try { written = await writeDouyinCookies(filePath); } catch { /* caller handles false */ }
       if (!bgWin.isDestroyed()) bgWin.destroy();
-      resolve(count);
+      resolve(written);
     };
 
-    // Poll the session cookies; resolve as soon as the bot-check `ttwid` is present.
-    const ses = session.fromPartition(DOUYIN_PARTITION);
+    // Poll until the minimum verification cookie set is complete.
     const poll = setInterval(async () => {
-      const cookies = await ses.cookies.get({ domain: 'douyin.com' }).catch(() => []);
-      if (cookies.some((c) => c.name === 'ttwid')) { clearInterval(poll); await finish(); }
+      const cookies = await getDouyinCookies().catch(() => []);
+      if (hasRequiredDouyinCookies(cookies)) { clearInterval(poll); await finish(); }
     }, 500);
 
-    // Hard cap: don't hang the download if Douyin never sets ttwid. Harvest whatever
-    // cookies exist and let yt-dlp try — the download step surfaces any real failure.
+    // Hard cap: don't hang the download if Douyin never provides the minimum
+    // verification state. `finish` deliberately refuses a partial export.
     const timer = setTimeout(async () => { clearInterval(poll); await finish(); }, 15000);
 
     bgWin.loadURL('https://www.douyin.com/').catch(() => { /* poll/timeout still fire */ });
   });
+}
+
+async function clearDouyinCookiesByName(names: Set<string>): Promise<void> {
+  const ses = session.fromPartition(DOUYIN_PARTITION);
+  const cookies = await getDouyinCookies().catch(() => []);
+  await Promise.all(cookies
+    .filter((cookie) => names.has(cookie.name))
+    .map((cookie) => {
+      const domain = (cookie.domain || 'www.douyin.com').replace(/^\./, '');
+      const protocol = cookie.secure ? 'https' : 'http';
+      return ses.cookies.remove(`${protocol}://${domain}${cookie.path || '/'}`, cookie.name).catch(() => undefined);
+    }));
+}
+
+async function clearDouyinRefreshCookies(): Promise<void> {
+  await clearDouyinCookiesByName(DOUYIN_REFRESH_COOKIE_NAMES);
+}
+
+async function clearDouyinAuthCookies(): Promise<void> {
+  await clearDouyinCookiesByName(DOUYIN_AUTH_COOKIE_NAMES);
+}
+
+function isAllowedDouyinNavigation(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.replace(/^www\./, '');
+    return url.protocol === 'https:' && (host === 'douyin.com' || host.endsWith('.douyin.com'));
+  } catch {
+    return false;
+  }
+}
+
+// Open a visible, isolated Douyin window only after an explicit renderer action.
+// Authentication is detected from session cookies; passwords never cross IPC.
+function openDouyinLoginWindow(parent: BrowserWindow | null): Promise<boolean> {
+  if (douyinLoginPromise) {
+    if (douyinLoginWindow && !douyinLoginWindow.isDestroyed()) {
+      douyinLoginWindow.show();
+      douyinLoginWindow.focus();
+    }
+    return douyinLoginPromise;
+  }
+
+  douyinLoginPromise = new Promise<boolean>((resolve) => {
+    const ses = session.fromPartition(DOUYIN_PARTITION);
+    ses.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+
+    const loginWindow = new BrowserWindow({
+      parent: parent ?? undefined,
+      modal: Boolean(parent),
+      show: false,
+      width: 1100,
+      height: 780,
+      minWidth: 820,
+      minHeight: 620,
+      title: 'Đăng nhập Douyin',
+      autoHideMenuBar: true,
+      webPreferences: {
+        partition: DOUYIN_PARTITION,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    douyinLoginWindow = loginWindow;
+    loginWindow.removeMenu();
+    loginWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    loginWindow.webContents.on('will-navigate', (event, target) => {
+      if (!isAllowedDouyinNavigation(target)) event.preventDefault();
+    });
+
+    let authenticated = false;
+    let settled = false;
+    const poll = setInterval(async () => {
+      const cookies = await getDouyinCookies().catch(() => []);
+      if (!hasDouyinLogin(cookies)) return;
+      authenticated = true;
+      clearInterval(poll);
+      setTimeout(() => {
+        if (!loginWindow.isDestroyed()) loginWindow.close();
+      }, 1200);
+    }, 750);
+
+    const finish = async () => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      const cookies = await getDouyinCookies().catch(() => []);
+      resolve(authenticated || hasDouyinLogin(cookies));
+      douyinLoginWindow = null;
+      douyinLoginPromise = null;
+    };
+
+    loginWindow.once('ready-to-show', () => loginWindow.show());
+    loginWindow.once('closed', () => { void finish(); });
+    loginWindow.loadURL('https://www.douyin.com/').catch(() => {
+      if (!loginWindow.isDestroyed()) loginWindow.close();
+    });
+  });
+
+  return douyinLoginPromise;
+}
+
+class DownloadAttemptError extends Error {
+  constructor(readonly kind: 'session' | 'generic') {
+    super('DOWNLOAD_ATTEMPT_FAILED');
+  }
+}
+
+function classifyDouyinFailure(stderr: string): 'session' | 'generic' {
+  return /fresh cookies|failed to parse json|sign in|log[ -]?in|verification|captcha|http error (?:403|429)/i.test(stderr)
+    ? 'session'
+    : 'generic';
 }
 
 // YouTube extraction now requires a JS runtime to solve its player challenge.
@@ -140,6 +283,8 @@ export function registerYtdlpIpc(): void {
     }
 
     const sourceUrl = normalizeSourceUrl(url);
+    const host = parsed.hostname.replace(/^www\./, '');
+    const isDouyin = host === 'douyin.com' || host.endsWith('.douyin.com');
 
     const binary = ytdlpBinary();
     try {
@@ -158,6 +303,8 @@ export function registerYtdlpIpc(): void {
       '-f', 'bv*+ba/b',
       '--merge-output-format', 'mp4',
       '--ffmpeg-location', ffmpegDir,
+      '--ignore-config',
+      '--no-plugin-dirs',
       '--no-playlist',
       '--newline',
       '-o', outTemplate,
@@ -181,8 +328,8 @@ export function registerYtdlpIpc(): void {
 
     const emit = (p: YtdlpProgress) => win?.webContents.send('ytdlp:progress', p);
 
-    // Run yt-dlp once, optionally pointing it at a Netscape cookies.txt file.
-    // Resolves to the downloaded file path, or rejects with the raw yt-dlp error.
+    // Run the downloader once with an optional short-lived cookie file. Raw child
+    // output never crosses IPC; only a coarse internal failure category is kept.
     const runOnce = (cookiesFile: string | null): Promise<string> => {
       const runArgs = [...ytArgs];
       if (cookiesFile) runArgs.push('--cookies', cookiesFile);
@@ -216,10 +363,10 @@ export function registerYtdlpIpc(): void {
         });
 
         child.stderr?.on('data', (d) => { stderr += String(d); });
-        child.on('error', () => reject(new Error('Không thể khởi động bộ tải video. Vui lòng thử lại.')));
+        child.on('error', () => reject(new DownloadAttemptError('generic')));
         child.on('close', async (code) => {
           if (code !== 0) {
-            reject(new Error('Không thể tải video từ liên kết này. Hãy kiểm tra liên kết hoặc thử lại sau.'));
+            reject(new DownloadAttemptError(isDouyin ? classifyDouyinFailure(stderr) : 'generic'));
             return;
           }
           // Fall back to scanning the source dir if --print gave nothing usable.
@@ -243,19 +390,58 @@ export function registerYtdlpIpc(): void {
       });
     };
 
-    // Douyin rejects cookieless requests ("Fresh cookies … are needed"). Its guest
-    // `ttwid` cookie is enough to unblock downloads, and it's set on the first page
-    // load — no login needed — so we harvest it silently in a hidden window. Reuse
-    // the persisted cookies.txt if present; otherwise harvest before downloading.
-    const host = parsed.hostname.replace(/^www\./, '');
-    const needsCookies = host === 'douyin.com' || host.endsWith('.douyin.com');
-    if (!needsCookies) return await runOnce(null);
-
-    const cookiesFile = douyinCookiesPath();
-    if (!(await fs.access(cookiesFile).then(() => true).catch(() => false))) {
-      await harvestDouyinCookies();
+    if (!isDouyin) {
+      try {
+        return await runOnce(null);
+      } catch {
+        throw new Error('Không thể tải video từ liên kết này. Hãy kiểm tra liên kết hoặc thử lại sau.');
+      }
     }
-    return await runOnce(cookiesFile);
+
+    // Always export the current isolated session into a unique temporary file.
+    // If Douyin rejects it, renew only the verification cookies and retry once.
+    // A second session rejection asks the renderer to offer an explicit login.
+    const cookiesFile = douyinCookiesPath();
+    await fs.unlink(legacyDouyinCookiesPath()).catch(() => undefined);
+    try {
+      if (!(await harvestDouyinCookies(cookiesFile))) throw new Error(DOUYIN_LOGIN_REQUIRED);
+      try {
+        return await runOnce(cookiesFile);
+      } catch (error) {
+        if (!(error instanceof DownloadAttemptError) || error.kind !== 'session') {
+          throw new Error('Không thể tải video từ liên kết này. Hãy kiểm tra liên kết hoặc thử lại sau.');
+        }
+      }
+
+      await clearDouyinRefreshCookies();
+      if (!(await harvestDouyinCookies(cookiesFile))) throw new Error(DOUYIN_LOGIN_REQUIRED);
+      try {
+        return await runOnce(cookiesFile);
+      } catch (error) {
+        if (error instanceof DownloadAttemptError && error.kind === 'session') {
+          throw new Error(DOUYIN_LOGIN_REQUIRED);
+        }
+        throw new Error('Không thể tải video từ liên kết này. Hãy kiểm tra liên kết hoặc thử lại sau.');
+      }
+    } finally {
+      await fs.unlink(cookiesFile).catch(() => undefined);
+    }
+  });
+
+  ipcMain.handle('ytdlp:douyinLogin', async (e): Promise<boolean> => {
+    const parent = BrowserWindow.fromWebContents(e.sender);
+    // A login prompt follows a rejected session. Remove only prior authentication
+    // cookies first so a stale server-invalid session cannot be mistaken for a
+    // successful new login by the cookie watcher.
+    if (!douyinLoginPromise) await clearDouyinAuthCookies();
+    return await openDouyinLoginWindow(parent);
+  });
+
+  ipcMain.handle('ytdlp:douyinClearSession', async (): Promise<void> => {
+    if (douyinLoginWindow && !douyinLoginWindow.isDestroyed()) douyinLoginWindow.close();
+    const ses = session.fromPartition(DOUYIN_PARTITION);
+    await ses.clearStorageData();
+    await fs.unlink(legacyDouyinCookiesPath()).catch(() => undefined);
   });
 
   // Let the user pick a local video/audio file and copy it into <project>/source/.
