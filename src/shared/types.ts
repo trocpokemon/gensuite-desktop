@@ -361,7 +361,7 @@ export interface YtdlpProgress {
   projectId: string;
   /** Download completion 0–100. */
   percent: number;
-  phase?: 'downloading' | 'merging' | 'complete';
+  phase?: 'preparing' | 'downloading' | 'merging' | 'complete';
 }
 
 export interface PickTextResult {
@@ -502,6 +502,10 @@ export interface GensuiteBridge {
     loginDouyin(): Promise<boolean>;
     /** Remove the isolated Douyin session retained by the app. */
     clearDouyinSession(): Promise<void>;
+    /** Open an isolated TikTok sign-in window after explicit user consent. */
+    loginTikTok(): Promise<boolean>;
+    /** Remove the isolated TikTok session retained by the app. */
+    clearTikTokSession(): Promise<void>;
     /** Open a file picker and copy a local video/audio into <project>/source/. Returns null if cancelled. */
     import(projectId: string): Promise<string | null>;
     onProgress(cb: (p: YtdlpProgress) => void): () => void;

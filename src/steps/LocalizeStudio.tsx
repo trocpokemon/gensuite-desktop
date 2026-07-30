@@ -7,7 +7,7 @@ import { VoiceConfigPanel } from '../components/VoiceConfigPanel';
 import { getTranscriptionProvider } from '../providers/transcription';
 import { getScriptProvider } from '../providers/script';
 import { getVoiceProvider } from '../providers/voice';
-import { missingKeyService, serviceLabel, errorMessage, isDouyinLoginRequired } from '../providers/errors';
+import { missingKeyService, serviceLabel, errorMessage, loginRequiredPlatform, type VideoLoginPlatform } from '../providers/errors';
 import type { SubtitleConfig, SubtitlePosition, TranscriptionEngine, WhisperModelName } from '../shared/types';
 
 interface Props { onOpenSettings: () => void; }
@@ -77,9 +77,9 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
   const [resultPath, setResultPath] = useState('');
   const [missingKey, setMissingKey] = useState<string | null>(null);
   const [error, setError] = useState('');
-  const [douyinLoginRequired, setDouyinLoginRequired] = useState(false);
-  const [douyinLoginBusy, setDouyinLoginBusy] = useState(false);
-  const [douyinSessionCleared, setDouyinSessionCleared] = useState(false);
+  const [videoLoginPlatform, setVideoLoginPlatform] = useState<VideoLoginPlatform | null>(null);
+  const [videoLoginBusy, setVideoLoginBusy] = useState(false);
+  const [videoSessionCleared, setVideoSessionCleared] = useState(false);
 
   const running = stage !== 'idle' && stage !== 'done' && stage !== 'error' && stage !== 'voice-error';
   const runningRef = useRef(running);
@@ -134,8 +134,8 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
     if (running) return;
     setError('');
     setMissingKey(null);
-    setDouyinLoginRequired(false);
-    setDouyinSessionCleared(false);
+    setVideoLoginPlatform(null);
+    setVideoSessionCleared(false);
     setResultPath('');
     setDownloadPercent(0);
     setMergePercent(0);
@@ -176,44 +176,54 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
       await voiceAndMerge();
     } catch (err) {
       const service = missingKeyService(err);
+      const loginPlatform = loginRequiredPlatform(err);
       if (service) setMissingKey(service);
-      else if (isDouyinLoginRequired(err)) setDouyinLoginRequired(true);
+      else if (loginPlatform) setVideoLoginPlatform(loginPlatform);
       else setError(errorMessage(err));
       setStage('error');
     }
   };
 
-  const loginDouyin = async () => {
-    if (douyinLoginBusy || running) return;
-    setDouyinLoginBusy(true);
+  const loginVideoPlatform = async () => {
+    if (!videoLoginPlatform || videoLoginBusy || running) return;
+    const platform = videoLoginPlatform;
+    const platformName = platform === 'douyin' ? 'Douyin' : 'TikTok';
+    setVideoLoginBusy(true);
     setError('');
-    setDouyinSessionCleared(false);
+    setVideoSessionCleared(false);
     try {
-      const authenticated = await window.gensuite.ytdlp.loginDouyin();
-      if (!authenticated) {
-        setError('Chưa hoàn tất đăng nhập Douyin. Hãy thử lại khi bạn sẵn sàng.');
+      const sessionReady = platform === 'douyin'
+        ? await window.gensuite.ytdlp.loginDouyin()
+        : await window.gensuite.ytdlp.loginTikTok();
+      if (!sessionReady) {
+        setError(platform === 'douyin'
+          ? 'Douyin chưa cấp được phiên khách. Vui lòng thử lại sau.'
+          : 'Chưa hoàn tất đăng nhập TikTok. Hãy thử lại khi bạn sẵn sàng.');
         return;
       }
-      setDouyinLoginRequired(false);
+      setVideoLoginPlatform(null);
       await run();
     } catch {
-      setError('Không thể mở cửa sổ đăng nhập Douyin. Vui lòng thử lại.');
+      setError(`Không thể mở cửa sổ đăng nhập ${platformName}. Vui lòng thử lại.`);
     } finally {
-      setDouyinLoginBusy(false);
+      setVideoLoginBusy(false);
     }
   };
 
-  const clearDouyinSession = async () => {
-    if (douyinLoginBusy || running) return;
-    setDouyinLoginBusy(true);
+  const clearVideoPlatformSession = async () => {
+    if (!videoLoginPlatform || videoLoginBusy || running) return;
+    const platform = videoLoginPlatform;
+    const platformName = platform === 'douyin' ? 'Douyin' : 'TikTok';
+    setVideoLoginBusy(true);
     setError('');
     try {
-      await window.gensuite.ytdlp.clearDouyinSession();
-      setDouyinSessionCleared(true);
+      if (platform === 'douyin') await window.gensuite.ytdlp.clearDouyinSession();
+      else await window.gensuite.ytdlp.clearTikTokSession();
+      setVideoSessionCleared(true);
     } catch {
-      setError('Không thể xóa phiên Douyin. Vui lòng thử lại.');
+      setError(`Không thể xóa phiên ${platformName}. Vui lòng thử lại.`);
     } finally {
-      setDouyinLoginBusy(false);
+      setVideoLoginBusy(false);
     }
   };
 
@@ -292,7 +302,9 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
 
   const stageLabel = (): string => {
     switch (stage) {
-      case 'download': return downloadPhase === 'merging' ? 'Đang ghép video tải về…' : `Đang tải video ${Math.round(downloadPercent)}%`;
+      case 'download': return downloadPhase === 'preparing' ? 'Đang chuẩn bị và xác nhận quyền truy cập…'
+        : downloadPhase === 'merging' ? 'Đang ghép video tải về…'
+        : `Đang tải video ${Math.round(downloadPercent)}%`;
       case 'transcribe':
         return transcribePhase === 'extracting' ? 'Đang trích âm thanh…'
           : transcribePhase === 'downloading-model' ? `Đang chuẩn bị dữ liệu nhận dạng${modelPercent !== null ? ` ${modelPercent}%` : '…'}`
@@ -469,16 +481,16 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
           <button onClick={onOpenSettings} className="rounded-lg bg-amber-300 px-3 py-2 text-xs font-bold text-black">Mở Cài đặt</button>
         </div>
       )}
-      {douyinLoginRequired && (
+      {videoLoginPlatform && (
         <div className="mb-5 rounded-xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
-          <p className="flex items-center gap-2 font-semibold"><LogIn size={16} /> Douyin cần xác nhận phiên truy cập</p>
-          <p className="mt-2 text-xs leading-5 text-amber-100/65">Một cửa sổ Douyin riêng sẽ mở để bạn tự đăng nhập. Ứng dụng không đọc mật khẩu hoặc dữ liệu từ trình duyệt chính.</p>
-          {douyinSessionCleared && <p className="mt-2 text-xs text-emerald-300">Đã xóa phiên cũ. Bạn có thể đăng nhập lại.</p>}
+          <p className="flex items-center gap-2 font-semibold"><LogIn size={16} /> {videoLoginPlatform === 'douyin' ? 'Douyin cần xác nhận phiên truy cập' : 'TikTok cần đăng nhập để mở nội dung này'}</p>
+          <p className="mt-2 text-xs leading-5 text-amber-100/65">{videoLoginPlatform === 'douyin' ? 'Trong cửa sổ Douyin, hãy bấm nút Đăng nhập rồi đóng cửa sổ; không cần nhập tài khoản.' : 'Một cửa sổ TikTok riêng sẽ mở để bạn tự đăng nhập.'} Ứng dụng không đọc mật khẩu hoặc dữ liệu từ trình duyệt chính.</p>
+          {videoSessionCleared && <p className="mt-2 text-xs text-emerald-300">Đã xóa phiên cũ. Bạn có thể đăng nhập lại.</p>}
           <div className="mt-3 flex flex-wrap gap-2">
-            <button onClick={() => void loginDouyin()} disabled={douyinLoginBusy} className="inline-flex items-center gap-2 rounded-lg bg-amber-300 px-4 py-2.5 text-xs font-bold text-black disabled:opacity-50">
-              {douyinLoginBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} Đăng nhập Douyin
+            <button onClick={() => void loginVideoPlatform()} disabled={videoLoginBusy} className="inline-flex items-center gap-2 rounded-lg bg-amber-300 px-4 py-2.5 text-xs font-bold text-black disabled:opacity-50">
+              {videoLoginBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} {videoLoginPlatform === 'douyin' ? 'Mở Douyin làm mới phiên' : 'Đăng nhập TikTok'}
             </button>
-            <button onClick={() => void clearDouyinSession()} disabled={douyinLoginBusy} className="inline-flex items-center gap-2 rounded-lg border border-amber-200/20 px-3 py-2.5 text-xs font-semibold text-amber-100/70 disabled:opacity-50">
+            <button onClick={() => void clearVideoPlatformSession()} disabled={videoLoginBusy} className="inline-flex items-center gap-2 rounded-lg border border-amber-200/20 px-3 py-2.5 text-xs font-semibold text-amber-100/70 disabled:opacity-50">
               <Trash2 size={14} /> Xóa phiên cũ
             </button>
           </div>

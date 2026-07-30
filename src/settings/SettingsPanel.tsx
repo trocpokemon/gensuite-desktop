@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { X, Eye, EyeOff, Save, Loader2, ExternalLink } from 'lucide-react';
+import { X, Eye, EyeOff, Save, Loader2, ExternalLink, ShieldCheck, Trash2 } from 'lucide-react';
 import { useSettingsStore } from '../store/settingsStore';
 import type { AppSettings } from '../shared/types';
 
@@ -25,6 +25,8 @@ export function SettingsPanel({ onClose }: Props) {
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [clearingSession, setClearingSession] = useState<'tiktok' | 'douyin' | null>(null);
+  const [sessionMessage, setSessionMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
   // Sync the draft when the store finishes loading after mount.
   useEffect(() => {
@@ -43,6 +45,22 @@ export function SettingsPanel({ onClose }: Props) {
     }
   };
 
+  const clearVideoSession = async (platform: 'tiktok' | 'douyin') => {
+    if (clearingSession) return;
+    const platformName = platform === 'tiktok' ? 'TikTok' : 'Douyin';
+    setClearingSession(platform);
+    setSessionMessage(null);
+    try {
+      if (platform === 'tiktok') await window.gensuite.ytdlp.clearTikTokSession();
+      else await window.gensuite.ytdlp.clearDouyinSession();
+      setSessionMessage({ kind: 'success', text: `Đã xóa phiên ${platformName}.` });
+    } catch {
+      setSessionMessage({ kind: 'error', text: `Không thể xóa phiên ${platformName}. Vui lòng thử lại.` });
+    } finally {
+      setClearingSession(null);
+    }
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-lg backdrop-blur-sm"
@@ -54,8 +72,8 @@ export function SettingsPanel({ onClose }: Props) {
       >
         <header className="flex items-center justify-between border-b border-white/10 p-lg">
           <div>
-            <h2 className="text-lg font-bold">Cài đặt API</h2>
-            <p className="text-xs text-text/50">Khóa được lưu cục bộ trên máy bạn.</p>
+            <h2 className="text-lg font-bold">Cài đặt</h2>
+            <p className="text-xs text-text/50">Khóa và dữ liệu phiên được quản lý trên thiết bị này.</p>
           </div>
           <button
             onClick={onClose}
@@ -109,6 +127,41 @@ export function SettingsPanel({ onClose }: Props) {
               </button>
             </label>
           ))}
+
+          <section className="mt-sm border-t border-white/10 pt-lg">
+            <div className="flex items-start gap-3">
+              <span className="rounded-xl bg-emerald-400/10 p-2.5 text-emerald-300"><ShieldCheck size={19} /></span>
+              <div>
+                <h3 className="text-sm font-semibold text-white">Dữ liệu phiên tải video</h3>
+                <p className="mt-1 text-xs leading-5 text-text/50">Xóa phiên đăng nhập được lưu riêng trong ứng dụng. Dữ liệu trong trình duyệt chính không bị ảnh hưởng.</p>
+              </div>
+            </div>
+
+            <div className="mt-md grid gap-sm sm:grid-cols-2">
+              {(['tiktok', 'douyin'] as const).map((platform) => {
+                const platformName = platform === 'tiktok' ? 'TikTok' : 'Douyin';
+                const clearing = clearingSession === platform;
+                return (
+                  <button
+                    key={platform}
+                    type="button"
+                    onClick={() => void clearVideoSession(platform)}
+                    disabled={Boolean(clearingSession)}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-red-400/20 bg-red-400/[0.06] px-3 py-3 text-xs font-semibold text-red-200/80 transition-colors hover:border-red-300/35 hover:bg-red-400/10 disabled:opacity-45"
+                  >
+                    {clearing ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+                    Xóa phiên {platformName}
+                  </button>
+                );
+              })}
+            </div>
+
+            {sessionMessage && (
+              <p className={`mt-sm text-xs ${sessionMessage.kind === 'success' ? 'text-emerald-300' : 'text-red-300'}`}>
+                {sessionMessage.text}
+              </p>
+            )}
+          </section>
         </div>
 
         <footer className="flex items-center justify-end gap-sm border-t border-white/10 p-lg">

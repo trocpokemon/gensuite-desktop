@@ -8,7 +8,7 @@ import { useSettingsStore } from '../store/settingsStore';
 import { getVoiceProvider } from '../providers/voice';
 import { getTranscriptionProvider } from '../providers/transcription';
 import { getScriptProvider } from '../providers/script';
-import { errorMessage, isDouyinLoginRequired, missingKeyService, serviceLabel } from '../providers/errors';
+import { errorMessage, loginRequiredPlatform, missingKeyService, serviceLabel, type VideoLoginPlatform } from '../providers/errors';
 import { localFileUrl } from '../shared/localFile';
 import type { ScriptEngine, TranscriptSegment } from '../shared/types';
 
@@ -100,52 +100,62 @@ function DownloadTool() {
   const [phase, setPhase] = useState('');
   const [result, setResult] = useState('');
   const [error, setError] = useState('');
-  const [douyinLoginRequired, setDouyinLoginRequired] = useState(false);
-  const [douyinLoginBusy, setDouyinLoginBusy] = useState(false);
-  const [douyinSessionCleared, setDouyinSessionCleared] = useState(false);
+  const [videoLoginPlatform, setVideoLoginPlatform] = useState<VideoLoginPlatform | null>(null);
+  const [videoLoginBusy, setVideoLoginBusy] = useState(false);
+  const [videoSessionCleared, setVideoSessionCleared] = useState(false);
   useEffect(() => window.gensuite.ytdlp.onProgress((progress) => { if (progress.projectId === projectId) { setPercent(progress.percent); setPhase(progress.phase || ''); } }), [projectId]);
   const run = async () => {
     if (!url.trim() || busy) return;
-    setBusy(true); setError(''); setResult(''); setPercent(0); setDouyinLoginRequired(false); setDouyinSessionCleared(false);
+    setBusy(true); setError(''); setResult(''); setPercent(0); setVideoLoginPlatform(null); setVideoSessionCleared(false);
     try {
       const sourcePath = await window.gensuite.ytdlp.download({ projectId, url: url.trim() });
       const saved = await window.gensuite.files.saveCopy({ sourcePath, defaultName: 'video.mp4' });
       if (saved) setResult(saved);
     } catch (err) {
-      if (isDouyinLoginRequired(err)) setDouyinLoginRequired(true);
+      const loginPlatform = loginRequiredPlatform(err);
+      if (loginPlatform) setVideoLoginPlatform(loginPlatform);
       else setError(errorMessage(err));
     } finally { setBusy(false); }
   };
-  const loginDouyin = async () => {
-    if (douyinLoginBusy || busy) return;
-    setDouyinLoginBusy(true);
+  const loginVideoPlatform = async () => {
+    if (!videoLoginPlatform || videoLoginBusy || busy) return;
+    const platform = videoLoginPlatform;
+    const platformName = platform === 'douyin' ? 'Douyin' : 'TikTok';
+    setVideoLoginBusy(true);
     setError('');
-    setDouyinSessionCleared(false);
+    setVideoSessionCleared(false);
     try {
-      const authenticated = await window.gensuite.ytdlp.loginDouyin();
-      if (!authenticated) {
-        setError('Chưa hoàn tất đăng nhập Douyin. Hãy thử lại khi bạn sẵn sàng.');
+      const sessionReady = platform === 'douyin'
+        ? await window.gensuite.ytdlp.loginDouyin()
+        : await window.gensuite.ytdlp.loginTikTok();
+      if (!sessionReady) {
+        setError(platform === 'douyin'
+          ? 'Douyin chưa cấp được phiên khách. Vui lòng thử lại sau.'
+          : 'Chưa hoàn tất đăng nhập TikTok. Hãy thử lại khi bạn sẵn sàng.');
         return;
       }
-      setDouyinLoginRequired(false);
+      setVideoLoginPlatform(null);
       await run();
     } catch {
-      setError('Không thể mở cửa sổ đăng nhập Douyin. Vui lòng thử lại.');
+      setError(`Không thể mở cửa sổ đăng nhập ${platformName}. Vui lòng thử lại.`);
     } finally {
-      setDouyinLoginBusy(false);
+      setVideoLoginBusy(false);
     }
   };
-  const clearDouyinSession = async () => {
-    if (douyinLoginBusy || busy) return;
-    setDouyinLoginBusy(true);
+  const clearVideoPlatformSession = async () => {
+    if (!videoLoginPlatform || videoLoginBusy || busy) return;
+    const platform = videoLoginPlatform;
+    const platformName = platform === 'douyin' ? 'Douyin' : 'TikTok';
+    setVideoLoginBusy(true);
     setError('');
     try {
-      await window.gensuite.ytdlp.clearDouyinSession();
-      setDouyinSessionCleared(true);
+      if (platform === 'douyin') await window.gensuite.ytdlp.clearDouyinSession();
+      else await window.gensuite.ytdlp.clearTikTokSession();
+      setVideoSessionCleared(true);
     } catch {
-      setError('Không thể xóa phiên Douyin. Vui lòng thử lại.');
+      setError(`Không thể xóa phiên ${platformName}. Vui lòng thử lại.`);
     } finally {
-      setDouyinLoginBusy(false);
+      setVideoLoginBusy(false);
     }
   };
   return (
@@ -154,22 +164,22 @@ function DownloadTool() {
         <div className="mb-5 inline-flex rounded-xl bg-cyan-400/10 p-3 text-cyan-300"><Download size={23} /></div>
         <h2 className="text-lg font-bold">Dán liên kết video</h2>
         <p className="mt-2 text-sm leading-6 text-white/40">Hỗ trợ tải video từ nhiều nền tảng phổ biến và tự động chọn chất lượng tốt nhất.</p>
-        <input autoFocus value={url} onChange={(event) => setUrl(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void run()} disabled={busy || douyinLoginBusy} placeholder="https://youtube.com/watch?v=…" className="field-surface mt-6 w-full rounded-xl px-4 py-3.5 text-sm outline-none disabled:opacity-50" />
-        <button onClick={() => void run()} disabled={!url.trim() || busy || douyinLoginBusy} className="primary-action mt-4 flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-40">
+        <input autoFocus value={url} onChange={(event) => setUrl(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void run()} disabled={busy || videoLoginBusy} placeholder="https://youtube.com/watch?v=…" className="field-surface mt-6 w-full rounded-xl px-4 py-3.5 text-sm outline-none disabled:opacity-50" />
+        <button onClick={() => void run()} disabled={!url.trim() || busy || videoLoginBusy} className="primary-action mt-4 flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-40">
           {busy ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
-          {busy ? (phase === 'merging' ? 'Đang hoàn thiện video…' : `Đang tải ${Math.round(percent)}%`) : 'Tải video'}
+          {busy ? (phase === 'preparing' ? 'Đang chuẩn bị video…' : phase === 'merging' ? 'Đang hoàn thiện video…' : `Đang tải ${Math.round(percent)}%`) : 'Tải video'}
         </button>
         {busy && <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-cyan-400 transition-all" style={{ width: `${percent}%` }} /></div>}
-        {douyinLoginRequired && (
+        {videoLoginPlatform && (
           <div className="mt-4 rounded-xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
-            <p className="flex items-center gap-2 font-semibold"><LogIn size={16} /> Douyin cần xác nhận phiên truy cập</p>
-            <p className="mt-2 text-xs leading-5 text-amber-100/65">Một cửa sổ Douyin riêng sẽ mở để bạn tự đăng nhập. Ứng dụng không đọc mật khẩu hoặc dữ liệu từ trình duyệt chính.</p>
-            {douyinSessionCleared && <p className="mt-2 text-xs text-emerald-300">Đã xóa phiên cũ. Bạn có thể đăng nhập lại.</p>}
+            <p className="flex items-center gap-2 font-semibold"><LogIn size={16} /> {videoLoginPlatform === 'douyin' ? 'Douyin cần xác nhận phiên truy cập' : 'TikTok cần đăng nhập để mở nội dung này'}</p>
+            <p className="mt-2 text-xs leading-5 text-amber-100/65">{videoLoginPlatform === 'douyin' ? 'Trong cửa sổ Douyin, hãy bấm nút Đăng nhập rồi đóng cửa sổ; không cần nhập tài khoản.' : 'Một cửa sổ TikTok riêng sẽ mở để bạn tự đăng nhập.'} Ứng dụng không đọc mật khẩu hoặc dữ liệu từ trình duyệt chính.</p>
+            {videoSessionCleared && <p className="mt-2 text-xs text-emerald-300">Đã xóa phiên cũ. Bạn có thể đăng nhập lại.</p>}
             <div className="mt-3 flex flex-wrap gap-2">
-              <button onClick={() => void loginDouyin()} disabled={douyinLoginBusy} className="inline-flex items-center gap-2 rounded-lg bg-amber-300 px-4 py-2.5 text-xs font-bold text-black disabled:opacity-50">
-                {douyinLoginBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} Đăng nhập Douyin
+              <button onClick={() => void loginVideoPlatform()} disabled={videoLoginBusy} className="inline-flex items-center gap-2 rounded-lg bg-amber-300 px-4 py-2.5 text-xs font-bold text-black disabled:opacity-50">
+                {videoLoginBusy ? <Loader2 size={14} className="animate-spin" /> : <LogIn size={14} />} {videoLoginPlatform === 'douyin' ? 'Mở Douyin làm mới phiên' : 'Đăng nhập TikTok'}
               </button>
-              <button onClick={() => void clearDouyinSession()} disabled={douyinLoginBusy} className="inline-flex items-center gap-2 rounded-lg border border-amber-200/20 px-3 py-2.5 text-xs font-semibold text-amber-100/70 disabled:opacity-50">
+              <button onClick={() => void clearVideoPlatformSession()} disabled={videoLoginBusy} className="inline-flex items-center gap-2 rounded-lg border border-amber-200/20 px-3 py-2.5 text-xs font-semibold text-amber-100/70 disabled:opacity-50">
                 <Trash2 size={14} /> Xóa phiên cũ
               </button>
             </div>

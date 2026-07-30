@@ -4,10 +4,15 @@
 
 const PREFIX = 'MISSING_KEY:';
 const DOUYIN_LOGIN_REQUIRED = 'DOUYIN_LOGIN_REQUIRED';
+const TIKTOK_LOGIN_REQUIRED = 'TIKTOK_LOGIN_REQUIRED';
 
-export function isDouyinLoginRequired(err: unknown): boolean {
+export type VideoLoginPlatform = 'douyin' | 'tiktok';
+
+export function loginRequiredPlatform(err: unknown): VideoLoginPlatform | null {
   const msg = err instanceof Error ? err.message : String(err);
-  return msg.includes(DOUYIN_LOGIN_REQUIRED);
+  if (msg.includes(DOUYIN_LOGIN_REQUIRED)) return 'douyin';
+  if (msg.includes(TIKTOK_LOGIN_REQUIRED)) return 'tiktok';
+  return null;
 }
 
 export function missingKeyService(err: unknown): string | null {
@@ -40,7 +45,10 @@ function isNetworkError(msg: string): boolean {
 export function errorMessage(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes(DOUYIN_LOGIN_REQUIRED)) {
-    return 'Douyin cần xác nhận phiên truy cập. Hãy đăng nhập để tiếp tục.';
+    return 'Douyin cần xác nhận lại phiên truy cập. Không bắt buộc đăng nhập tài khoản.';
+  }
+  if (msg.includes(TIKTOK_LOGIN_REQUIRED)) {
+    return 'TikTok cần đăng nhập để mở nội dung này.';
   }
   if (isNetworkError(msg)) {
     return 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng (hoặc tường lửa/VPN) rồi thử lại.';

@@ -40,16 +40,19 @@ function normalizeSourceUrl(raw: string): string {
 const DOUYIN_PARTITION = 'persist:douyin';
 const DOUYIN_LOGIN_REQUIRED = 'DOUYIN_LOGIN_REQUIRED';
 const DOUYIN_REQUIRED_COOKIE_NAMES = new Set(['ttwid', 's_v_web_id']);
-const DOUYIN_AUTH_COOKIE_NAMES = new Set([
-  'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard', 'uid_tt', 'uid_tt_ss',
-  'passport_auth_status', 'passport_auth_status_ss',
-]);
 const DOUYIN_REFRESH_COOKIE_NAMES = new Set([
   'ttwid', 's_v_web_id', '__ac_nonce', '__ac_signature', 'msToken',
+]);
+const TIKTOK_PARTITION = 'persist:tiktok';
+const TIKTOK_LOGIN_REQUIRED = 'TIKTOK_LOGIN_REQUIRED';
+const TIKTOK_AUTH_COOKIE_NAMES = new Set([
+  'sessionid', 'sessionid_ss', 'sid_tt', 'sid_guard', 'uid_tt', 'uid_tt_ss',
 ]);
 
 let douyinLoginWindow: BrowserWindow | null = null;
 let douyinLoginPromise: Promise<boolean> | null = null;
+let tiktokLoginWindow: BrowserWindow | null = null;
+let tiktokLoginPromise: Promise<boolean> | null = null;
 
 function douyinCookiesPath(): string {
   return path.join(app.getPath('temp'), `gensuite-douyin-${process.pid}-${randomUUID()}.txt`);
@@ -57,6 +60,10 @@ function douyinCookiesPath(): string {
 
 function legacyDouyinCookiesPath(): string {
   return path.join(app.getPath('userData'), 'douyin-cookies.txt');
+}
+
+function tiktokCookiesPath(): string {
+  return path.join(app.getPath('temp'), `gensuite-tiktok-${process.pid}-${randomUUID()}.txt`);
 }
 
 // Serialize Electron cookies into the Netscape cookies.txt format yt-dlp expects:
@@ -83,10 +90,6 @@ function cookieIsFresh(cookie: Cookie): boolean {
 
 function hasRequiredDouyinCookies(cookies: Cookie[]): boolean {
   return [...DOUYIN_REQUIRED_COOKIE_NAMES].every((name) => cookies.some((cookie) => cookie.name === name && cookieIsFresh(cookie)));
-}
-
-function hasDouyinLogin(cookies: Cookie[]): boolean {
-  return cookies.some((cookie) => DOUYIN_AUTH_COOKIE_NAMES.has(cookie.name) && cookieIsFresh(cookie));
 }
 
 async function getDouyinCookies(): Promise<Cookie[]> {
@@ -161,10 +164,6 @@ async function clearDouyinRefreshCookies(): Promise<void> {
   await clearDouyinCookiesByName(DOUYIN_REFRESH_COOKIE_NAMES);
 }
 
-async function clearDouyinAuthCookies(): Promise<void> {
-  await clearDouyinCookiesByName(DOUYIN_AUTH_COOKIE_NAMES);
-}
-
 function isAllowedDouyinNavigation(raw: string): boolean {
   try {
     const url = new URL(raw);
@@ -176,7 +175,8 @@ function isAllowedDouyinNavigation(raw: string): boolean {
 }
 
 // Open a visible, isolated Douyin window only after an explicit renderer action.
-// Authentication is detected from session cookies; passwords never cross IPC.
+// Opening Douyin's sign-in panel renews additional guest verification state even
+// when the user does not enter an account. Passwords never cross IPC.
 function openDouyinLoginWindow(parent: BrowserWindow | null): Promise<boolean> {
   if (douyinLoginPromise) {
     if (douyinLoginWindow && !douyinLoginWindow.isDestroyed()) {
@@ -198,7 +198,7 @@ function openDouyinLoginWindow(parent: BrowserWindow | null): Promise<boolean> {
       height: 780,
       minWidth: 820,
       minHeight: 620,
-      title: 'Đăng nhập Douyin',
+      title: 'Làm mới phiên Douyin',
       autoHideMenuBar: true,
       webPreferences: {
         partition: DOUYIN_PARTITION,
@@ -214,11 +214,205 @@ function openDouyinLoginWindow(parent: BrowserWindow | null): Promise<boolean> {
       if (!isAllowedDouyinNavigation(target)) event.preventDefault();
     });
 
+    let settled = false;
+    let accessFailed = false;
+    let gatewayRetries = 0;
+    let closeAfterFailure: NodeJS.Timeout | null = null;
+    const loadTimeout = setTimeout(() => {
+      accessFailed = true;
+      if (!loginWindow.isDestroyed()) loginWindow.close();
+    }, 20000);
+
+    loginWindow.webContents.on('did-finish-load', async () => {
+      if (loginWindow.isDestroyed()) return;
+      const gatewayFailure = await loginWindow.webContents.executeJavaScript(`(() => {
+        const title = document.title || '';
+        const text = (document.body?.innerText || '').slice(0, 500);
+        return /\\b50[234]\\b|gateway\\s*time-?out|bad\\s*gateway|service\\s*unavailable/i.test(title + '\\n' + text);
+      })()`, true).catch(() => false);
+
+      if (!gatewayFailure) {
+        clearTimeout(loadTimeout);
+        loginWindow.show();
+        return;
+      }
+      if (gatewayRetries < 1) {
+        gatewayRetries += 1;
+        setTimeout(() => {
+          if (!loginWindow.isDestroyed()) loginWindow.reload();
+        }, 700);
+        return;
+      }
+
+      await loginWindow.webContents.executeJavaScript(`(() => {
+        document.title = 'Douyin tạm thời không phản hồi';
+        document.body.innerHTML = '<main style="font-family:system-ui,sans-serif;max-width:560px;margin:80px auto;padding:32px;color:#202020"><h1 style="font-size:24px;margin:0 0 14px">Douyin tạm thời không phản hồi</h1><p style="font-size:15px;line-height:1.6;color:#666">Ứng dụng sẽ đóng cửa sổ này. Vui lòng thử lại sau.</p></main>';
+      })()`, true).catch(() => undefined);
+      accessFailed = true;
+      loginWindow.show();
+      closeAfterFailure = setTimeout(() => {
+        if (!loginWindow.isDestroyed()) loginWindow.close();
+      }, 3000);
+    });
+
+    const finish = async () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(loadTimeout);
+      if (closeAfterFailure) clearTimeout(closeAfterFailure);
+      // On a normally loaded page, closing is the user's confirmation that they
+      // opened Douyin's sign-in panel. The subsequent download validates whether
+      // the refreshed guest state is sufficient; no account credentials required.
+      resolve(!accessFailed);
+      douyinLoginWindow = null;
+      douyinLoginPromise = null;
+    };
+
+    loginWindow.once('closed', () => { void finish(); });
+    loginWindow.loadURL('https://www.douyin.com/').catch(() => {
+      accessFailed = true;
+      if (!loginWindow.isDestroyed()) loginWindow.close();
+    });
+  });
+
+  return douyinLoginPromise;
+}
+
+async function getTikTokCookies(): Promise<Cookie[]> {
+  const ses = session.fromPartition(TIKTOK_PARTITION);
+  return await ses.cookies.get({ domain: 'tiktok.com' });
+}
+
+function hasTikTokLogin(cookies: Cookie[]): boolean {
+  return cookies.some((cookie) => TIKTOK_AUTH_COOKIE_NAMES.has(cookie.name) && cookieIsFresh(cookie));
+}
+
+async function writeTikTokCookies(filePath: string): Promise<boolean> {
+  const cookies = await getTikTokCookies();
+  if (!hasTikTokLogin(cookies)) return false;
+  await fs.writeFile(filePath, toNetscapeCookies(cookies), { encoding: 'utf8', mode: 0o600 });
+  return true;
+}
+
+async function clearTikTokAuthCookies(): Promise<void> {
+  const ses = session.fromPartition(TIKTOK_PARTITION);
+  const cookies = await getTikTokCookies().catch(() => []);
+  await Promise.all(cookies
+    .filter((cookie) => TIKTOK_AUTH_COOKIE_NAMES.has(cookie.name))
+    .map((cookie) => {
+      const domain = (cookie.domain || 'www.tiktok.com').replace(/^\./, '');
+      const protocol = cookie.secure ? 'https' : 'http';
+      return ses.cookies.remove(`${protocol}://${domain}${cookie.path || '/'}`, cookie.name).catch(() => undefined);
+    }));
+}
+
+function isAllowedTikTokNavigation(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.replace(/^www\./, '');
+    return url.protocol === 'https:' && (host === 'tiktok.com' || host.endsWith('.tiktok.com'));
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedTikTokAuthNavigation(raw: string): boolean {
+  if (raw === 'about:blank') return true;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.replace(/^www\./, '');
+    if (url.protocol !== 'https:') return false;
+    return [
+      'tiktok.com',
+      'facebook.com',
+      'facebook.net',
+      'fb.com',
+    ].some((domain) => host === domain || host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
+// TikTok may withhold the media stream for account-gated short dramas. Open a
+// dedicated sign-in window only after the renderer receives explicit consent.
+function openTikTokLoginWindow(parent: BrowserWindow | null): Promise<boolean> {
+  if (tiktokLoginPromise) {
+    if (tiktokLoginWindow && !tiktokLoginWindow.isDestroyed()) {
+      tiktokLoginWindow.show();
+      tiktokLoginWindow.focus();
+    }
+    return tiktokLoginPromise;
+  }
+
+  tiktokLoginPromise = new Promise<boolean>((resolve) => {
+    const ses = session.fromPartition(TIKTOK_PARTITION);
+    ses.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+
+    const loginWindow = new BrowserWindow({
+      parent: parent ?? undefined,
+      modal: Boolean(parent),
+      show: false,
+      width: 1100,
+      height: 780,
+      minWidth: 820,
+      minHeight: 620,
+      title: 'Đăng nhập TikTok',
+      autoHideMenuBar: true,
+      webPreferences: {
+        partition: TIKTOK_PARTITION,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    tiktokLoginWindow = loginWindow;
+    const authPopups = new Set<BrowserWindow>();
+    loginWindow.removeMenu();
+    loginWindow.webContents.setWindowOpenHandler((details) => {
+      if (!isAllowedTikTokAuthNavigation(details.url)) return { action: 'deny' };
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          parent: loginWindow,
+          modal: true,
+          width: 620,
+          height: 760,
+          minWidth: 480,
+          minHeight: 600,
+          title: 'Xác nhận đăng nhập TikTok',
+          autoHideMenuBar: true,
+          webPreferences: {
+            partition: TIKTOK_PARTITION,
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+          },
+        },
+      };
+    });
+    loginWindow.webContents.on('did-create-window', (popup) => {
+      authPopups.add(popup);
+      popup.removeMenu();
+      popup.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+      const guardNavigation = (event: Electron.Event, target: string) => {
+        if (!isAllowedTikTokAuthNavigation(target)) event.preventDefault();
+      };
+      popup.webContents.on('will-navigate', guardNavigation);
+      popup.webContents.on('will-redirect', guardNavigation);
+      popup.once('closed', () => authPopups.delete(popup));
+    });
+    loginWindow.webContents.on('will-navigate', (event, target) => {
+      if (!isAllowedTikTokNavigation(target)) event.preventDefault();
+    });
+    loginWindow.webContents.on('will-redirect', (event, target) => {
+      if (!isAllowedTikTokNavigation(target)) event.preventDefault();
+    });
+
     let authenticated = false;
     let settled = false;
     const poll = setInterval(async () => {
-      const cookies = await getDouyinCookies().catch(() => []);
-      if (!hasDouyinLogin(cookies)) return;
+      const cookies = await getTikTokCookies().catch(() => []);
+      if (!hasTikTokLogin(cookies)) return;
       authenticated = true;
       clearInterval(poll);
       setTimeout(() => {
@@ -230,20 +424,24 @@ function openDouyinLoginWindow(parent: BrowserWindow | null): Promise<boolean> {
       if (settled) return;
       settled = true;
       clearInterval(poll);
-      const cookies = await getDouyinCookies().catch(() => []);
-      resolve(authenticated || hasDouyinLogin(cookies));
-      douyinLoginWindow = null;
-      douyinLoginPromise = null;
+      for (const popup of authPopups) {
+        if (!popup.isDestroyed()) popup.close();
+      }
+      authPopups.clear();
+      const cookies = await getTikTokCookies().catch(() => []);
+      resolve(authenticated || hasTikTokLogin(cookies));
+      tiktokLoginWindow = null;
+      tiktokLoginPromise = null;
     };
 
     loginWindow.once('ready-to-show', () => loginWindow.show());
     loginWindow.once('closed', () => { void finish(); });
-    loginWindow.loadURL('https://www.douyin.com/').catch(() => {
+    loginWindow.loadURL('https://www.tiktok.com/login').catch(() => {
       if (!loginWindow.isDestroyed()) loginWindow.close();
     });
   });
 
-  return douyinLoginPromise;
+  return tiktokLoginPromise;
 }
 
 class DownloadAttemptError extends Error {
@@ -254,6 +452,12 @@ class DownloadAttemptError extends Error {
 
 function classifyDouyinFailure(stderr: string): 'session' | 'generic' {
   return /fresh cookies|failed to parse json|sign in|log[ -]?in|verification|captcha|http error (?:403|429)/i.test(stderr)
+    ? 'session'
+    : 'generic';
+}
+
+function classifyTikTokFailure(stderr: string): 'session' | 'generic' {
+  return /universal data for rehydration|no video formats found|sign in|log[ -]?in|verification|captcha|http error (?:403|429)/i.test(stderr)
     ? 'session'
     : 'generic';
 }
@@ -285,6 +489,7 @@ export function registerYtdlpIpc(): void {
     const sourceUrl = normalizeSourceUrl(url);
     const host = parsed.hostname.replace(/^www\./, '');
     const isDouyin = host === 'douyin.com' || host.endsWith('.douyin.com');
+    const isTikTok = host === 'tiktok.com' || host.endsWith('.tiktok.com');
 
     const binary = ytdlpBinary();
     try {
@@ -310,6 +515,11 @@ export function registerYtdlpIpc(): void {
       '-o', outTemplate,
       '--print', 'after_move:filepath',
     ];
+    if (isDouyin || isTikTok) {
+      // Match a normal browser request so access checks fail fast instead of
+      // leaving the extractor waiting at 0% for tens of seconds.
+      ytArgs.push('--impersonate', 'chrome', '--socket-timeout', '10', '--extractor-retries', '1');
+    }
 
     // YouTube extraction now needs a JS runtime to solve its player challenge.
     // We bundle Deno and expose it via PATH rather than `--js-runtimes deno:<path>`,
@@ -342,7 +552,7 @@ export function registerYtdlpIpc(): void {
         let finalPath = '';
         let stdoutBuffer = '';
 
-        emit({ projectId, percent: 0, phase: 'downloading' });
+        emit({ projectId, percent: 0, phase: 'preparing' });
 
         child.stdout?.on('data', (data) => {
           stdoutBuffer += String(data);
@@ -366,7 +576,12 @@ export function registerYtdlpIpc(): void {
         child.on('error', () => reject(new DownloadAttemptError('generic')));
         child.on('close', async (code) => {
           if (code !== 0) {
-            reject(new DownloadAttemptError(isDouyin ? classifyDouyinFailure(stderr) : 'generic'));
+            const kind = isDouyin
+              ? classifyDouyinFailure(stderr)
+              : isTikTok
+                ? classifyTikTokFailure(stderr)
+                : 'generic';
+            reject(new DownloadAttemptError(kind));
             return;
           }
           // Fall back to scanning the source dir if --print gave nothing usable.
@@ -390,6 +605,26 @@ export function registerYtdlpIpc(): void {
       });
     };
 
+    if (isTikTok) {
+      // Public videos still use the ordinary path. Account-gated videos retry
+      // with the isolated TikTok session when one is available; otherwise the UI
+      // offers an explicit sign-in instead of touching the primary browser.
+      const cookiesFile = tiktokCookiesPath();
+      try {
+        const hasSession = await writeTikTokCookies(cookiesFile).catch(() => false);
+        try {
+          return await runOnce(hasSession ? cookiesFile : null);
+        } catch (error) {
+          if (error instanceof DownloadAttemptError && error.kind === 'session') {
+            throw new Error(TIKTOK_LOGIN_REQUIRED);
+          }
+          throw new Error('Không thể tải video từ liên kết này. Hãy kiểm tra liên kết hoặc thử lại sau.');
+        }
+      } finally {
+        await fs.unlink(cookiesFile).catch(() => undefined);
+      }
+    }
+
     if (!isDouyin) {
       try {
         return await runOnce(null);
@@ -404,6 +639,7 @@ export function registerYtdlpIpc(): void {
     const cookiesFile = douyinCookiesPath();
     await fs.unlink(legacyDouyinCookiesPath()).catch(() => undefined);
     try {
+      const hadUsableSession = hasRequiredDouyinCookies(await getDouyinCookies().catch(() => []));
       if (!(await harvestDouyinCookies(cookiesFile))) throw new Error(DOUYIN_LOGIN_REQUIRED);
       try {
         return await runOnce(cookiesFile);
@@ -411,6 +647,10 @@ export function registerYtdlpIpc(): void {
         if (!(error instanceof DownloadAttemptError) || error.kind !== 'session') {
           throw new Error('Không thể tải video từ liên kết này. Hãy kiểm tra liên kết hoặc thử lại sau.');
         }
+        // Immediately after the user clears the session, `harvest` has already
+        // produced a fresh guest state. If Douyin still rejects it, repeating the
+        // same slow request cannot help; ask for explicit sign-in right away.
+        if (!hadUsableSession) throw new Error(DOUYIN_LOGIN_REQUIRED);
       }
 
       await clearDouyinRefreshCookies();
@@ -430,10 +670,8 @@ export function registerYtdlpIpc(): void {
 
   ipcMain.handle('ytdlp:douyinLogin', async (e): Promise<boolean> => {
     const parent = BrowserWindow.fromWebContents(e.sender);
-    // A login prompt follows a rejected session. Remove only prior authentication
-    // cookies first so a stale server-invalid session cannot be mistaken for a
-    // successful new login by the cookie watcher.
-    if (!douyinLoginPromise) await clearDouyinAuthCookies();
+    // Preserve the existing guest state so the page itself remains reachable.
+    // Opening its sign-in panel adds/renews the remaining verification cookies.
     return await openDouyinLoginWindow(parent);
   });
 
@@ -442,6 +680,18 @@ export function registerYtdlpIpc(): void {
     const ses = session.fromPartition(DOUYIN_PARTITION);
     await ses.clearStorageData();
     await fs.unlink(legacyDouyinCookiesPath()).catch(() => undefined);
+  });
+
+  ipcMain.handle('ytdlp:tiktokLogin', async (e): Promise<boolean> => {
+    const parent = BrowserWindow.fromWebContents(e.sender);
+    if (!tiktokLoginPromise) await clearTikTokAuthCookies();
+    return await openTikTokLoginWindow(parent);
+  });
+
+  ipcMain.handle('ytdlp:tiktokClearSession', async (): Promise<void> => {
+    if (tiktokLoginWindow && !tiktokLoginWindow.isDestroyed()) tiktokLoginWindow.close();
+    const ses = session.fromPartition(TIKTOK_PARTITION);
+    await ses.clearStorageData();
   });
 
   // Let the user pick a local video/audio file and copy it into <project>/source/.
