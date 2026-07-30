@@ -533,6 +533,8 @@ export interface GensuiteBridge {
     onCallback(cb: (payload: AuthCallbackPayload) => void): () => void;
   };
   updater: {
+    /** Return the latest cached lifecycle state so a late-mounted UI cannot miss it. */
+    getStatus(): Promise<UpdaterStatus>;
     /** Subscribe to update lifecycle events. Returns an unsubscribe fn. */
     onStatus(cb: (status: UpdaterStatus) => void): () => void;
     check(): void;

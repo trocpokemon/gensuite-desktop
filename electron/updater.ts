@@ -6,6 +6,7 @@ import type { UpdaterStatus } from '../src/shared/types';
 const { autoUpdater } = electronUpdater;
 
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
+let latestStatus: UpdaterStatus = { kind: 'not-available' };
 
 // Wires electron-updater to the renderer: forwards lifecycle events on the
 // `updater:status` channel and accepts check/download/install commands. Only
@@ -16,6 +17,7 @@ export function registerUpdater(getWindow: () => BrowserWindow | null): void {
   autoUpdater.logger = log;
 
   const send = (status: UpdaterStatus) => {
+    latestStatus = status;
     getWindow()?.webContents.send('updater:status', status);
   };
 
@@ -24,8 +26,12 @@ export function registerUpdater(getWindow: () => BrowserWindow | null): void {
   autoUpdater.on('update-not-available', () => send({ kind: 'not-available' }));
   autoUpdater.on('download-progress', (p) => send({ kind: 'downloading', percent: Math.round(p.percent) }));
   autoUpdater.on('update-downloaded', (info) => send({ kind: 'downloaded', version: info.version }));
-  autoUpdater.on('error', (err) => send({ kind: 'error', message: String(err?.message || err) }));
+  autoUpdater.on('error', (err) => {
+    log.error('autoUpdater error', err);
+    send({ kind: 'error', message: 'Không thể kiểm tra bản cập nhật. Vui lòng thử lại sau.' });
+  });
 
+  ipcMain.handle('updater:getStatus', () => latestStatus);
   ipcMain.on('updater:check', () => {
     autoUpdater.checkForUpdates().catch((err) => log.error('checkForUpdates failed', err));
   });

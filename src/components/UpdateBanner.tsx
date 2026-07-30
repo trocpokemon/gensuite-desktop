@@ -10,11 +10,26 @@ export function UpdateBanner() {
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
-    return window.gensuite?.updater?.onStatus((next) => {
+    let liveEventReceived = false;
+    let active = true;
+    const applyStatus = (next: UpdaterStatus) => {
+      if (!active) return;
       setStatus(next);
       // A fresh available/downloaded event should reappear even after dismissal.
       if (next.kind === 'available' || next.kind === 'downloaded') setDismissed(false);
+    };
+    const unsubscribe = window.gensuite?.updater?.onStatus((next) => {
+      liveEventReceived = true;
+      applyStatus(next);
     });
+    void window.gensuite?.updater?.getStatus().then((latest) => {
+      // Do not let an older request response overwrite a newer live event.
+      if (!liveEventReceived) applyStatus(latest);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
   }, []);
 
   if (dismissed) return null;

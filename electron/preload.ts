@@ -116,6 +116,7 @@ const bridge: GensuiteBridge = {
     },
   },
   updater: {
+    getStatus: () => ipcRenderer.invoke('updater:getStatus'),
     onStatus: (cb: (status: UpdaterStatus) => void) => {
       const listener = (_e: unknown, status: UpdaterStatus) => cb(status);
       ipcRenderer.on('updater:status', listener);
