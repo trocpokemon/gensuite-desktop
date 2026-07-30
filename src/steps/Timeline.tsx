@@ -1,121 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import { Film, Loader2, FolderOpen, AlertTriangle, Captions, ChevronDown, Music, X } from 'lucide-react';
+import { Film, Loader2, FolderOpen, AlertTriangle, Captions, Music, X } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { errorMessage } from '../providers/errors';
-import type { ExportScene, SubtitleConfig, SubtitlePosition, MusicConfig } from '../shared/types';
+import type { ExportScene, SubtitleConfig, MusicConfig } from '../shared/types';
+import { SubtitleDesigner } from '../components/SubtitleDesigner';
 import { localFileUrl } from '../shared/localFile';
-
-// A curated set of families that ship with Windows and render Vietnamese well.
-const FONT_CHOICES = ['Arial', 'Segoe UI', 'Tahoma', 'Verdana', 'Times New Roman', 'Georgia', 'Calibri', 'Roboto'];
-// CJK-capable families for Chinese/Japanese/Korean captions. Names match CJK_FONTS
-// in electron/ipc/ffmpeg.ts.
-const CJK_FONT_CHOICES = ['Microsoft YaHei', 'SimHei', 'SimSun', 'PingFang SC', 'Noto Sans CJK SC', 'Malgun Gothic', 'Yu Gothic', 'Meiryo'];
-const POSITION_LABELS: Record<SubtitlePosition, string> = { top: 'Trên', middle: 'Giữa', bottom: 'Dưới' };
-const SAMPLE_CAPTION = 'Phụ đề mẫu — chữ hiển thị đúng như thế này khi xuất video.';
-
-// Mirror the main-process wrapCaption so the preview breaks lines the same way
-// the burned-in subtitle will.
-function wrapPreview(text: string, maxChars: number): string {
-  if (maxChars <= 0 || text.length <= maxChars) return text;
-  const words = text.split(' ');
-  const lines: string[] = [];
-  let current = '';
-  for (const word of words) {
-    if (!current) current = word;
-    else if (current.length + 1 + word.length <= maxChars) current += ` ${word}`;
-    else { lines.push(current); current = word; }
-  }
-  if (current) lines.push(current);
-  return lines.join('\n');
-}
-
-// A live approximation of the burned-in caption so tweaking the options has an
-// immediate visual reference. It is not pixel-exact with libass (outline is
-// faked with layered text-shadows) but tracks font, size, colour, outline,
-// shadow, weight, position and line-wrap faithfully enough to judge by.
-function SubtitlePreview({ sub, ratio, bgImage, bgIsVideo }: { sub: SubtitleConfig; ratio: '16:9' | '9:16'; bgImage?: string; bgIsVideo?: boolean }) {
-  const portrait = ratio === '9:16';
-  // Fixed preview stage height; width follows the aspect ratio.
-  const stageH = portrait ? 260 : 190;
-  const stageW = portrait ? (stageH * 9) / 16 : (stageH * 16) / 9;
-  // Font size is authored as a % of video height; mirror that against the stage.
-  const fontPx = Math.max(8, (stageH * sub.fontSizePct) / 100);
-  // Outline/shadow are authored at 1080p; scale to the stage the same way export does.
-  const scale = stageH / 1080;
-  const outlinePx = sub.outlineWidth * scale;
-  const shadowPx = sub.shadow * scale;
-
-  const o = sub.outlineColor;
-  const step = Math.max(0.5, outlinePx);
-  const outlineShadow = outlinePx > 0
-    ? [
-        `-${step}px 0 ${o}`, `${step}px 0 ${o}`, `0 -${step}px ${o}`, `0 ${step}px ${o}`,
-        `-${step}px -${step}px ${o}`, `${step}px -${step}px ${o}`, `-${step}px ${step}px ${o}`, `${step}px ${step}px ${o}`,
-      ].join(', ')
-    : '';
-  const dropShadow = shadowPx > 0 ? `${shadowPx}px ${shadowPx}px ${shadowPx}px rgba(0,0,0,0.9)` : '';
-  const textShadow = [outlineShadow, dropShadow].filter(Boolean).join(', ') || 'none';
-
-  const justify = sub.position === 'top' ? 'flex-start' : sub.position === 'middle' ? 'center' : 'flex-end';
-  const marginV = stageH * 0.07;
-
-  const bgUrl = localFileUrl(bgImage);
-
-  return (
-    <div className="col-span-2 flex flex-col gap-xs">
-      <span className="text-text/50">Xem trước</span>
-      <div className="flex justify-center rounded-lg border border-white/10 bg-black/40 p-sm">
-        <div
-          className="relative overflow-hidden rounded-md"
-          style={{
-            width: stageW,
-            height: stageH,
-            background: 'linear-gradient(135deg, #2a2a35, #14141c)',
-          }}
-        >
-          {bgUrl && (bgIsVideo ? (
-            <video
-              src={bgUrl}
-              muted
-              playsInline
-              preload="metadata"
-              onLoadedMetadata={(event) => {
-                const video = event.currentTarget;
-                const duration = Number.isFinite(video.duration) ? video.duration : 0;
-                video.currentTime = duration > 0
-                  ? Math.min(Math.max(duration * 0.12, 0.5), Math.max(duration - 0.1, 0))
-                  : 0.5;
-              }}
-              className="absolute inset-0 h-full w-full object-cover"
-            />
-          ) : (
-            <img src={bgUrl} alt="" className="absolute inset-0 h-full w-full object-cover" />
-          ))}
-          <div
-            className="absolute inset-0 flex px-[6%]"
-            style={{ alignItems: justify, justifyContent: 'center', paddingTop: marginV, paddingBottom: marginV }}
-          >
-            <span
-              style={{
-                fontFamily: `"${sub.fontFamily}", sans-serif`,
-                fontSize: fontPx,
-                lineHeight: 1.2,
-                fontWeight: sub.bold ? 700 : 400,
-                color: sub.primaryColor,
-                textShadow,
-                textAlign: 'center',
-                whiteSpace: 'pre-line',
-                textWrap: 'balance',
-              }}
-            >
-              {wrapPreview(SAMPLE_CAPTION, sub.maxCharsPerLine)}
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
 
 // Final step: line up each scene's image with its audio, then mux to MP4 via the
 // bundled FFmpeg (main process). On success the drafts are cleaned and the file
@@ -133,12 +23,12 @@ export function Timeline() {
 
   const [exporting, setExporting] = useState(false);
   const [importingMusic, setImportingMusic] = useState(false);
-  const [showSubOptions, setShowSubOptions] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [outputPath, setOutputPath] = useState<string | null>(null);
   const [progressSec, setProgressSec] = useState(0);
   const [progressTotalSec, setProgressTotalSec] = useState(0);
   const [exportPhase, setExportPhase] = useState<'preparing' | 'encoding' | 'complete'>('preparing');
+  const [alignmentProgress, setAlignmentProgress] = useState({ done: 0, total: 0 });
   const unsub = useRef<(() => void) | null>(null);
 
   const totalDuration = project.scenes.reduce((sum, s) => sum + (s.audioDuration ?? 0), 0);
@@ -170,14 +60,32 @@ export function Timeline() {
     setProgressTotalSec(0);
     setExportPhase('preparing');
     try {
-      const scenes: ExportScene[] = project.scenes.map((s) => ({
-        id: s.id,
-        imagePath: s.imagePath!,
-        visualType: s.visualType,
-        audioPath: s.audioPath!,
-        durationSec: s.audioDuration && s.audioDuration > 0 ? s.audioDuration : 0,
-        narration: s.narration,
-      }));
+      const voiceLanguage = project.settings.voiceConfigs[project.settings.voiceEngine]?.language;
+      setAlignmentProgress({ done: 0, total: sub.enabled ? project.scenes.length : 0 });
+      const scenes: ExportScene[] = [];
+      for (let index = 0; index < project.scenes.length; index += 1) {
+        const scene = project.scenes[index];
+        const wordTimings = sub.enabled
+          ? await alignSceneSubtitle(scene, project.id, voiceLanguage)
+          : undefined;
+        if (sub.enabled && !hasFreshSubtitleTiming(scene)) {
+          useProjectStore.getState().updateScene(scene.id, {
+            subtitleWords: wordTimings,
+            subtitleTimingText: scene.narration,
+            subtitleTimingAudioPath: scene.audioPath,
+          });
+        }
+        scenes.push({
+          id: scene.id,
+          imagePath: scene.imagePath!,
+          visualType: scene.visualType,
+          audioPath: scene.audioPath!,
+          durationSec: scene.audioDuration && scene.audioDuration > 0 ? scene.audioDuration : 0,
+          narration: scene.narration,
+          wordTimings,
+        });
+        if (sub.enabled) setAlignmentProgress({ done: index + 1, total: project.scenes.length });
+      }
 
       const out = await window.gensuite.ffmpeg.export({
         projectId: project.id,
@@ -307,7 +215,7 @@ export function Timeline() {
               <div className="h-full w-1/3 animate-pulse rounded-full bg-gradient-to-r from-transparent via-cta to-transparent" /> :
               <div className="h-full bg-cta transition-all duration-300" style={{ width: `${pct}%` }} />}
           </div>
-          <span className="text-xs text-text/50">{exportPhase === 'preparing' ? 'Đang phân tích thời lượng media và audio…' : progressSec <= 0 ? 'Đang khởi tạo bộ mã hóa…' : `Đang dựng… ${pct}%`}</span>
+          <span className="text-xs text-text/50">{alignmentProgress.total > 0 && alignmentProgress.done < alignmentProgress.total ? `Đang căn phụ đề với lời đọc ${alignmentProgress.done}/${alignmentProgress.total}…` : exportPhase === 'preparing' ? 'Đang phân tích thời lượng media và audio…' : progressSec <= 0 ? 'Đang chuẩn bị video…' : `Đang dựng… ${pct}%`}</span>
         </div>
       )}
 
@@ -333,120 +241,14 @@ export function Timeline() {
               className="size-4 cursor-pointer accent-cta"
             />
             <Captions size={16} className="text-text/60" />
-            <span>Chèn phụ đề (ghi cứng lời đọc vào video)</span>
+            <span>Chèn phụ đề theo nhịp lời đọc</span>
           </label>
-          <button
-            type="button"
-            onClick={() => setShowSubOptions((v) => !v)}
-            disabled={!sub.enabled}
-            className="flex items-center gap-xs rounded-md px-sm py-xs text-xs text-text/60 transition-colors hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Tùy chỉnh
-            <ChevronDown size={14} className={`transition-transform ${showSubOptions ? 'rotate-180' : ''}`} />
-          </button>
         </div>
 
-        {sub.enabled && showSubOptions && (
-          <div className="grid grid-cols-2 gap-md border-t border-white/10 p-md text-xs">
-            <SubtitlePreview sub={sub} ratio={project.settings.aspectRatio} bgImage={previewBg} bgIsVideo={previewIsVideo} />
-
-            <label className="flex flex-col gap-xs">
-              <span className="text-text/50">Phông chữ</span>
-              <select
-                value={sub.fontFamily}
-                onChange={(event) => patchSub({ fontFamily: event.target.value })}
-                className="rounded-md border border-white/10 bg-white/5 px-sm py-xs text-text"
-              >
-                <optgroup label="Latin / Tiếng Việt" className="bg-[#1a1a1a] text-white">
-                  {FONT_CHOICES.map((f) => <option key={f} value={f} className="bg-[#1a1a1a] text-white">{f}</option>)}
-                </optgroup>
-                <optgroup label="CJK (Trung / Nhật / Hàn)" className="bg-[#1a1a1a] text-white">
-                  {CJK_FONT_CHOICES.map((f) => <option key={f} value={f} className="bg-[#1a1a1a] text-white">{f}</option>)}
-                </optgroup>
-              </select>
-            </label>
-
-            <label className="flex flex-col gap-xs">
-              <span className="text-text/50">Vị trí</span>
-              <select
-                value={sub.position}
-                onChange={(event) => patchSub({ position: event.target.value as SubtitlePosition })}
-                className="rounded-md border border-white/10 bg-white/5 px-sm py-xs text-text"
-              >
-                {(Object.keys(POSITION_LABELS) as SubtitlePosition[]).map((p) =>
-                  <option key={p} value={p} className="bg-[#1a1a1a] text-white">{POSITION_LABELS[p]}</option>)}
-              </select>
-            </label>
-
-            <label className="flex flex-col gap-xs">
-              <span className="text-text/50">Cỡ chữ ({sub.fontSizePct}% chiều cao)</span>
-              <input
-                type="range" min={2} max={12} step={0.5}
-                value={sub.fontSizePct}
-                onChange={(event) => patchSub({ fontSizePct: Number(event.target.value) })}
-                className="accent-cta"
-              />
-            </label>
-
-            <label className="flex flex-col gap-xs">
-              <span className="text-text/50">Độ dày viền ({sub.outlineWidth}px)</span>
-              <input
-                type="range" min={0} max={8} step={1}
-                value={sub.outlineWidth}
-                onChange={(event) => patchSub({ outlineWidth: Number(event.target.value) })}
-                className="accent-cta"
-              />
-            </label>
-
-            <label className="flex flex-col gap-xs">
-              <span className="text-text/50">Đổ bóng ({sub.shadow}px)</span>
-              <input
-                type="range" min={0} max={6} step={1}
-                value={sub.shadow}
-                onChange={(event) => patchSub({ shadow: Number(event.target.value) })}
-                className="accent-cta"
-              />
-            </label>
-
-            <label className="flex flex-col gap-xs">
-              <span className="text-text/50">Độ rộng tối đa / dòng ({sub.maxCharsPerLine || 'không giới hạn'} · chữ CJK tính gấp đôi)</span>
-              <input
-                type="range" min={0} max={80} step={1}
-                value={sub.maxCharsPerLine}
-                onChange={(event) => patchSub({ maxCharsPerLine: Number(event.target.value) })}
-                className="accent-cta"
-              />
-            </label>
-
-            <label className="flex items-center gap-sm">
-              <span className="text-text/50">Màu chữ</span>
-              <input
-                type="color"
-                value={sub.primaryColor}
-                onChange={(event) => patchSub({ primaryColor: event.target.value })}
-                className="h-7 w-10 cursor-pointer rounded border border-white/10 bg-transparent"
-              />
-            </label>
-
-            <label className="flex items-center gap-sm">
-              <span className="text-text/50">Màu viền</span>
-              <input
-                type="color"
-                value={sub.outlineColor}
-                onChange={(event) => patchSub({ outlineColor: event.target.value })}
-                className="h-7 w-10 cursor-pointer rounded border border-white/10 bg-transparent"
-              />
-            </label>
-
-            <label className="col-span-2 flex cursor-pointer items-center gap-sm">
-              <input
-                type="checkbox"
-                checked={sub.bold}
-                onChange={(event) => patchSub({ bold: event.target.checked })}
-                className="size-4 cursor-pointer accent-cta"
-              />
-              <span className="text-text/70">In đậm</span>
-            </label>
+        {sub.enabled && (
+          <div className="border-t border-white/10 p-md">
+            <SubtitleDesigner config={sub} onChange={(next) => patchSettings({ subtitle: next })} ratio={project.settings.aspectRatio} backgroundPath={previewBg} backgroundIsVideo={previewIsVideo} />
+            <p className="mt-3 text-xs leading-5 text-white/40">Mỗi màn hình chỉ giữ một cụm ngắn; từ đang được đọc sẽ đổi màu để người xem bắt nhịp nhanh hơn.</p>
           </div>
         )}
       </div>

@@ -83,6 +83,11 @@ export interface Scene {
   audioPath?: string;
   /** Audio duration in seconds, measured in the renderer after synthesis. */
   audioDuration?: number;
+  /** Word timing measured from the synthesized voice, relative to audio start. */
+  subtitleWords?: SubtitleWordTiming[];
+  /** Cache identity so timing is invalidated when text or audio changes. */
+  subtitleTimingText?: string;
+  subtitleTimingAudioPath?: string;
 }
 
 export interface MediaResult {
@@ -99,26 +104,50 @@ export interface MediaResult {
 }
 
 export type SubtitlePosition = 'top' | 'middle' | 'bottom';
+export type SubtitleBackgroundStyle = 'rounded' | 'bar' | 'none';
 
-export interface SubtitleConfig {
-  /** Whether to burn captions into the exported video by default. */
-  enabled: boolean;
-  /** Font family name (must be installed on the system, e.g. 'Arial'). */
+export interface SubtitleWordTiming {
+  word: string;
+  /** Seconds relative to the start of the synthesized audio. */
+  start: number;
+  /** Seconds relative to the start of the synthesized audio. */
+  end: number;
+}
+
+export interface SubtitleStyle {
   fontFamily: string;
-  /** Font size as a percentage of the video height (e.g. 5 = 5%). */
   fontSizePct: number;
-  /** Fill colour as #RRGGBB. */
-  primaryColor: string;
-  /** Outline (stroke) colour as #RRGGBB. */
+  textColor: string;
+  highlightColor: string;
+  futureOpacity: number;
+  backgroundStyle: SubtitleBackgroundStyle;
+  backgroundColor: string;
+  backgroundOpacity: number;
+  backgroundRadius: number;
   outlineColor: string;
-  /** Outline thickness in pixels at 1080p, scaled with resolution. */
   outlineWidth: number;
-  /** Drop-shadow depth in pixels at 1080p, scaled with resolution. */
-  shadow: number;
-  bold: boolean;
+  shadowDepth: number;
+  highlightGlow: number;
   position: SubtitlePosition;
-  /** Soft wrap width: max characters per line before a line break (0 = no wrap). */
-  maxCharsPerLine: number;
+  marginPct: number;
+  bold: boolean;
+  italic: boolean;
+  uppercase: boolean;
+  wordsPerPage: number;
+}
+
+export interface SubtitleConfig extends SubtitleStyle {
+  /** Whether to burn captions into the exported video. */
+  enabled: boolean;
+  /** Selected built-in or user-created preset. Empty means the style was edited. */
+  presetId: string;
+}
+
+export interface SubtitlePreset {
+  id: string;
+  name: string;
+  builtIn?: boolean;
+  style: SubtitleStyle;
 }
 
 export interface MusicConfig {
@@ -150,6 +179,8 @@ export interface ProjectSettings {
   voiceId: string;
   voiceConfigs: Record<VoiceEngine, VoiceConfig>;
   subtitle: SubtitleConfig;
+  /** Source-video audio retained below the translated voice (0–100). */
+  originalAudioVolume: number;
   music: MusicConfig;
   /** Transcription engine for localize projects (local whisper.cpp vs cloud GenSuite STT). */
   transcriptionEngine: TranscriptionEngine;
@@ -234,6 +265,10 @@ export interface AppSettings {
   pixabayApiKey: string;
   unsplashApiKey: string;
   gensuiteApiKey: string;
+  /** User-created caption presets shared by every project. */
+  subtitlePresets: SubtitlePreset[];
+  /** Preset applied to newly created projects. */
+  defaultSubtitlePresetId: string;
 }
 
 export interface HardwareInfo {
@@ -286,6 +321,12 @@ export interface EdgeTtsSynthesizeArgs {
   volume?: number;
 }
 
+export interface EdgeTtsSynthesizeResult {
+  audioPath: string;
+  /** Exact word boundaries returned with the generated speech, in seconds. */
+  wordTimings?: SubtitleWordTiming[];
+}
+
 export interface EdgeTtsVoice {
   /** ShortName passed to synthesis, e.g. 'vi-VN-HoaiMyNeural'. */
   shortName: string;
@@ -303,6 +344,7 @@ export interface ExportScene {
   durationSec: number;
   /** Narration text; burned in as a subtitle when export requests it. */
   narration?: string;
+  wordTimings?: SubtitleWordTiming[];
 }
 
 export interface ExportArgs {
@@ -312,7 +354,6 @@ export interface ExportArgs {
   fps?: number;
   /** Burn each scene's narration into the video as a hard subtitle. */
   subtitles?: boolean;
-  /** Styling for the burned-in subtitles; falls back to defaults when omitted. */
   subtitleConfig?: SubtitleConfig;
   /** Absolute path of a background music track to mix under the narration. */
   musicPath?: string;
@@ -338,6 +379,8 @@ export interface RedubSegment {
   sourceEnd: number;
   /** Translated text, burned as a subtitle when requested. */
   text: string;
+  /** Word timing relative to this synthesized audio. */
+  wordTimings?: SubtitleWordTiming[];
 }
 
 export interface RedubArgs {
@@ -348,8 +391,17 @@ export interface RedubArgs {
   segments: RedubSegment[];
   /** Burn the translated text into the video as a hard subtitle. */
   subtitles?: boolean;
-  /** Styling for the burned-in subtitles; falls back to defaults when omitted. */
   subtitleConfig?: SubtitleConfig;
+  /** Percentage of the source audio retained under the translated voice. Defaults to 8. */
+  originalAudioVolume?: number;
+}
+
+export interface WhisperAlignArgs {
+  projectId: string;
+  audioPath: string;
+  text: string;
+  model: WhisperModelName;
+  language?: string;
 }
 
 export interface YtdlpDownloadArgs {
@@ -486,7 +538,7 @@ export interface GensuiteBridge {
   };
   edgetts: {
     voices(): Promise<EdgeTtsVoice[]>;
-    synthesize(args: EdgeTtsSynthesizeArgs): Promise<string>;
+    synthesize(args: EdgeTtsSynthesizeArgs): Promise<EdgeTtsSynthesizeResult>;
     kill(jobId: string): Promise<boolean>;
   };
   ffmpeg: {
@@ -523,6 +575,8 @@ export interface GensuiteBridge {
     extract(args: WhisperExtractArgs): Promise<string>;
     /** Run local whisper.cpp on the WAV. Returns timed segments. */
     transcribe(args: WhisperTranscribeArgs): Promise<TranscriptSegment[]>;
+    /** Measure word timing from synthesized voice audio for caption highlighting. */
+    align(args: WhisperAlignArgs): Promise<SubtitleWordTiming[]>;
     modelStatus(args: WhisperModelStatusArgs): Promise<WhisperModelStatus>;
     /** Download the GGML model on demand. Returns its absolute path. */
     downloadModel(args: WhisperModelDownloadArgs): Promise<string>;

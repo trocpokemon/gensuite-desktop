@@ -17,9 +17,9 @@ export class EdgeTtsAdapter implements IVoiceProvider {
     const jobId = `${req.segmentId}_${Date.now()}`;
     this.jobId = jobId;
 
-    let audioPath: string;
+    let synthesis: Awaited<ReturnType<typeof window.gensuite.edgetts.synthesize>>;
     try {
-      audioPath = await window.gensuite.edgetts.synthesize({
+      synthesis = await window.gensuite.edgetts.synthesize({
         projectId: req.projectId,
         jobId,
         segmentId: req.segmentId,
@@ -33,8 +33,8 @@ export class EdgeTtsAdapter implements IVoiceProvider {
       if (this.jobId === jobId) this.jobId = null;
     }
 
-    const durationSec = await probeFileDuration(audioPath);
-    return { audioPath, durationSec };
+    const durationSec = await probeFileDuration(synthesis.audioPath);
+    return { audioPath: synthesis.audioPath, durationSec, wordTimings: synthesis.wordTimings };
   }
 
   cancel(): void {

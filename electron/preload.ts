@@ -15,6 +15,7 @@ import type {
   YtdlpProgress,
   WhisperExtractArgs,
   WhisperTranscribeArgs,
+  WhisperAlignArgs,
   WhisperModelStatusArgs,
   WhisperModelDownloadArgs,
   WhisperProgress,
@@ -100,6 +101,7 @@ const bridge: GensuiteBridge = {
   whisper: {
     extract: (args: WhisperExtractArgs) => ipcRenderer.invoke('whisper:extract', args),
     transcribe: (args: WhisperTranscribeArgs) => ipcRenderer.invoke('whisper:transcribe', args),
+    align: (args: WhisperAlignArgs) => ipcRenderer.invoke('whisper:align', args),
     modelStatus: (args: WhisperModelStatusArgs) => ipcRenderer.invoke('whisper:modelStatus', args),
     downloadModel: (args: WhisperModelDownloadArgs) => ipcRenderer.invoke('whisper:downloadModel', args),
     onProgress: (cb: (p: WhisperProgress) => void) => {

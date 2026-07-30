@@ -1,4 +1,4 @@
-import type { VoiceEngine } from '../../shared/types';
+import type { SubtitleWordTiming, VoiceEngine } from '../../shared/types';
 
 // A synthesized segment: the adapter has already ensured the audio lives on disk
 // (every adapter writes its Blob via the audio.write IPC), so the timeline step
@@ -8,6 +8,8 @@ export interface VoiceResult {
   audioPath: string;
   /** Duration in seconds (measured in the renderer via an <audio> probe). */
   durationSec: number;
+  /** Exact timing supplied by a voice source when available. */
+  wordTimings?: SubtitleWordTiming[];
 }
 
 export interface VoiceRequest {

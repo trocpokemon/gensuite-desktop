@@ -60,7 +60,13 @@ export function SoundStage({ onOpenSettings }: Props) {
         style: useConfig.style, useSpeakerBoost: useConfig.useSpeakerBoost,
         pitch: useConfig.pitch, volume: useConfig.volume, deliveryMode: useConfig.deliveryMode,
       });
-      updateScene(sceneId, { audioPath: result.audioPath, audioDuration: result.durationSec });
+      updateScene(sceneId, {
+        audioPath: result.audioPath,
+        audioDuration: result.durationSec,
+        subtitleWords: result.wordTimings,
+        subtitleTimingText: result.wordTimings?.length ? text : undefined,
+        subtitleTimingAudioPath: result.wordTimings?.length ? result.audioPath : undefined,
+      });
     } catch (err) {
       if (errorMessage(err) === 'edgetts:killed') return;
       const service = missingKeyService(err);

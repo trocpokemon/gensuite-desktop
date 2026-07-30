@@ -3,6 +3,8 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { SubtitleConfig, SubtitleWordTiming } from '../../src/shared/types';
+import { DEFAULT_SUBTITLE_CONFIG } from '../../src/shared/subtitlePresets';
 
 // Video assembly via bundled FFmpeg. Builds a concat of image clips (one per
 // scene, duration matched to its audio) muxed with the narration track.
@@ -14,32 +16,7 @@ type Scene = {
   audioPath: string;   // absolute path to segment audio
   durationSec: number; // measured audio duration
   narration?: string;  // caption text burned in when subtitles are enabled
-};
-
-type SubtitleConfig = {
-  enabled: boolean;
-  fontFamily: string;
-  fontSizePct: number;
-  primaryColor: string;
-  outlineColor: string;
-  outlineWidth: number;
-  shadow: number;
-  bold: boolean;
-  position: 'top' | 'middle' | 'bottom';
-  maxCharsPerLine: number;
-};
-
-const DEFAULT_SUBTITLE: SubtitleConfig = {
-  enabled: true,
-  fontFamily: 'Arial',
-  fontSizePct: 5,
-  primaryColor: '#FFFFFF',
-  outlineColor: '#000000',
-  outlineWidth: 3,
-  shadow: 1,
-  bold: true,
-  position: 'bottom',
-  maxCharsPerLine: 42,
+  wordTimings?: SubtitleWordTiming[];
 };
 
 type ExportArgs = {
@@ -58,6 +35,7 @@ type RedubSegment = {
   sourceStart: number; // seconds into the source video
   sourceEnd: number;   // seconds into the source video
   text: string;        // translated text, burned as a subtitle when requested
+  wordTimings?: SubtitleWordTiming[];
 };
 
 type RedubArgs = {
@@ -66,6 +44,7 @@ type RedubArgs = {
   segments: RedubSegment[];
   subtitles?: boolean;
   subtitleConfig?: SubtitleConfig;
+  originalAudioVolume?: number;
 };
 
 export function ffmpegBinary(): string {
@@ -190,9 +169,13 @@ function hexToAssColor(hex: string): string {
   return `&H00${b}${g}${r}`.toUpperCase();
 }
 
-// CJK ideographs, kana, Hangul, and full-width forms occupy two display cells;
-// everything else counts as one. This lets us budget subtitle line length the way
-// KrillinAI does, so a line of Chinese doesn't run twice as wide as a Latin line.
+function hexToAssColorWithOpacity(hex: string, opacityPct: number): string {
+  const base = hexToAssColor(hex);
+  const alpha = Math.round(255 * (1 - Math.max(0, Math.min(100, opacityPct)) / 100));
+  return `&H${alpha.toString(16).padStart(2, '0')}${base.slice(4)}`.toUpperCase();
+}
+
+// CJK ideographs, kana, Hangul, and full-width forms occupy two display cells.
 const CJK_RE = /[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿＀-￯가-힯]/;
 function isWideChar(ch: string): boolean { return CJK_RE.test(ch); }
 function containsCJK(text: string): boolean { return CJK_RE.test(text); }
@@ -202,133 +185,186 @@ function displayWidth(text: string): number {
   return width;
 }
 
-// Portrait (9:16) videos are much narrower, so cap the per-line budget tighter
-// regardless of the user's setting — mirrors KrillinAI's vertical wrap limit.
-const PORTRAIT_MAX_UNITS = 32;
-
-// Trailing punctuation should never start a new line on its own.
-const TRAILING_PUNCT_RE = /^[，。！？、；：,.!?;:）)】」』…]+$/;
-function isTrailingPunct(token: string): boolean { return TRAILING_PUNCT_RE.test(token); }
-
-// Balanced line packer: fills lines up to a display-width budget but first spreads
-// the text across the minimum number of lines evenly (so the last line isn't a
-// lonely tail). Tokens are runes for CJK (joiner '') or words for Latin (joiner ' ').
-function packLines(tokens: string[], budget: number, joiner: string): string[] {
-  const joinWidth = displayWidth(joiner);
-  const total = tokens.reduce((sum, t) => sum + displayWidth(t), 0) + joinWidth * Math.max(0, tokens.length - 1);
-  const numLines = Math.max(1, Math.ceil(total / budget));
-  const target = Math.max(Math.ceil(budget / 2), Math.ceil(total / numLines));
-  const lines: string[] = [];
-  let current = '';
-  let currentWidth = 0;
-  for (const tok of tokens) {
-    const tokWidth = displayWidth(tok);
-    const addWidth = current ? joinWidth + tokWidth : tokWidth;
-    if (current && currentWidth + addWidth > target && lines.length < numLines - 1 && !isTrailingPunct(tok)) {
-      lines.push(current);
-      current = tok;
-      currentWidth = tokWidth;
-    } else {
-      current = current ? current + joiner + tok : tok;
-      currentWidth += addWidth;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
-}
-
-// Soft-wrap a caption to a per-line display-width budget, joined with the ASS hard
-// break `\N`. CJK text (no word spaces) is split rune-by-rune; Latin text on word
-// boundaries. Portrait videos always get a tighter cap. budget <= 0 in landscape
-// disables wrapping.
-function wrapCaption(text: string, maxUnits: number, isPortrait: boolean): string {
-  const base = maxUnits > 0 ? maxUnits : Number.POSITIVE_INFINITY;
-  const budget = isPortrait ? Math.min(base, PORTRAIT_MAX_UNITS) : base;
-  if (!Number.isFinite(budget) || displayWidth(text) <= budget) return text;
-  const tokens = containsCJK(text) ? [...text] : text.split(' ').filter(Boolean);
-  const joiner = containsCJK(text) ? '' : ' ';
-  return packLines(tokens, budget, joiner).join('\\N');
-}
-
-// Known CJK-capable font families the UI offers. When a caption contains CJK and
-// the user already picked one of these, we honour their choice instead of forcing
-// the OS default — so the font dropdown stays meaningful for CJK subtitles.
-const CJK_FONTS = new Set([
-  'Microsoft YaHei', 'SimHei', 'SimSun', 'KaiTi', 'NSimSun',
-  'PingFang SC', 'Hiragino Sans GB', 'STHeiti',
-  'Noto Sans CJK SC', 'Noto Serif CJK SC', 'Source Han Sans SC',
-  'Malgun Gothic', 'Yu Gothic', 'Meiryo', 'MS Gothic',
-]);
-function isCjkFont(name: string): boolean { return CJK_FONTS.has(name.trim()); }
-
-// A CJK-capable font family that ships by default on each OS, used when a caption
-// contains CJK characters but the user's chosen font is Latin-only (it can't render
-// those glyphs). libass resolves the family from the fonts dir passed to the filter.
 function cjkFontFamily(): string {
   if (process.platform === 'win32') return 'Microsoft YaHei';
   if (process.platform === 'darwin') return 'PingFang SC';
   return 'Noto Sans CJK SC';
 }
 
-// Pick the font to write into the ASS style: keep the user's choice unless the
-// caption needs CJK glyphs and their font can't provide them.
-function resolveFontName(userFont: string, anyCJK: boolean): string {
-  if (anyCJK && !isCjkFont(userFont)) return cjkFontFamily();
-  return userFont;
+interface TimedCaption {
+  text: string;
+  start: number;
+  end: number;
+  wordTimings?: SubtitleWordTiming[];
 }
 
-// ASS numpad alignment: 8 = top-center, 5 = middle-center, 2 = bottom-center.
-function alignmentFor(position: SubtitleConfig['position']): number {
-  return position === 'top' ? 8 : position === 'middle' ? 5 : 2;
+interface TimedWord {
+  text: string;
+  start: number;
+  end: number;
 }
 
-// Build a burned-in subtitle track timed to the *narration* audio, which is a
-// straight concat — so each caption spans [cumulative, cumulative+durationSec],
-// independent of the video crossfades.
-function buildAssFile(scenes: Scene[], w: number, h: number, cfg: SubtitleConfig): string {
-  const fontSize = Math.max(8, Math.round(h * (cfg.fontSizePct / 100)));
-  // Outline/shadow are authored at 1080p; scale so they look consistent at 9:16.
-  const scale = h / 1080;
-  const outline = Math.max(0, Math.round(cfg.outlineWidth * scale));
-  const shadow = Math.max(0, Math.round(cfg.shadow * scale));
-  const marginV = Math.round(h * 0.07);
-  const marginH = Math.round(w * 0.06);
-  const bold = cfg.bold ? -1 : 0;
-  const alignment = alignmentFor(cfg.position);
-  const primary = hexToAssColor(cfg.primaryColor);
-  const outlineColor = hexToAssColor(cfg.outlineColor);
-  const isPortrait = h > w;
-  const anyCJK = scenes.some((s) => containsCJK(s.narration ?? ''));
-  const fontName = resolveFontName(cfg.fontFamily, anyCJK);
+const PUNCTUATION_RE = /^[，。！？、；：,.!?;:）)】」』…]+$/;
+
+function captionTokens(text: string): { tokens: string[]; joiner: string } {
+  const clean = assEscape(text);
+  if (!clean) return { tokens: [], joiner: ' ' };
+  if (/\s/.test(clean)) return { tokens: clean.split(/\s+/).filter(Boolean), joiner: ' ' };
+  if (!containsCJK(clean)) return { tokens: [clean], joiner: ' ' };
+
+  const tokens: string[] = [];
+  for (const char of [...clean]) {
+    if (PUNCTUATION_RE.test(char) && tokens.length) tokens[tokens.length - 1] += char;
+    else tokens.push(char);
+  }
+  return { tokens, joiner: '' };
+}
+
+function timeWords(text: string, start: number, end: number, measured?: SubtitleWordTiming[]): { words: TimedWord[]; joiner: string } {
+  const { tokens, joiner } = captionTokens(text);
+  if (!tokens.length) return { words: [], joiner };
+  const safeEnd = end > start ? end : start + 1;
+  if (measured?.length) {
+    return {
+      joiner,
+      words: measured.map((word) => ({
+        text: assEscape(word.word),
+        start: Math.max(start, Math.min(safeEnd, start + word.start)),
+        end: Math.max(start, Math.min(safeEnd, start + word.end)),
+      })).filter((word) => word.text && word.end > word.start),
+    };
+  }
+  const weights = tokens.map((token) => Math.max(1, Math.sqrt(displayWidth(token))));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  let cursor = start;
+  const words = tokens.map((token, index) => {
+    const wordEnd = index === tokens.length - 1
+      ? safeEnd
+      : cursor + ((safeEnd - start) * weights[index]) / totalWeight;
+    const word = { text: token, start: cursor, end: wordEnd };
+    cursor = wordEnd;
+    return word;
+  });
+  return { words, joiner };
+}
+
+function pageWords(words: TimedWord[], joiner: string, maxWords: number, maxUnits: number): TimedWord[][] {
+  const pages: TimedWord[][] = [];
+  let current: TimedWord[] = [];
+  let units = 0;
+  for (const word of words) {
+    const added = displayWidth(word.text) + (current.length ? displayWidth(joiner) : 0);
+    if (current.length && (current.length >= maxWords || units + added > maxUnits)) {
+      pages.push(current);
+      current = [];
+      units = 0;
+    }
+    current.push(word);
+    units += displayWidth(word.text) + (current.length > 1 ? displayWidth(joiner) : 0);
+  }
+  if (current.length) pages.push(current);
+  return pages;
+}
+
+function roundedRectPath(x1: number, y1: number, x2: number, y2: number, radius: number): string {
+  const r = Math.min(radius, (x2 - x1) / 2, (y2 - y1) / 2);
+  const k = r * 0.5522848;
+  return [
+    `m ${x1 + r} ${y1}`, `l ${x2 - r} ${y1}`,
+    `b ${x2 - r + k} ${y1} ${x2} ${y1 + r - k} ${x2} ${y1 + r}`,
+    `l ${x2} ${y2 - r}`,
+    `b ${x2} ${y2 - r + k} ${x2 - r + k} ${y2} ${x2 - r} ${y2}`,
+    `l ${x1 + r} ${y2}`,
+    `b ${x1 + r - k} ${y2} ${x1} ${y2 - r + k} ${x1} ${y2 - r}`,
+    `l ${x1} ${y1 + r}`,
+    `b ${x1} ${y1 + r - k} ${x1 + r - k} ${y1} ${x1 + r} ${y1}`,
+  ].join(' ');
+}
+
+function styledPageText(page: TimedWord[], activeIndex: number, joiner: string, config: SubtitleConfig): string {
+  return page.map((word, index) => {
+    const separator = index < page.length - 1 ? joiner : '';
+    const text = config.uppercase ? word.text.toLocaleUpperCase() : word.text;
+    if (index === activeIndex) {
+      const glowBorder = Math.max(config.outlineWidth, config.outlineWidth + config.highlightGlow / 10);
+      const glowBlur = Math.min(0.8, Math.max(0, config.highlightGlow / 20));
+      return `{\\1c${hexToAssColor(config.highlightColor)}\\1a&H00&\\bord${glowBorder.toFixed(1)}\\blur${glowBlur.toFixed(1)}\\3c${hexToAssColorWithOpacity(config.highlightColor, 55)}}${text}${separator}`;
+    }
+    const opacity = index > activeIndex ? config.futureOpacity : 100;
+    return `{\\1c${hexToAssColor(config.textColor)}\\1a${hexToAssColorWithOpacity('#FFFFFF', opacity).slice(0, 4)}&\\bord${config.outlineWidth.toFixed(1)}\\blur0\\3c${hexToAssColor(config.outlineColor)}}${text}${separator}`;
+  }).join('');
+}
+
+export function buildCaptionAss(items: TimedCaption[], w: number, h: number, style?: SubtitleConfig): string {
+  const config: SubtitleConfig = { ...DEFAULT_SUBTITLE_CONFIG, ...(style ?? {}) };
+  const fontSize = Math.max(18, Math.round(h * (config.fontSizePct / 100)));
+  const marginV = Math.round(h * (config.marginPct / 100));
+  const fontName = items.some((item) => containsCJK(item.text)) ? cjkFontFamily() : config.fontFamily;
+  const alignment = config.position === 'top' ? 8 : config.position === 'middle' ? 5 : 2;
+  const maxUnits = Math.max(8, Math.floor((w * 0.82) / (fontSize * 0.54)));
+  const bold = config.bold ? -1 : 0;
+  const italic = config.italic ? -1 : 0;
 
   const header = [
     '[Script Info]',
     'ScriptType: v4.00+',
     `PlayResX: ${w}`,
     `PlayResY: ${h}`,
-    'WrapStyle: 2', // honour our manual \N breaks, no auto-rewrap
+    'WrapStyle: 2',
     'ScaledBorderAndShadow: yes',
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Default,${fontName},${fontSize},${primary},&H000000FF,${outlineColor},&H80000000,${bold},0,0,0,100,100,0,0,1,${outline},${shadow},${alignment},${marginH},${marginH},${marginV},1`,
+    `Style: Caption,${fontName},${fontSize},${hexToAssColor(config.textColor)},${hexToAssColor(config.textColor)},${hexToAssColor(config.outlineColor)},&H00000000,${bold},${italic},0,0,100,100,0,0,1,${config.outlineWidth},${config.shadowDepth},${alignment},0,0,${marginV},1`,
+    `Style: Backdrop,Arial,20,${hexToAssColorWithOpacity(config.backgroundColor, config.backgroundOpacity)},${hexToAssColorWithOpacity(config.backgroundColor, config.backgroundOpacity)},${hexToAssColorWithOpacity(config.backgroundColor, config.backgroundOpacity)},${hexToAssColorWithOpacity(config.backgroundColor, config.backgroundOpacity)},0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
   ];
 
   const events: string[] = [];
-  let elapsed = 0;
-  for (const scene of scenes) {
-    const text = wrapCaption(assEscape(scene.narration ?? ''), cfg.maxCharsPerLine, isPortrait);
-    const start = elapsed;
-    const end = elapsed + scene.durationSec;
-    elapsed = end;
-    if (!text) continue;
-    events.push(`Dialogue: 0,${assTime(start)},${assTime(end)},Default,,0,0,0,,${text}`);
+  for (const item of items) {
+    const { words, joiner } = timeWords(item.text, item.start, item.end, item.wordTimings);
+    for (const page of pageWords(words, joiner, config.wordsPerPage, maxUnits)) {
+      const pageStart = page[0].start;
+      const pageEnd = page[page.length - 1].end;
+      const pageText = page.map((word) => word.text).join(joiner);
+      const estimatedWidth = displayWidth(pageText) * fontSize * 0.54 + fontSize * 1.25;
+      const boxWidth = config.backgroundStyle === 'bar'
+        ? Math.round(w * 0.92)
+        : Math.round(Math.min(w * 0.86, Math.max(fontSize * 4, estimatedWidth)));
+      const boxHeight = Math.round(fontSize * 1.65);
+      const x1 = Math.round((w - boxWidth) / 2);
+      const x2 = x1 + boxWidth;
+      let y1: number;
+      if (config.position === 'top') y1 = Math.round(marginV - fontSize * 0.35);
+      else if (config.position === 'middle') y1 = Math.round((h - boxHeight) / 2);
+      else y1 = Math.round(h - marginV - boxHeight + fontSize * 0.35);
+      const y2 = y1 + boxHeight;
+      const radius = config.backgroundStyle === 'rounded' ? Math.round(config.backgroundRadius * (h / 1080)) : 0;
+      const shape = roundedRectPath(x1, y1, x2, y2, radius);
+      if (config.backgroundStyle !== 'none' && config.backgroundOpacity > 0) {
+        events.push(`Dialogue: 0,${assTime(pageStart)},${assTime(pageEnd)},Backdrop,,0,0,0,,{\\an7\\pos(0,0)\\p1\\fad(90,90)}${shape}`);
+      }
+      page.forEach((word, activeIndex) => {
+        const fade = activeIndex === 0 ? '\\fad(90,0)' : '';
+        events.push(`Dialogue: 1,${assTime(word.start)},${assTime(word.end)},Caption,,0,0,0,,{${fade}}${styledPageText(page, activeIndex, joiner, config)}`);
+      });
+    }
   }
 
   return `${header.join('\n')}\n${events.join('\n')}\n`;
+}
+
+// Narration audio is concatenated, so each caption starts at the cumulative scene time.
+function buildAssFile(scenes: Scene[], w: number, h: number, config?: SubtitleConfig): string {
+  let elapsed = 0;
+  const items = scenes.map((scene) => {
+    const item = { text: scene.narration ?? '', start: elapsed, end: elapsed + scene.durationSec, wordTimings: scene.wordTimings };
+    elapsed = item.end;
+    return item;
+  });
+  return buildCaptionAss(items, w, h, config);
 }
 
 // FFmpeg's filtergraph parser needs the Windows drive colon and backslashes
@@ -357,6 +393,18 @@ async function probeVideoDimensions(videoPath: string): Promise<[number, number]
   });
 }
 
+async function probeHasAudio(videoPath: string): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const child = spawn(ffprobeBinary(), [
+      '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', videoPath,
+    ], { cwd: path.dirname(ffprobeBinary()), stdio: ['ignore', 'pipe', 'ignore'] });
+    let stdout = '';
+    child.stdout?.on('data', (data) => { stdout += String(data); });
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0 && Boolean(stdout.trim())));
+  });
+}
+
 // atempo only accepts 0.5–2.0 per instance, so a speed-up beyond 2x is expressed
 // as a chain (e.g. 2.5x → atempo=2.0,atempo=1.25). Factors <= 1 return a single
 // pass-through so we never slow speech down below its natural pace.
@@ -372,46 +420,17 @@ function atempoChain(factor: number): string[] {
 // Build a burned-in subtitle track timed to the *source video* windows
 // (sourceStart..sourceEnd), so captions stay locked to the original speech
 // timing regardless of how the dubbed audio was time-stretched.
-function buildRedubAssFile(segments: RedubSegment[], w: number, h: number, cfg: SubtitleConfig): string {
-  const fontSize = Math.max(8, Math.round(h * (cfg.fontSizePct / 100)));
-  const scale = h / 1080;
-  const outline = Math.max(0, Math.round(cfg.outlineWidth * scale));
-  const shadow = Math.max(0, Math.round(cfg.shadow * scale));
-  const marginV = Math.round(h * 0.07);
-  const marginH = Math.round(w * 0.06);
-  const bold = cfg.bold ? -1 : 0;
-  const alignment = alignmentFor(cfg.position);
-  const primary = hexToAssColor(cfg.primaryColor);
-  const outlineColor = hexToAssColor(cfg.outlineColor);
-  const isPortrait = h > w;
-  const anyCJK = segments.some((seg) => containsCJK(seg.text ?? ''));
-  const fontName = resolveFontName(cfg.fontFamily, anyCJK);
-
-  const header = [
-    '[Script Info]',
-    'ScriptType: v4.00+',
-    `PlayResX: ${w}`,
-    `PlayResY: ${h}`,
-    'WrapStyle: 2',
-    'ScaledBorderAndShadow: yes',
-    '',
-    '[V4+ Styles]',
-    'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Default,${fontName},${fontSize},${primary},&H000000FF,${outlineColor},&H80000000,${bold},0,0,0,100,100,0,0,1,${outline},${shadow},${alignment},${marginH},${marginH},${marginV},1`,
-    '',
-    '[Events]',
-    'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
-  ];
-
-  const events: string[] = [];
-  for (const seg of segments) {
-    const text = wrapCaption(assEscape(seg.text ?? ''), cfg.maxCharsPerLine, isPortrait);
-    if (!text) continue;
-    const end = seg.sourceEnd > seg.sourceStart ? seg.sourceEnd : seg.sourceStart + 1;
-    events.push(`Dialogue: 0,${assTime(seg.sourceStart)},${assTime(end)},Default,,0,0,0,,${text}`);
-  }
-
-  return `${header.join('\n')}\n${events.join('\n')}\n`;
+function buildRedubAssFile(segments: Array<RedubSegment & { factor: number }>, w: number, h: number, config?: SubtitleConfig): string {
+  return buildCaptionAss(segments.map((segment) => ({
+    text: segment.text ?? '',
+    start: segment.sourceStart,
+    end: segment.sourceEnd > segment.sourceStart ? segment.sourceEnd : segment.sourceStart + 1,
+    wordTimings: segment.wordTimings?.map((word) => ({
+      ...word,
+      start: word.start / segment.factor,
+      end: word.end / segment.factor,
+    })),
+  })), w, h, config);
 }
 
 export function registerFfmpegIpc(): void {
@@ -522,13 +541,12 @@ export function registerFfmpegIpc(): void {
       }
     }
     // Burn narration captions if requested and any scene actually has text.
-    const subConfig = { ...DEFAULT_SUBTITLE, ...(args.subtitleConfig ?? {}) };
     const wantSubtitles = args.subtitles === true && preparedScenes.some((s) => (s.narration ?? '').trim());
     let assPath: string | null = null;
     let videoLabel = 'vout';
     if (wantSubtitles) {
       assPath = path.join(os.tmpdir(), `gensuite-subs-${projectId}-${Date.now()}.ass`);
-      await fs.writeFile(assPath, buildAssFile(preparedScenes, w, h, subConfig), 'utf8');
+      await fs.writeFile(assPath, buildAssFile(preparedScenes, w, h, args.subtitleConfig), 'utf8');
       // On Windows point libass at the system Fonts dir so the chosen family
       // resolves even if fontconfig has no cache.
       const assArgs = [`f='${escapeAssPath(assPath)}'`];
@@ -605,9 +623,8 @@ export function registerFfmpegIpc(): void {
     });
   });
 
-  // Re-dub: keep the original video untouched, drop its audio entirely, and lay
-  // the translated speech back over it — each line time-stretched to fit its
-  // source window and anchored at the original start time.
+  // Re-dub: keep the source picture, retain a configurable amount of its audio,
+  // and lay translated speech over it. Long lines are compressed into their source window.
   ipcMain.handle('ffmpeg:redub', async (e, args: RedubArgs): Promise<string | null> => {
     const { projectId, sourceVideoPath, segments } = args;
     if (!sourceVideoPath) throw new Error('Cần chọn video nguồn trước khi lồng tiếng.');
@@ -631,6 +648,8 @@ export function registerFfmpegIpc(): void {
 
     const videoDur = await probeDuration(sourceVideoPath).catch(() => 0);
     const [vw, vh] = await probeVideoDimensions(sourceVideoPath);
+    const originalAudioVolume = Math.max(0, Math.min(100, Number(args.originalAudioVolume ?? 8)));
+    const keepOriginalAudio = originalAudioVolume > 0 && await probeHasAudio(sourceVideoPath);
 
     // Measure each line's real TTS duration to decide how hard to compress it.
     const prepared = await Promise.all(segments.map(async (seg) => {
@@ -665,6 +684,12 @@ export function registerFfmpegIpc(): void {
       `anullsrc=channel_layout=stereo:sample_rate=48000,` +
       `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS[base]`,
     );
+    if (keepOriginalAudio) {
+      filters.push(
+        `[0:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
+        `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS,volume=${(originalAudioVolume / 100).toFixed(3)}[aorig]`,
+      );
+    }
     prepared.forEach((s, i) => {
       const delayMs = Math.max(0, Math.round(s.sourceStart * 1000));
       const tempo = atempoChain(s.factor);
@@ -676,18 +701,18 @@ export function registerFfmpegIpc(): void {
       ].join(',');
       filters.push(`[${i + 1}:a]${chain}[a${i}]`);
     });
-    const mixInputs = ['[base]', ...prepared.map((_, i) => `[a${i}]`)].join('');
-    filters.push(`${mixInputs}amix=inputs=${prepared.length + 1}:duration=first:normalize=0[adub]`);
+    const mixInputs = ['[base]', ...(keepOriginalAudio ? ['[aorig]'] : []), ...prepared.map((_, i) => `[a${i}]`)].join('');
+    const mixCount = prepared.length + 1 + (keepOriginalAudio ? 1 : 0);
+    filters.push(`${mixInputs}amix=inputs=${mixCount}:duration=first:normalize=0[adub]`);
 
     // Subtitles force a video re-encode (the ass filter must touch the frames);
     // without them we stream-copy the original video untouched.
-    const subConfig = { ...DEFAULT_SUBTITLE, ...(args.subtitleConfig ?? {}) };
     const wantSubtitles = args.subtitles === true && prepared.some((s) => (s.text ?? '').trim());
     let assPath: string | null = null;
     const videoArgs: string[] = [];
     if (wantSubtitles) {
       assPath = path.join(os.tmpdir(), `gensuite-dub-${projectId}-${Date.now()}.ass`);
-      await fs.writeFile(assPath, buildRedubAssFile(prepared, vw, vh, subConfig), 'utf8');
+      await fs.writeFile(assPath, buildRedubAssFile(prepared, vw, vh, args.subtitleConfig), 'utf8');
       const assArgs = [`f='${escapeAssPath(assPath)}'`];
       if (process.platform === 'win32' && process.env.WINDIR) {
         assArgs.push(`fontsdir='${escapeAssPath(path.join(process.env.WINDIR, 'Fonts'))}'`);

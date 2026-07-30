@@ -18,22 +18,15 @@ import type {
   TranscriptSegment,
 } from '../shared/types';
 import { DEFAULT_EDGE_VOICE } from '../providers/voice/edgeTtsCatalog';
+import { useSettingsStore } from './settingsStore';
+import { DEFAULT_SUBTITLE_CONFIG, findSubtitlePreset, subtitleConfigFromStyle } from '../shared/subtitlePresets';
 
 export function uid(prefix = ''): string {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
 const DEFAULT_SUBTITLE: SubtitleConfig = {
-  enabled: true,
-  fontFamily: 'Arial',
-  fontSizePct: 5,
-  primaryColor: '#FFFFFF',
-  outlineColor: '#000000',
-  outlineWidth: 3,
-  shadow: 1,
-  bold: true,
-  position: 'bottom',
-  maxCharsPerLine: 42,
+  ...DEFAULT_SUBTITLE_CONFIG,
 };
 
 const DEFAULT_MUSIC: MusicConfig = {
@@ -52,6 +45,7 @@ const DEFAULT_SETTINGS: ProjectSettings = {
   transcriptionEngine: 'local',
   whisperModel: 'base',
   subtitle: { ...DEFAULT_SUBTITLE },
+  originalAudioVolume: 8,
   music: { ...DEFAULT_MUSIC },
   voiceConfigs: {
     edgetts: { voiceId: DEFAULT_EDGE_VOICE, modelId: '', language: 'vi-VN', speed: 1, temperature: 1, stability: 0.5, similarityBoost: 0.75, style: 0, useSpeakerBoost: true, pitch: 0, volume: 100, deliveryMode: 'BALANCED' },
@@ -61,7 +55,13 @@ const DEFAULT_SETTINGS: ProjectSettings = {
   },
 };
 
-function newProject(name = 'Dự án chưa đặt tên'): ProjectState {
+function preferredSubtitleConfig(): SubtitleConfig {
+  const preferences = useSettingsStore.getState().keys;
+  const preset = findSubtitlePreset(preferences.defaultSubtitlePresetId, preferences.subtitlePresets);
+  return subtitleConfigFromStyle(preset.style, preset.id);
+}
+
+function newProject(name = 'Dự án chưa đặt tên', usePreferredSubtitle = false): ProjectState {
   const now = new Date().toISOString();
   return {
     id: uid('p_'),
@@ -79,7 +79,10 @@ function newProject(name = 'Dự án chưa đặt tên'): ProjectState {
     storyboardSourceContent: undefined,
     storyboardTopicId: undefined,
     characterRefs: [],
-    settings: { ...DEFAULT_SETTINGS },
+    settings: {
+      ...DEFAULT_SETTINGS,
+      subtitle: usePreferredSubtitle ? preferredSubtitleConfig() : { ...DEFAULT_SUBTITLE },
+    },
   };
 }
 
@@ -107,7 +110,14 @@ function normalizeProject(raw: ProjectState): ProjectState {
     settings: {
       ...DEFAULT_SETTINGS,
       ...raw.settings,
-      subtitle: { ...DEFAULT_SUBTITLE, ...(raw.settings?.subtitle ?? {}) },
+      // Discard legacy visual controls: the new caption treatment is intentionally
+      // consistent across projects and only keeps the on/off preference.
+      subtitle: {
+        ...DEFAULT_SUBTITLE,
+        ...(raw.settings?.subtitle ?? {}),
+        enabled: raw.settings?.subtitle?.enabled ?? DEFAULT_SUBTITLE.enabled,
+      },
+      originalAudioVolume: raw.settings?.originalAudioVolume ?? DEFAULT_SETTINGS.originalAudioVolume,
       music: { ...DEFAULT_MUSIC, ...(raw.settings?.music ?? {}) },
       // The local engine has changed over time (piper → kokoro → edgetts); migrate any project still on a retired one.
       voiceEngine: ['piper', 'kokoro'].includes(raw.settings?.voiceEngine as string) ? 'edgetts' : (raw.settings?.voiceEngine ?? DEFAULT_SETTINGS.voiceEngine),
@@ -212,14 +222,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
       set({ projects: rows.map(normalizeProject).map(summary) });
     },
     createProject: async (name) => {
-      const project = newProject(name?.trim() || undefined);
+      const project = newProject(name?.trim() || undefined, true);
       await window.gensuite.project.save(project);
       set({ project, home: false });
       await get().refreshProjects();
     },
     createLocalizeProject: async (name) => {
       const project: ProjectState = {
-        ...newProject(name?.trim() || 'Video dịch & lồng tiếng'),
+        ...newProject(name?.trim() || 'Video dịch & lồng tiếng', true),
         kind: 'localize',
         currentStep: 'localize',
       };
@@ -246,7 +256,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
         name: `${source.name} — Bản sao`,
         createdAt: now,
         updatedAt: now,
-        scenes: source.scenes.map((scene) => ({ ...scene, id: uid('s_'), imagePath: undefined, audioPath: undefined, audioDuration: undefined })),
+        scenes: source.scenes.map((scene) => ({
+          ...scene,
+          id: uid('s_'),
+          imagePath: undefined,
+          audioPath: undefined,
+          audioDuration: undefined,
+          subtitleWords: undefined,
+          subtitleTimingText: undefined,
+          subtitleTimingAudioPath: undefined,
+        })),
       };
       await window.gensuite.project.save(project);
       await get().refreshProjects();

@@ -2,6 +2,7 @@ import { ipcMain, app } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { AppSettings, TopicConfig } from '../../src/shared/types';
+import { DEFAULT_SUBTITLE_PRESET_ID } from '../../src/shared/subtitlePresets';
 
 const settingsPath = (): string =>
   path.join(app.getPath('userData'), 'GenSuite', 'settings.json');
@@ -14,12 +15,19 @@ const DEFAULT_SETTINGS: AppSettings = {
   pixabayApiKey: '',
   unsplashApiKey: '',
   gensuiteApiKey: '',
+  subtitlePresets: [],
+  defaultSubtitlePresetId: DEFAULT_SUBTITLE_PRESET_ID,
 };
 
 async function readSettings(): Promise<AppSettings> {
   try {
     const raw = await fs.readFile(settingsPath(), 'utf-8');
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      subtitlePresets: Array.isArray(parsed.subtitlePresets) ? parsed.subtitlePresets : [],
+    };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }

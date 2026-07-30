@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, FileVideo, KeyRound, Languages, Loader2, Link2, LogIn, Mic, Play, RotateCcw, Subtitles, Trash2, Upload, Wand2 } from 'lucide-react';
+import { Check, FileVideo, KeyRound, Languages, Loader2, Link2, LogIn, Mic, Play, RotateCcw, Subtitles, Trash2, Upload, Wand2 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { EngineToggle } from '../components/EngineToggle';
 import { VoiceConfigPanel } from '../components/VoiceConfigPanel';
+import { SubtitleDesigner } from '../components/SubtitleDesigner';
 import { getTranscriptionProvider } from '../providers/transcription';
 import { getScriptProvider } from '../providers/script';
 import { getVoiceProvider } from '../providers/voice';
 import { missingKeyService, serviceLabel, errorMessage, loginRequiredPlatform, type VideoLoginPlatform } from '../providers/errors';
-import type { SubtitleConfig, SubtitlePosition, TranscriptionEngine, WhisperModelName } from '../shared/types';
+import type { SubtitleConfig, TranscriptionEngine, WhisperModelName } from '../shared/types';
+import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
 
 interface Props { onOpenSettings: () => void; }
 
@@ -35,16 +37,31 @@ const WHISPER_MODELS: Array<[WhisperModelName, string]> = [
   ['medium', 'Chính xác cao nhất'],
 ];
 
-const FONT_CHOICES = ['Arial', 'Times New Roman', 'Tahoma', 'Verdana', 'Georgia', 'Segoe UI'];
-// CJK-capable families, offered so a Chinese/Japanese/Korean re-dub can pick a font
-// that renders those glyphs. The names match CJK_FONTS in electron/ipc/ffmpeg.ts.
-const CJK_FONT_CHOICES = ['Microsoft YaHei', 'SimHei', 'SimSun', 'PingFang SC', 'Noto Sans CJK SC', 'Malgun Gothic', 'Yu Gothic', 'Meiryo'];
-const POSITION_LABELS: Record<SubtitlePosition, string> = { top: 'Trên', middle: 'Giữa', bottom: 'Dưới' };
-
 // The paid translation flow uses GenSuite's Gemini model; free uses Google AI Studio directly.
 const GENSUITE_TRANSLATE_MODEL = 'google-ai-studio/gemini-3.1-flash-lite';
 
-type Stage = 'idle' | 'download' | 'transcribe' | 'translate' | 'voice' | 'voice-error' | 'merge' | 'done' | 'error';
+type Stage = 'idle' | 'download' | 'transcribe' | 'translate' | 'voice' | 'voice-error' | 'align' | 'merge' | 'done' | 'error';
+
+function transcriptHasAbnormalRepetition(segments: Array<{ text: string }>): boolean {
+  if (segments.length < 8) return false;
+  const normalized = segments.map((segment) => segment.text.trim().toLocaleLowerCase().replace(/\s+/g, ' '));
+  const counts = new Map<string, number>();
+  let longestRun = 1;
+  let currentRun = 1;
+  for (let index = 0; index < normalized.length; index += 1) {
+    const text = normalized[index];
+    if (!text) continue;
+    counts.set(text, (counts.get(text) ?? 0) + 1);
+    if (index > 0 && text === normalized[index - 1]) {
+      currentRun += 1;
+      longestRun = Math.max(longestRun, currentRun);
+    } else {
+      currentRun = 1;
+    }
+  }
+  const mostRepeated = Math.max(0, ...counts.values());
+  return longestRun >= 6 || (mostRepeated >= 8 && mostRepeated / segments.length >= 0.4);
+}
 
 export function LocalizeStudio({ onOpenSettings }: Props) {
   const project = useProjectStore((state) => state.project);
@@ -64,7 +81,6 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
   const [url, setUrl] = useState('');
   const [sourceLanguage, setSourceLanguage] = useState(project.sourceLanguage || 'auto');
   const [targetLanguage, setTargetLanguage] = useState(project.targetLanguage || 'vietnamese');
-  const [showSubOptions, setShowSubOptions] = useState(false);
 
   const [stage, setStage] = useState<Stage>('idle');
   const [downloadPercent, setDownloadPercent] = useState(0);
@@ -74,6 +90,7 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
   const [voiceProgress, setVoiceProgress] = useState({ done: 0, total: 0 });
   const [voiceErrorMsg, setVoiceErrorMsg] = useState('');
   const [mergePercent, setMergePercent] = useState(0);
+  const [alignmentProgress, setAlignmentProgress] = useState({ done: 0, total: 0 });
   const [resultPath, setResultPath] = useState('');
   const [missingKey, setMissingKey] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -161,6 +178,9 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
       const segments = await transcriber.transcribe({
         projectId, sourcePath: src, model: settings.whisperModel, language: sourceLanguage,
       });
+      if (transcriptHasAbnormalRepetition(segments)) {
+        throw new Error('Kết quả nhận dạng bị lặp bất thường. Hãy chọn đúng ngôn ngữ gốc hoặc tăng chất lượng nhận dạng rồi thử lại.');
+      }
       useProjectStore.getState().setTranscript(segments);
 
       // 3 · Translate, then turn each translated line into a timed scene.
@@ -257,7 +277,13 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
           similarityBoost: cfg.similarityBoost, style: cfg.style, useSpeakerBoost: cfg.useSpeakerBoost,
           pitch: cfg.pitch, volume: cfg.volume, deliveryMode: cfg.deliveryMode,
         });
-        useProjectStore.getState().updateScene(scene.id, { audioPath: result.audioPath, audioDuration: result.durationSec });
+        useProjectStore.getState().updateScene(scene.id, {
+          audioPath: result.audioPath,
+          audioDuration: result.durationSec,
+          subtitleWords: result.wordTimings,
+          subtitleTimingText: result.wordTimings?.length ? scene.narration : undefined,
+          subtitleTimingAudioPath: result.wordTimings?.length ? result.audioPath : undefined,
+        });
         setVoiceProgress({ done: doneCount(), total: scenes.length });
       } catch (err) {
         const service = missingKeyService(err);
@@ -269,16 +295,37 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
       }
     }
 
-    // 5 · Merge the dubbed lines back over the original video.
+    // 5 · Measure word timing from the generated voice before burning captions.
+    let finalScenes = useProjectStore.getState().project.scenes;
+    if (settings.subtitle.enabled) {
+      setStage('align');
+      setAlignmentProgress({ done: 0, total: finalScenes.length });
+      for (let index = 0; index < finalScenes.length; index += 1) {
+        const scene = finalScenes[index];
+        const wordTimings = await alignSceneSubtitle(scene, projectId, targetLanguage);
+        if (!hasFreshSubtitleTiming(scene)) {
+          useProjectStore.getState().updateScene(scene.id, {
+            subtitleWords: wordTimings,
+            subtitleTimingText: scene.narration,
+            subtitleTimingAudioPath: scene.audioPath,
+          });
+        }
+        setAlignmentProgress({ done: index + 1, total: finalScenes.length });
+      }
+      finalScenes = useProjectStore.getState().project.scenes;
+    }
+
+    // 6 · Merge the dubbed lines back over the original video.
     setStage('merge');
-    const finalScenes = useProjectStore.getState().project.scenes;
     const redubSegments = finalScenes
       .filter((s) => s.audioPath && typeof s.sourceStart === 'number' && typeof s.sourceEnd === 'number')
-      .map((s) => ({ audioPath: s.audioPath as string, sourceStart: s.sourceStart as number, sourceEnd: s.sourceEnd as number, text: s.narration }));
+      .map((s) => ({ audioPath: s.audioPath as string, sourceStart: s.sourceStart as number, sourceEnd: s.sourceEnd as number, text: s.narration, wordTimings: s.subtitleWords }));
     if (!redubSegments.length) throw new Error('Không có câu thoại nào để lồng tiếng.');
     const out = await window.gensuite.ffmpeg.redub({
       projectId, sourceVideoPath: src, segments: redubSegments,
-      subtitles: settings.subtitle.enabled, subtitleConfig: settings.subtitle,
+      subtitles: settings.subtitle.enabled,
+      subtitleConfig: settings.subtitle,
+      originalAudioVolume: settings.originalAudioVolume,
     });
     if (!out) { setStage('idle'); return; } // save dialog cancelled
     useProjectStore.getState().setDubbedVideo(out);
@@ -311,6 +358,7 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
           : transcribePhase === 'transcribing' ? 'Đang nhận dạng lời thoại…' : 'Đang nhận dạng…';
       case 'translate': return 'Đang dịch lời thoại…';
       case 'voice': return `Đang lồng tiếng ${voiceProgress.done}/${voiceProgress.total}…`;
+      case 'align': return `Đang căn phụ đề với lời đọc ${alignmentProgress.done}/${alignmentProgress.total}…`;
       case 'merge': return `Đang ghép vào video gốc ${mergePercent}%`;
       default: return '';
     }
@@ -415,63 +463,18 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
           </label>
         </div>
         {sub.enabled && (
-          <button
-            type="button"
-            onClick={() => setShowSubOptions((v) => !v)}
-            className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-emerald-300"
-          >
-            Tùy chỉnh <ChevronDown size={14} className={`transition-transform ${showSubOptions ? 'rotate-180' : ''}`} />
-          </button>
-        )}
-        {sub.enabled && showSubOptions && (
-          <div className="mt-3 grid grid-cols-2 gap-3 border-t border-white/10 pt-4 text-xs">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-text/50">Phông chữ</span>
-              <select value={sub.fontFamily} onChange={(e) => patchSub({ fontFamily: e.target.value })} className="rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-text">
-                <optgroup label="Latin (Việt/Anh…)" className="bg-[#1a1a1a] text-white">
-                  {FONT_CHOICES.map((f) => <option key={f} value={f} className="bg-[#1a1a1a] text-white">{f}</option>)}
-                </optgroup>
-                <optgroup label="CJK (Trung/Nhật/Hàn)" className="bg-[#1a1a1a] text-white">
-                  {CJK_FONT_CHOICES.map((f) => <option key={f} value={f} className="bg-[#1a1a1a] text-white">{f}</option>)}
-                </optgroup>
-              </select>
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-text/50">Vị trí</span>
-              <select value={sub.position} onChange={(e) => patchSub({ position: e.target.value as SubtitlePosition })} className="rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-text">
-                {(Object.keys(POSITION_LABELS) as SubtitlePosition[]).map((p) => <option key={p} value={p} className="bg-[#1a1a1a] text-white">{POSITION_LABELS[p]}</option>)}
-              </select>
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-text/50">Cỡ chữ ({sub.fontSizePct}% chiều cao)</span>
-              <input type="range" min={2} max={12} step={0.5} value={sub.fontSizePct} onChange={(e) => patchSub({ fontSizePct: Number(e.target.value) })} className="accent-emerald-400" />
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-text/50">Độ dày viền ({sub.outlineWidth}px)</span>
-              <input type="range" min={0} max={8} step={1} value={sub.outlineWidth} onChange={(e) => patchSub({ outlineWidth: Number(e.target.value) })} className="accent-emerald-400" />
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-text/50">Đổ bóng ({sub.shadow}px)</span>
-              <input type="range" min={0} max={6} step={1} value={sub.shadow} onChange={(e) => patchSub({ shadow: Number(e.target.value) })} className="accent-emerald-400" />
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-text/50">Độ rộng tối đa / dòng ({sub.maxCharsPerLine || 'không giới hạn'} · chữ CJK tính gấp đôi)</span>
-              <input type="range" min={0} max={80} step={1} value={sub.maxCharsPerLine} onChange={(e) => patchSub({ maxCharsPerLine: Number(e.target.value) })} className="accent-emerald-400" />
-            </label>
-            <label className="flex items-center gap-2">
-              <span className="text-text/50">Màu chữ</span>
-              <input type="color" value={sub.primaryColor} onChange={(e) => patchSub({ primaryColor: e.target.value })} className="h-7 w-10 cursor-pointer rounded border border-white/10 bg-transparent" />
-            </label>
-            <label className="flex items-center gap-2">
-              <span className="text-text/50">Màu viền</span>
-              <input type="color" value={sub.outlineColor} onChange={(e) => patchSub({ outlineColor: e.target.value })} className="h-7 w-10 cursor-pointer rounded border border-white/10 bg-transparent" />
-            </label>
-            <label className="col-span-2 flex cursor-pointer items-center gap-2">
-              <input type="checkbox" checked={sub.bold} onChange={(e) => patchSub({ bold: e.target.checked })} className="size-4 cursor-pointer accent-emerald-400" />
-              <span className="text-text/70">In đậm</span>
-            </label>
+          <div className="mt-4 border-t border-white/10 pt-4">
+            <SubtitleDesigner config={sub} onChange={(next) => patchSettings({ subtitle: next })} ratio="16:9" />
+            <p className="mt-3 text-[11px] leading-5 text-white/35">Highlight được căn lại từ chính giọng đọc trước khi hoàn thiện video.</p>
           </div>
         )}
+      </section>
+
+      <section className="workspace-panel mb-5 rounded-2xl p-5">
+        <div className="flex items-center justify-between gap-4 text-sm font-bold text-white"><span>6. Âm thanh video gốc</span><span className="text-xs font-semibold text-emerald-300">{project.settings.originalAudioVolume}%</span></div>
+        <p className="mt-2 text-[11px] leading-5 text-white/35">Giữ nhẹ không khí và âm thanh nền của video gốc bên dưới giọng dịch.</p>
+        <input type="range" min={0} max={40} step={1} value={project.settings.originalAudioVolume} onChange={(event) => patchSettings({ originalAudioVolume: Number(event.target.value) })} disabled={running} className="mt-4 w-full accent-emerald-400 disabled:opacity-45" />
+        <div className="mt-1 flex justify-between text-[10px] text-white/25"><span>Tắt tiếng gốc</span><span>Rõ hơn</span></div>
       </section>
 
       {/* Errors */}
@@ -518,9 +521,9 @@ export function LocalizeStudio({ onOpenSettings }: Props) {
       {running && (
         <div className="mb-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-5">
           <p className="flex items-center gap-2 text-sm font-semibold text-emerald-200"><Loader2 size={16} className="animate-spin" /> {stageLabel()}</p>
-          {(stage === 'download' || stage === 'merge' || stage === 'voice') && (
+          {(stage === 'download' || stage === 'merge' || stage === 'voice' || stage === 'align') && (
             <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10">
-              <div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${stage === 'download' ? downloadPercent : stage === 'merge' ? mergePercent : voiceProgress.total ? (voiceProgress.done / voiceProgress.total) * 100 : 0}%` }} />
+              <div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${stage === 'download' ? downloadPercent : stage === 'merge' ? mergePercent : stage === 'align' ? (alignmentProgress.total ? (alignmentProgress.done / alignmentProgress.total) * 100 : 0) : voiceProgress.total ? (voiceProgress.done / voiceProgress.total) * 100 : 0}%` }} />
             </div>
           )}
         </div>
