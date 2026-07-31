@@ -3,6 +3,8 @@
 // raw error. Any other Error is shown as-is.
 
 const PREFIX = 'MISSING_KEY:';
+const AUTH_REQUIRED = 'AUTH_REQUIRED:gensuite';
+const UPGRADE_REQUIRED = 'UPGRADE_REQUIRED:basic';
 const DOUYIN_LOGIN_REQUIRED = 'DOUYIN_LOGIN_REQUIRED';
 const TIKTOK_LOGIN_REQUIRED = 'TIKTOK_LOGIN_REQUIRED';
 
@@ -44,6 +46,12 @@ function isNetworkError(msg: string): boolean {
 
 export function errorMessage(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes(AUTH_REQUIRED)) {
+    return 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại để tiếp tục.';
+  }
+  if (msg.includes(UPGRADE_REQUIRED)) {
+    return 'Tính năng này cần gói Basic trở lên. Vui lòng nâng cấp hoặc kiểm tra lại gói tài khoản.';
+  }
   if (msg.includes(DOUYIN_LOGIN_REQUIRED)) {
     return 'Douyin cần xác nhận lại phiên truy cập. Không bắt buộc đăng nhập tài khoản.';
   }

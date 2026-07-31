@@ -43,6 +43,8 @@ const bridge: GensuiteBridge = {
     list: () => ipcRenderer.invoke('project:list'),
     remove: (id: string) => ipcRenderer.invoke('project:remove', id),
     dir: (id: string) => ipcRenderer.invoke('project:dir', id),
+    size: (id: string) => ipcRenderer.invoke('project:size', id),
+    openDir: (id: string) => ipcRenderer.invoke('project:openDir', id),
     cleanup: (id: string) => ipcRenderer.invoke('project:cleanup', id),
   },
   topics: {
@@ -87,6 +89,7 @@ const bridge: GensuiteBridge = {
     loginTikTok: () => ipcRenderer.invoke('ytdlp:tiktokLogin'),
     clearTikTokSession: () => ipcRenderer.invoke('ytdlp:tiktokClearSession'),
     import: (projectId: string) => ipcRenderer.invoke('ytdlp:import', projectId),
+    importMany: (projectId: string) => ipcRenderer.invoke('ytdlp:importMany', projectId),
     onProgress: (cb: (p: YtdlpProgress) => void) => {
       const listener = (_e: unknown, p: YtdlpProgress) => cb(p);
       ipcRenderer.on('ytdlp:progress', listener);

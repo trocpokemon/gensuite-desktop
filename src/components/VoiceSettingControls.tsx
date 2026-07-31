@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Check, ChevronDown, Search } from 'lucide-react';
+import { ArrowLeft, Check, ChevronDown, LockKeyhole, Search } from 'lucide-react';
 import type { GenSuiteModel } from '../providers/voice/GenSuiteVoiceAdapter';
 
 export interface LanguageOption {
@@ -68,14 +68,15 @@ export function LanguageDropdown({ value, options, placeholder = 'Chọn ngôn n
   </div>;
 }
 
-export function ModelPickerSheet({ models, selectedId, onSelect, onClose }: {
+export function ModelPickerSheet({ models, selectedId, onSelect, onClose, premiumAllowed = true }: {
   models: GenSuiteModel[];
   selectedId: string;
   onSelect: (id: string) => void;
   onClose: () => void;
+  premiumAllowed?: boolean;
 }) {
   return <div className="absolute inset-0 z-30 flex flex-col bg-[#0f0f10] voice-sheet-in">
-    <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4"><button type="button" onClick={onClose} className="rounded-lg p-2 text-white/45 hover:bg-white/5 hover:text-white"><ArrowLeft size={17} /></button><div><h3 className="text-sm font-bold">Chọn mô hình</h3><p className="mt-0.5 text-[9px] uppercase tracking-wider text-white/30">Mô hình khả dụng từ GenSuite API</p></div></div>
-    <div className="min-h-0 flex-1 overflow-y-auto p-4">{models.map((model) => <button key={model.id} type="button" onClick={() => { onSelect(model.id); onClose(); }} className={`mb-2 flex w-full items-center gap-3 rounded-xl border p-4 text-left transition ${model.id === selectedId ? 'border-emerald-400/35 bg-emerald-400/[0.07]' : 'border-white/5 bg-white/[0.02] hover:border-white/15 hover:bg-white/[0.04]'}`}><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-xs font-bold text-white/85">{model.name}</span>{model.paidOnly && <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-1.5 py-0.5 text-[8px] font-black uppercase text-emerald-300">Mới nhất</span>}</span><span className="mt-1 block truncate font-mono text-[9px] text-white/25">{model.id}</span></span>{model.id === selectedId && <Check size={15} className="text-emerald-300" />}</button>)}</div>
+    <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4"><button type="button" onClick={onClose} className="rounded-lg p-2 text-white/45 hover:bg-white/5 hover:text-white"><ArrowLeft size={17} /></button><div><h3 className="text-sm font-bold">Chọn mô hình</h3><p className="mt-0.5 text-[9px] uppercase tracking-wider text-white/30">Mô hình khả dụng cho tài khoản của bạn</p></div></div>
+    <div className="min-h-0 flex-1 overflow-y-auto p-4">{models.map((model) => { const locked = model.paidOnly && !premiumAllowed; return <button key={model.id} type="button" disabled={locked} onClick={() => { onSelect(model.id); onClose(); }} className={`mb-2 flex w-full items-center gap-3 rounded-xl border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-45 ${model.id === selectedId ? 'border-emerald-400/35 bg-emerald-400/[0.07]' : 'border-white/5 bg-white/[0.02] hover:border-white/15 hover:bg-white/[0.04]'}`}><span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="truncate text-xs font-bold text-white/85">{model.name}</span>{model.paidOnly && <span className="rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[8px] font-black uppercase text-amber-300">Trả phí</span>}</span><span className="mt-1 block truncate font-mono text-[9px] text-white/25">{model.id}</span></span>{locked ? <LockKeyhole size={14} className="text-amber-300" /> : model.id === selectedId && <Check size={15} className="text-emerald-300" />}</button>; })}</div>
   </div>;
 }

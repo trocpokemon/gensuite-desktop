@@ -68,14 +68,13 @@ export function DirectorRoom({ onOpenSettings }: Props) {
     return () => document.removeEventListener('mousedown', closeWhenClickingOutside);
   }, [selectionMenu]);
 
-  // Load the GenSuite model catalog once the cloud engine is selected and a key
-  // exists. The picker only appears for the paid GenSuite engine.
+  // Load the model catalog when the account-backed cloud engine is selected.
   useEffect(() => {
-    if (scriptEngine !== 'gensuite' || !keys.gensuiteApiKey?.trim()) return;
+    if (scriptEngine !== 'gensuite') return;
     let cancelled = false;
     setModelsLoading(true);
     setModelsError(null);
-    listScriptModels(keys.gensuiteApiKey)
+    listScriptModels()
       .then((rows) => {
         if (cancelled) return;
         setModels(rows);
@@ -84,10 +83,10 @@ export function DirectorRoom({ onOpenSettings }: Props) {
           setScriptModel(rows[0].id);
         }
       })
-      .catch((err) => { if (!cancelled) setModelsError(missingKeyService(err) ? 'MISSING_KEY:gensuite' : errorMessage(err)); })
+      .catch((err) => { if (!cancelled) setModelsError(errorMessage(err)); })
       .finally(() => { if (!cancelled) setModelsLoading(false); });
     return () => { cancelled = true; };
-  }, [scriptEngine, keys.gensuiteApiKey]);
+  }, [scriptEngine]);
 
   const run = async <T,>(work: () => Promise<T>): Promise<T | null> => {
     setError(null); setMissingKey(null);

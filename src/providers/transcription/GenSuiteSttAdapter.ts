@@ -1,6 +1,8 @@
 import type { ITranscriptionProvider, TranscribeRequest } from './types';
 import type { TranscriptSegment } from '../../shared/types';
 import { localFileUrl } from '../../shared/localFile';
+import { gensuiteFetch } from '../../lib/gensuiteAuth';
+import type { GenSuiteFeature } from '../../lib/gensuiteAuth';
 
 // GenSuite paid speech-to-text. Audio is extracted to a 16kHz mono WAV in the
 // main process (shared with the local engine — this matches /v1/stt's required
@@ -29,11 +31,9 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
   readonly engine = 'cloud' as const;
   readonly isLocal = false;
 
-  constructor(private apiKey: string) {}
+  constructor(private feature?: GenSuiteFeature) {}
 
   async transcribe(req: TranscribeRequest): Promise<TranscriptSegment[]> {
-    if (!this.apiKey?.trim()) throw new Error('MISSING_KEY:gensuite');
-
     const wavPath = await window.gensuite.whisper.extract({
       projectId: req.projectId,
       sourcePath: req.sourcePath,
@@ -51,15 +51,14 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
     form.set('durationSeconds', String(Math.max(1, Math.ceil(durationSeconds))));
     if (req.language && req.language !== 'auto') form.set('language', req.language);
 
-    const submit = await fetch(`${BASE_URL}/stt`, {
+    const submit = await gensuiteFetch(`${BASE_URL}/stt`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${this.apiKey.trim()}` },
       body: form,
-    });
+    }, this.feature);
     if (!submit.ok) throw await sttError(submit);
     const submitData = await submit.json().catch(() => null as any);
     const jobId = String(submitData?.jobId ?? '');
-    if (!jobId) throw new Error('GenSuite STT không trả về jobId.');
+    if (!jobId) throw new Error('Không thể bắt đầu nhận dạng lời thoại. Vui lòng thử lại.');
 
     const job = await this.pollJob(jobId);
     const transcript = String(job?.transcript ?? '').trim();
@@ -70,26 +69,24 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
       : transcript
         ? [{ id: 'seg_0', start: 0, end: Math.max(1, durationSeconds), text: transcript }]
         : [];
-    if (!segments.length) throw new Error('GenSuite STT không nhận dạng được lời thoại nào.');
+    if (!segments.length) throw new Error('Không nhận dạng được lời thoại nào trong tệp nguồn.');
     return segments;
   }
 
   private async pollJob(jobId: string): Promise<any> {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      const resp = await fetch(`${BASE_URL}/stt/${jobId}`, {
-        headers: { Authorization: `Bearer ${this.apiKey.trim()}` },
-      });
+      const resp = await gensuiteFetch(`${BASE_URL}/stt/${jobId}`, {}, this.feature);
       if (!resp.ok) throw await sttError(resp);
       const data = await resp.json().catch(() => null as any);
       const status = String(data?.status ?? '');
       if (status === 'done') return data;
       if (status === 'failed' || status === 'error') {
-        throw new Error(String(data?.error ?? 'GenSuite STT xử lý thất bại.').slice(0, 300));
+        throw new Error('Không thể nhận dạng lời thoại. Vui lòng kiểm tra tệp nguồn và thử lại.');
       }
       await delay(POLL_INTERVAL_MS);
     }
-    throw new Error('GenSuite STT quá thời gian chờ.');
+    throw new Error('Nhận dạng lời thoại quá thời gian chờ. Vui lòng thử lại.');
   }
 }
 
@@ -97,9 +94,10 @@ async function sttError(resp: Response): Promise<Error> {
   const data = await resp.json().catch(() => null as any);
   const code = String(data?.error ?? '');
   const message = String(data?.message ?? '');
-  if (resp.status === 401 || resp.status === 403 || code === 'INVALID_API_KEY') return new Error('MISSING_KEY:gensuite');
+  if (resp.status === 401 || code === 'INVALID_API_KEY' || code === 'AUTH_REQUIRED') return new Error('AUTH_REQUIRED:gensuite');
+  if (code === 'FEATURE_UPGRADE_REQUIRED') return new Error('UPGRADE_REQUIRED:basic');
   if (resp.status === 402 || code === 'INSUFFICIENT_CREDITS') return new Error('Tài khoản GenSuite không đủ credits để nhận dạng.');
-  return new Error(`GenSuite STT lỗi ${resp.status}: ${message || code || 'yêu cầu thất bại'}`.slice(0, 300));
+  return new Error(String(message || code || 'Không thể nhận dạng lời thoại. Vui lòng thử lại.').slice(0, 300));
 }
 
 function delay(ms: number): Promise<void> {

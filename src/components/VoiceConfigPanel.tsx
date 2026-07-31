@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, Check, ChevronDown, Copy, Loader2, Pause, Play, RefreshCw, Search, SlidersHorizontal, Upload, User, X } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
-import { useSettingsStore } from '../store/settingsStore';
+import { useAuthStore } from '../store/authStore';
 import { cloneGenSuiteVoice, getGenSuiteVoicePreview, listGenSuiteModels, listGenSuiteVoicePage, listGenSuiteVoices } from '../providers/voice/GenSuiteVoiceAdapter';
 import type { GenSuiteModel, GenSuiteVoice, GenSuiteVoiceEngine } from '../providers/voice/GenSuiteVoiceAdapter';
 import { missingKeyService, errorMessage } from '../providers/errors';
@@ -9,12 +9,16 @@ import type { ProjectSettings, VoiceConfig, VoiceEngine } from '../shared/types'
 import { CompactFilter, LanguageDropdown, ModelPickerSheet } from './VoiceSettingControls';
 import { EDGE_TTS_FALLBACK_VOICES, localeLabel, edgeVoiceName } from '../providers/voice/edgeTtsCatalog';
 import type { EdgeTtsVoice } from '../shared/types';
+import { useEntitlementStore } from '../store/entitlementStore';
+import type { GenSuiteFeature } from '../lib/gensuiteAuth';
 
 interface Props {
   /** Rendered under the config controls (e.g. a host-specific action button). */
   footer?: ReactNode;
   /** Surface a missing-key notice to the host so it can render the settings prompt. */
   onMissingKey?: (service: string | null) => void;
+  /** Optional paid workflow whose cloud choices need an additional entitlement. */
+  feature?: GenSuiteFeature;
 }
 
 function edgeVoiceToOption(voice: EdgeTtsVoice): GenSuiteVoice {
@@ -25,7 +29,23 @@ function edgeVoiceToOption(voice: EdgeTtsVoice): GenSuiteVoice {
     labels: { gender: voice.gender, language: voice.locale },
   };
 }
-const EDGE_VOICE_OPTIONS: GenSuiteVoice[] = EDGE_TTS_FALLBACK_VOICES.map(edgeVoiceToOption);
+
+const EDGE_LANGUAGE_PRIORITY = ['vi', 'en', 'ja', 'es'] as const;
+
+function edgeLanguageRank(locale?: string): number {
+  const language = String(locale ?? '').toLocaleLowerCase().split('-')[0];
+  const index = EDGE_LANGUAGE_PRIORITY.indexOf(language as typeof EDGE_LANGUAGE_PRIORITY[number]);
+  return index < 0 ? EDGE_LANGUAGE_PRIORITY.length : index;
+}
+
+function compareEdgeVoices(a: GenSuiteVoice, b: GenSuiteVoice): number {
+  const rank = edgeLanguageRank(a.labels?.language) - edgeLanguageRank(b.labels?.language);
+  if (rank) return rank;
+  const locale = localeLabel(a.labels?.language ?? '').localeCompare(localeLabel(b.labels?.language ?? ''), 'vi');
+  return locale || a.name.localeCompare(b.name, 'vi');
+}
+
+const EDGE_VOICE_OPTIONS: GenSuiteVoice[] = EDGE_TTS_FALLBACK_VOICES.map(edgeVoiceToOption).sort(compareEdgeVoices);
 const EDGE_MODEL_OPTIONS: GenSuiteModel[] = [];
 
 let edgeVoiceCache: GenSuiteVoice[] | null = null;
@@ -96,7 +116,7 @@ function RangeField({ label, value, min, max, step, hint, onChange }: {
 
 const ENGINE_OPTIONS: Array<{ id: VoiceEngine; label: string; mark: string; thumbnail: string; description: string; paid: boolean }> = [
   { id: 'edgetts', label: 'Edge TTS', mark: 'E', thumbnail: 'provider-thumbnails/edgetts.webp', description: 'Giọng miễn phí, không cần API key, hỗ trợ ~90 ngôn ngữ.', paid: false },
-  { id: 'genvoice', label: 'GenVoice', mark: 'G', thumbnail: 'provider-thumbnails/genvoice.webp', description: 'Giọng đa ngôn ngữ qua GenSuite API, hỗ trợ clone giọng cá nhân.', paid: true },
+  { id: 'genvoice', label: 'GenVoice', mark: 'G', thumbnail: 'provider-thumbnails/genvoice.webp', description: 'Giọng đa ngôn ngữ theo tài khoản GenSuite, hỗ trợ clone giọng cá nhân.', paid: true },
   { id: 'elevenlabs', label: 'ElevenLabs', mark: 'II', thumbnail: 'provider-thumbnails/elevenlabs.webp', description: 'Giọng tự nhiên, giàu cảm xúc với thư viện cộng đồng phong phú.', paid: true },
   { id: 'minimax', label: 'MiniMax', mark: 'M', thumbnail: 'provider-thumbnails/minimax.webp', description: 'Giọng cloud biểu cảm, sử dụng các giọng clone đã đồng bộ.', paid: true },
 ];
@@ -104,12 +124,16 @@ const ENGINE_OPTIONS: Array<{ id: VoiceEngine; label: string; mark: string; thum
 // Shared voice provider/voice/model/param configuration. Extracted from SoundStage
 // so the localize studio offers the exact same engine + voice picker. Reads and
 // writes voice settings straight to the active project's store.
-export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
+export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
   const project = useProjectStore((state) => state.project);
   const setScenes = useProjectStore((state) => state.setScenes);
   const patchSettings = useProjectStore((state) => state.patchSettings);
   const setVoiceEngine = useProjectStore((state) => state.setVoiceEngine);
-  const keys = useSettingsStore((state) => state.keys);
+  const userId = useAuthStore((state) => state.user?.id ?? '');
+  const entitlementStatus = useEntitlementStore((state) => state.status);
+  const allowedVoiceEngines = useEntitlementStore((state) => state.allowedVoiceEngines);
+  const premiumVoiceModels = useEntitlementStore((state) => state.features.premiumVoiceModels);
+  const canUseLocalizeCloud = useEntitlementStore((state) => state.features.localizeCloud);
   const engine = project.settings.voiceEngine;
   const config = project.settings.voiceConfigs[engine];
 
@@ -154,8 +178,8 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
   const flagMissingKey = (service: string | null) => onMissingKey?.(service);
 
   useEffect(() => {
-    if (catalogCacheKey !== keys.gensuiteApiKey) {
-      catalogCacheKey = keys.gensuiteApiKey;
+    if (catalogCacheKey !== userId) {
+      catalogCacheKey = userId;
       for (const cachedEngine of Object.keys(voiceCatalogCache) as GenSuiteVoiceEngine[]) delete voiceCatalogCache[cachedEngine];
       modelCatalogCache = null;
     }
@@ -172,7 +196,7 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
       setCatalogError('');
       window.gensuite.edgetts.voices().then((list) => {
         if (!active) return;
-        const options = list.map(edgeVoiceToOption);
+        const options = list.map(edgeVoiceToOption).sort(compareEdgeVoices);
         edgeVoiceCache = options.length ? options : EDGE_VOICE_OPTIONS;
         setVoices(edgeVoiceCache);
       }).catch(() => {
@@ -194,8 +218,8 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
     setCatalogBusy(true);
     setCatalogError('');
     Promise.all([
-      cachedModels ? Promise.resolve(cachedModels) : listGenSuiteModels(keys.gensuiteApiKey),
-      cachedVoices ? Promise.resolve(cachedVoices) : listGenSuiteVoices(keys.gensuiteApiKey, engine),
+      cachedModels ? Promise.resolve(cachedModels) : listGenSuiteModels(),
+      cachedVoices ? Promise.resolve(cachedVoices) : listGenSuiteVoices(engine),
     ]).then(([models, nextVoices]) => {
       modelCatalogCache = models;
       voiceCatalogCache[engine] = nextVoices;
@@ -218,12 +242,12 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
       if (!active) return;
       const service = missingKeyService(error);
       if (service) flagMissingKey(service);
-      setCatalogError(service ? 'Cần GenSuite API key để tải model và giọng.' : errorMessage(error));
+      setCatalogError(service ? 'Cần cấu hình khóa cho nguồn này để tải dữ liệu.' : errorMessage(error));
       setVoices([]);
     }).finally(() => active && setCatalogBusy(false));
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engine, keys.gensuiteApiKey, catalogRefresh]);
+  }, [engine, userId, catalogRefresh]);
 
   useEffect(() => {
     if (!voiceLibraryOpen || engine !== 'elevenlabs' || librarySource !== 'explore') return;
@@ -231,7 +255,7 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
     setExploreBusy(true);
     const timer = window.setTimeout(() => {
       setExploreError('');
-      listGenSuiteVoicePage(keys.gensuiteApiKey, 'elevenlabs', {
+      listGenSuiteVoicePage('elevenlabs', {
         type: 'explore', page: 1, pageSize: 30, search: voiceQuery,
         language: exploreLanguage, accent: exploreAccent, category: exploreQuality,
         gender: exploreGender, useCase: exploreUseCase,
@@ -244,7 +268,7 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
         .finally(() => active && setExploreBusy(false));
     }, 300);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [voiceLibraryOpen, engine, librarySource, voiceQuery, keys.gensuiteApiKey, exploreLanguage, exploreAccent, exploreQuality, exploreGender, exploreUseCase]);
+  }, [voiceLibraryOpen, engine, librarySource, voiceQuery, userId, exploreLanguage, exploreAccent, exploreQuality, exploreGender, exploreUseCase]);
 
   const models = engine === 'edgetts' ? EDGE_MODEL_OPTIONS : catalogModels[engine];
   const edgeLanguageOptions = useMemo(() => {
@@ -254,7 +278,10 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
       const locale = voice.labels?.language;
       if (locale && !locales.has(locale)) locales.set(locale, localeLabel(locale));
     }
-    const sorted = [...locales.entries()].sort((a, b) => a[1].localeCompare(b[1], 'vi'));
+    const sorted = [...locales.entries()].sort((a, b) => {
+      const rank = edgeLanguageRank(a[0]) - edgeLanguageRank(b[0]);
+      return rank || a[1].localeCompare(b[1], 'vi');
+    });
     return [ALL_FILTER, ...sorted.map(([value, label]) => ({ value, label }))];
   }, [engine, voices]);
   const filteredVoices = useMemo(() => {
@@ -284,8 +311,18 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
     setScenes(project.scenes.map((scene) => ({ ...scene, audioPath: undefined, audioDuration: undefined })));
   };
 
+  const canUseVoiceEngine = (next: VoiceEngine): boolean => next === 'edgetts' || (
+    entitlementStatus === 'ready'
+    && (feature !== 'localize-cloud' || canUseLocalizeCloud)
+    && (allowedVoiceEngines === null || allowedVoiceEngines.includes(next))
+  );
+
   const changeEngine = (next: VoiceEngine) => {
     if (next === engine) return;
+    if (!canUseVoiceEngine(next)) {
+      setCatalogError(entitlementStatus === 'ready' ? 'Gói hiện tại chưa mở lựa chọn trực tuyến này. Bạn vẫn có thể dùng giọng miễn phí.' : 'Đang kiểm tra quyền tài khoản. Vui lòng thử lại sau.');
+      return;
+    }
     setVoiceEngine(next);
     clearGeneratedAudio();
   };
@@ -300,6 +337,10 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
   };
 
   const selectModel = (modelId: string) => {
+    if (models.find((model) => model.id === modelId)?.paidOnly && !premiumVoiceModels) {
+      setCatalogError('Mô hình này cần gói trả phí.');
+      return;
+    }
     const patch: Partial<VoiceConfig> = { modelId };
     if (engine === 'elevenlabs' && modelId !== 'eleven_v3' && config.language === 'vietnamese') patch.language = 'english';
     updateConfig(patch);
@@ -342,7 +383,7 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
     let previewUrl = voice.previewUrl || dynamicPreviewUrlsRef.current.get(voice.voiceId) || '';
     if (!previewUrl && canPreviewDynamically) {
       try {
-        const blob = await getGenSuiteVoicePreview(keys.gensuiteApiKey, {
+        const blob = await getGenSuiteVoicePreview({
           engine: 'genvoice', voiceId: voice.voiceId, modelId: config.modelId,
         });
         previewUrl = URL.createObjectURL(blob);
@@ -403,7 +444,7 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
         throw new Error('Mẫu MiniMax phải dài từ 10 giây đến 5 phút.');
       }
       const minimaxLanguage = GENMAX_LANGUAGES.find(([id]) => id === cloneLanguage)?.[1];
-      const result = await cloneGenSuiteVoice(keys.gensuiteApiKey, {
+      const result = await cloneGenSuiteVoice({
         engine,
         name: cloneName,
         file: cloneFile,
@@ -443,7 +484,7 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
     setExploreBusy(true);
     setExploreError('');
     try {
-      const result = await listGenSuiteVoicePage(keys.gensuiteApiKey, 'elevenlabs', {
+      const result = await listGenSuiteVoicePage('elevenlabs', {
         type: 'explore', page: exploreNextPage, pageSize: 30, search: voiceQuery,
         language: exploreLanguage, accent: exploreAccent, category: exploreQuality,
         gender: exploreGender, useCase: exploreUseCase,
@@ -511,12 +552,12 @@ export function VoiceConfigPanel({ footer, onMissingKey }: Props) {
 
       {providerPickerOpen && <div className="absolute inset-0 z-40 flex flex-col bg-[#0f0f10] voice-sheet-in">
         <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4"><button type="button" onClick={() => setProviderPickerOpen(false)} className="rounded-lg p-2 text-white/45 transition hover:bg-white/5 hover:text-white"><ArrowLeft size={17} /></button><div><h3 className="text-sm font-bold">Chọn nhà cung cấp</h3><p className="mt-0.5 text-[9px] uppercase tracking-wider text-white/30">Engine tạo giọng cho dự án</p></div></div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-5"><div className="flex flex-col gap-2">{ENGINE_OPTIONS.map((option) => { const active = option.id === engine; return <button key={option.id} type="button" onClick={() => { changeEngine(option.id); setProviderPickerOpen(false); }} className={`group relative flex items-center gap-3.5 overflow-hidden rounded-xl border px-3.5 py-3 text-left transition-all duration-150 ${active ? 'border-emerald-400/40 bg-emerald-400/[0.06]' : 'border-white/[0.07] bg-white/[0.018] hover:border-white/[0.16] hover:bg-white/[0.035]'}`}><span className={`relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg text-xs font-black transition ${active ? 'text-emerald-200' : 'text-white/45 group-hover:text-white/70'}`}><span>{option.mark}</span><img src={option.thumbnail} alt="" className="absolute inset-0 h-full w-full object-contain" onError={(event) => { event.currentTarget.style.display = 'none'; }} /></span><span className="min-w-0 flex-1"><span className="flex items-center gap-1.5"><span className={`truncate text-sm font-bold transition ${active ? 'text-white' : 'text-white/90'}`}>{option.label}</span>{active && <Check size={14} className="shrink-0 text-emerald-300" strokeWidth={3} />}</span><span className="mt-0.5 block truncate text-[11px] leading-4 text-white/40">{option.description}</span></span><span className={`shrink-0 rounded px-1 py-px text-[8px] font-semibold uppercase ${option.paid ? 'bg-amber-400/15 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'}`}>{option.paid ? 'Cloud API' : 'Miễn phí'}</span><ChevronDown size={14} className={`shrink-0 -rotate-90 transition ${active ? 'text-emerald-300/70' : 'text-white/20 group-hover:text-white/45'}`} /></button>; })}</div></div>
-        <div className="border-t border-white/10 px-5 py-4 text-[10px] leading-4 text-white/25">Nhà cung cấp Cloud API sử dụng GenSuite API key và credits trong tài khoản của bạn.</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-5"><div className="flex flex-col gap-2">{ENGINE_OPTIONS.map((option) => { const active = option.id === engine; const allowed = canUseVoiceEngine(option.id); return <button key={option.id} type="button" disabled={!allowed} onClick={() => { changeEngine(option.id); setProviderPickerOpen(false); }} className={`group relative flex items-center gap-3.5 overflow-hidden rounded-xl border px-3.5 py-3 text-left transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${active ? 'border-emerald-400/40 bg-emerald-400/[0.06]' : 'border-white/[0.07] bg-white/[0.018] hover:border-white/[0.16] hover:bg-white/[0.035]'}`}><span className={`relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg text-xs font-black transition ${active ? 'text-emerald-200' : 'text-white/45 group-hover:text-white/70'}`}><span>{option.mark}</span><img src={option.thumbnail} alt="" className="absolute inset-0 h-full w-full object-contain" onError={(event) => { event.currentTarget.style.display = 'none'; }} /></span><span className="min-w-0 flex-1"><span className="flex items-center gap-1.5"><span className={`truncate text-sm font-bold transition ${active ? 'text-white' : 'text-white/90'}`}>{option.label}</span>{active && <Check size={14} className="shrink-0 text-emerald-300" strokeWidth={3} />}</span><span className="mt-0.5 block truncate text-[11px] leading-4 text-white/40">{option.description}</span></span><span className={`shrink-0 rounded px-1 py-px text-[8px] font-semibold uppercase ${allowed ? option.paid ? 'bg-amber-400/15 text-amber-300' : 'bg-emerald-500/20 text-emerald-300' : 'bg-white/5 text-white/35'}`}>{allowed ? option.paid ? 'Trực tuyến' : 'Miễn phí' : 'Chưa mở'}</span><ChevronDown size={14} className={`shrink-0 -rotate-90 transition ${active ? 'text-emerald-300/70' : 'text-white/20 group-hover:text-white/45'}`} /></button>; })}</div></div>
+        <div className="border-t border-white/10 px-5 py-4 text-[10px] leading-4 text-white/25">Các giọng trực tuyến sử dụng phiên đăng nhập và credits trong tài khoản của bạn.</div>
       </div>}
-      {modelPickerOpen && <ModelPickerSheet models={models} selectedId={config.modelId} onSelect={selectModel} onClose={() => setModelPickerOpen(false)} />}
+      {modelPickerOpen && <ModelPickerSheet models={models} selectedId={config.modelId} onSelect={selectModel} onClose={() => setModelPickerOpen(false)} premiumAllowed={premiumVoiceModels} />}
       {cloneOpen && (engine === 'genvoice' || engine === 'minimax') && <div className="absolute inset-0 z-40 flex flex-col bg-[#0f0f10] voice-sheet-in">
-        <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4"><button type="button" onClick={() => setCloneOpen(false)} className="rounded-lg p-2 text-white/45 hover:bg-white/5 hover:text-white"><ArrowLeft size={17} /></button><div><h3 className="text-sm font-bold">Sao chép giọng {engine === 'genvoice' ? 'GenVoice' : 'MiniMax'}</h3><p className="mt-0.5 text-[9px] uppercase tracking-wider text-white/30">Tạo voice clone qua GenSuite API</p></div></div>
+        <div className="flex items-center gap-3 border-b border-white/10 px-5 py-4"><button type="button" onClick={() => setCloneOpen(false)} className="rounded-lg p-2 text-white/45 hover:bg-white/5 hover:text-white"><ArrowLeft size={17} /></button><div><h3 className="text-sm font-bold">Sao chép giọng {engine === 'genvoice' ? 'GenVoice' : 'MiniMax'}</h3><p className="mt-0.5 text-[9px] uppercase tracking-wider text-white/30">Tạo giọng cá nhân cho tài khoản của bạn</p></div></div>
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
           <label className="block space-y-2 text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Tên giọng<input value={cloneName} onChange={(event) => setCloneName(event.target.value)} placeholder="Ví dụ: Giọng kể chuyện của tôi" className="w-full rounded-xl border border-white/10 bg-white/[0.03] px-3.5 py-3 text-xs font-medium normal-case tracking-normal text-white outline-none focus:border-emerald-400/60" /></label>
           <div className="space-y-2"><label className="text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Ngôn ngữ <span className="text-emerald-300">*</span></label><LanguageDropdown value={cloneLanguage} options={engine === 'genvoice' ? genvoiceLanguageOptions : allGenmaxLanguageOptions} onChange={setCloneLanguage} /></div>

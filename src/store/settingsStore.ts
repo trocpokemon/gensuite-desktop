@@ -2,15 +2,14 @@ import { create } from 'zustand';
 import type { AppSettings } from '../shared/types';
 import { DEFAULT_SUBTITLE_PRESET_ID } from '../shared/subtitlePresets';
 
-// API keys, persisted to <userData>/GenSuite/settings.json via IPC. Values are
-// masked in the UI; only the SettingsPanel reveals/edits raw values.
+// Optional third-party keys and user preferences are persisted through IPC.
+// GenSuite account access comes from the signed-in session and is not stored here.
 
 const EMPTY: AppSettings = {
   googleApiKey: '',
   pexelsApiKey: '',
   pixabayApiKey: '',
   unsplashApiKey: '',
-  gensuiteApiKey: '',
   subtitlePresets: [],
   defaultSubtitlePresetId: DEFAULT_SUBTITLE_PRESET_ID,
 };

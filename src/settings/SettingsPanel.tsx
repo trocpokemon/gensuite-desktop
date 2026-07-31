@@ -9,13 +9,12 @@ interface Props {
 
 // Each row edits one API key. Values are masked by default; the eye toggle reveals
 // a single field. Keys are persisted to <userData>/GenSuite/settings.json via IPC.
-type ApiKeyField = 'googleApiKey' | 'pexelsApiKey' | 'pixabayApiKey' | 'unsplashApiKey' | 'gensuiteApiKey';
+type ApiKeyField = 'googleApiKey' | 'pexelsApiKey' | 'pixabayApiKey' | 'unsplashApiKey';
 const FIELDS: Array<{ key: ApiKeyField; label: string; hint: string; free: boolean; url: string }> = [
   { key: 'googleApiKey', label: 'Google AI Studio', hint: 'Viết nội dung, chỉnh sửa văn bản, tạo storyboard và dịch', free: true, url: 'https://aistudio.google.com/app/apikey' },
   { key: 'pexelsApiKey', label: 'Pexels', hint: 'Bước 4 — tìm ảnh stock cho storyboard (miễn phí)', free: true, url: 'https://www.pexels.com/api/new/' },
   { key: 'pixabayApiKey', label: 'Pixabay', hint: 'Bước 4 — tìm ảnh stock cho storyboard (miễn phí)', free: true, url: 'https://pixabay.com/api/docs/' },
   { key: 'unsplashApiKey', label: 'Unsplash', hint: 'Bước 4 — tìm ảnh stock cho storyboard (miễn phí)', free: true, url: 'https://unsplash.com/oauth/applications' },
-  { key: 'gensuiteApiKey', label: 'GenSuite API', hint: 'Giọng đọc (GenVoice, ElevenLabs, MiniMax), nhận dạng lời thoại và dịch video', free: false, url: 'https://gensuite.site' },
 ];
 
 export function SettingsPanel({ onClose }: Props) {

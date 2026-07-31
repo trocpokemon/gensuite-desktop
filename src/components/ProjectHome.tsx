@@ -1,7 +1,8 @@
-import { useState } from 'react';
-import { Copy, Download, FileText, Film, FolderOpen, Languages, LogOut, Mic, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Copy, Download, FileText, Film, FolderOpen, HardDrive, Languages, Mic, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
-import { useAuthStore } from '../store/authStore';
+import { localFileUrl } from '../shared/localFile';
+import type { ProjectSummary } from '../shared/types';
 import { QuickToolWorkspace, type QuickToolId } from './QuickToolWorkspace';
 
 const STEP_LABEL: Record<string, string> = {
@@ -17,6 +18,28 @@ const QUICK_TOOLS: Array<{ id: QuickToolId; title: string; description: string; 
   { id: 'translate', title: 'Dịch', description: 'Dịch văn bản hoặc tệp SRT', icon: Languages, color: 'text-emerald-300 bg-emerald-400/10' },
 ];
 
+function formatProjectSize(bytes?: number): string {
+  if (!bytes) return '0 MB';
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toLocaleString('vi-VN', { maximumFractionDigits: 1 })} GB`;
+  return `${Math.max(0.1, bytes / 1024 ** 2).toLocaleString('vi-VN', { maximumFractionDigits: 1 })} MB`;
+}
+
+function ProjectThumbnail({ project }: { project: ProjectSummary }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [failed, setFailed] = useState(false);
+  const url = localFileUrl(project.thumbnailPath);
+  if (!url || failed) {
+    return <div className="flex h-full items-center justify-center bg-gradient-to-br from-emerald-400/15 via-teal-400/5 to-transparent"><FolderOpen size={30} className="text-emerald-300/80" /></div>;
+  }
+  if (project.thumbnailType === 'video') {
+    return <video ref={videoRef} src={url} muted playsInline preload="metadata" onLoadedMetadata={() => {
+      const video = videoRef.current;
+      if (video && Number.isFinite(video.duration) && video.duration > 0) video.currentTime = Math.min(1, video.duration * 0.08);
+    }} onError={() => setFailed(true)} className="h-full w-full object-cover" />;
+  }
+  return <img src={url} alt="" onError={() => setFailed(true)} className="h-full w-full object-cover" />;
+}
+
 export function ProjectHome({ onOpenSettings }: Props) {
   const projects = useProjectStore((state) => state.projects);
   const createProject = useProjectStore((state) => state.createProject);
@@ -24,8 +47,6 @@ export function ProjectHome({ onOpenSettings }: Props) {
   const openProject = useProjectStore((state) => state.openProject);
   const deleteProject = useProjectStore((state) => state.deleteProject);
   const duplicateProject = useProjectStore((state) => state.duplicateProject);
-  const authEmail = useAuthStore((state) => state.email);
-  const signOut = useAuthStore((state) => state.signOut);
   const [query, setQuery] = useState('');
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
@@ -44,23 +65,17 @@ export function ProjectHome({ onOpenSettings }: Props) {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto px-10 py-10">
       <div className="mx-auto max-w-6xl">
-        <header className="mb-8 flex items-start justify-between gap-4">
+        <header className="mb-8">
           <div>
             <div className="mb-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-400">GenSuite Studio</div>
             <h1 className="text-4xl font-bold tracking-[-0.05em]">Bạn muốn làm gì hôm nay?</h1>
             <p className="mt-3 text-sm text-text/50">Chọn một trong hai luồng để bắt đầu, hoặc mở lại một dự án bên dưới.</p>
           </div>
-          {authEmail && (
-            <div className="flex shrink-0 items-center gap-2 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-white/60">
-              <span className="grid h-6 w-6 place-items-center rounded-full bg-emerald-400/15 text-[11px] font-bold uppercase text-emerald-300">{authEmail.charAt(0)}</span>
-              <span className="max-w-[180px] truncate" title={authEmail}>{authEmail}</span>
-              <button onClick={signOut} title="Đăng xuất" className="shrink-0 rounded-md p-1 text-white/40 hover:bg-white/5 hover:text-white"><LogOut size={14} /></button>
-            </div>
-          )}
         </header>
 
         <div className="mb-7 grid grid-cols-1 gap-4 md:grid-cols-2">
-          <button onClick={() => createLocalizeProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-400/[0.12] via-indigo-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-sky-400/40">
+          <button onClick={() => void createLocalizeProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-400/[0.12] via-indigo-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-sky-400/40">
+            <span className="absolute right-4 top-4 rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-bold text-emerald-200">Có chế độ miễn phí</span>
             <div className="mb-4 inline-flex rounded-xl bg-sky-400/15 p-3 text-sky-300"><Languages size={24} /></div>
             <h2 className="text-lg font-bold text-white">Dịch & lồng tiếng video</h2>
             <p className="mt-1.5 text-sm leading-5 text-white/50">Đưa video có sẵn vào, tự nhận dạng lời thoại, dịch và lồng lại giọng sang ngôn ngữ khác.</p>
@@ -120,8 +135,9 @@ export function ProjectHome({ onOpenSettings }: Props) {
             {visible.map((project) => (
               <article key={project.id} className="workspace-panel group rounded-2xl p-5 transition hover:-translate-y-0.5 hover:border-emerald-400/30">
                 <button onClick={() => openProject(project.id)} className="w-full text-left">
-                  <div className="mb-5 flex h-28 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400/15 via-teal-400/5 to-transparent">
-                    <FolderOpen size={30} className="text-emerald-300/80" />
+                  <div className="relative mb-5 h-28 overflow-hidden rounded-xl bg-white/[0.03]">
+                    <ProjectThumbnail project={project} />
+                    <span className="absolute bottom-2 right-2 flex items-center gap-1 rounded-md bg-black/65 px-2 py-1 text-[10px] font-semibold text-white/75 backdrop-blur-sm"><HardDrive size={11} /> {formatProjectSize(project.sizeBytes)}</span>
                   </div>
                   <div className="mb-2 flex items-start justify-between gap-3">
                     <h2 className="line-clamp-2 font-bold text-white">{project.name}</h2>
@@ -131,6 +147,7 @@ export function ProjectHome({ onOpenSettings }: Props) {
                   <p className="mt-3 text-xs text-white/35">{project.wordCount.toLocaleString('vi-VN')} từ · {project.sceneCount} cảnh · {new Date(project.updatedAt).toLocaleDateString('vi-VN')}</p>
                 </button>
                 <div className="mt-4 flex justify-end gap-1 border-t border-white/5 pt-3">
+                  <button title="Mở thư mục dự án" onClick={() => window.gensuite.project.openDir(project.id)} className="rounded-lg p-2 text-white/35 hover:bg-emerald-400/10 hover:text-emerald-300"><FolderOpen size={15} /></button>
                   <button title="Nhân bản" onClick={() => duplicateProject(project.id)} className="rounded-lg p-2 text-white/35 hover:bg-white/5 hover:text-white"><Copy size={15} /></button>
                   <button title="Xóa" onClick={() => confirm(`Xóa dự án “${project.name}”?`) && deleteProject(project.id)} className="rounded-lg p-2 text-white/35 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={15} /></button>
                 </div>

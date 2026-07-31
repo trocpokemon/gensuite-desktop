@@ -1,9 +1,11 @@
 import type { IScriptProvider, ContentRequest, RewriteRequest, StoryboardRequest, ScriptScene, TranslateRequest } from './types';
 import type { TranscriptSegment } from '../../shared/types';
+import { gensuiteFetch } from '../../lib/gensuiteAuth';
+import type { GenSuiteFeature } from '../../lib/gensuiteAuth';
 import { buildContentPrompt, buildRewritePrompt, buildStoryboardPrompt, buildTranslatePrompt, parseContentJson, parseStoryboardJson, parseTranslationJson } from './prompt';
 
-// GenSuite paid script API. Developers authenticate with a `gsk_live_...` key and
-// hit the public Developer API (api.gensuite.site/v1). Script generation is the
+// GenSuite paid script flow. Desktop authenticates with the signed-in account.
+// Script generation is the
 // synchronous POST /v1/scripts endpoint — it takes a system + user prompt, runs
 // the chosen LLM (Claude by default), charges GenVoice credits, and returns the
 // finished text. See supabase/functions/api-v1 in the Gensuite-Audio repo.
@@ -19,22 +21,22 @@ const SYSTEM_PROMPT =
 
 export class GenSuiteScriptAdapter implements IScriptProvider {
   readonly engine = 'gensuite' as const;
-  constructor(private apiKey: string, private model: string = DEFAULT_MODEL) {}
+  constructor(private model: string = DEFAULT_MODEL, private feature?: GenSuiteFeature) {}
 
   private async call(prompt: string): Promise<string> {
-    if (!this.apiKey?.trim()) throw new Error('MISSING_KEY:gensuite');
-    const resp = await fetch(`${BASE_URL}/scripts`, {
+    const resp = await gensuiteFetch(`${BASE_URL}/scripts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey.trim()}` },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: this.model, systemPrompt: SYSTEM_PROMPT, prompt }),
-    });
+    }, this.feature);
     if (!resp.ok) {
       const data = await resp.json().catch(() => null as any);
       const code = String(data?.error ?? '');
       const message = String(data?.message ?? '');
-      if (resp.status === 401 || resp.status === 403 || code === 'INVALID_API_KEY') throw new Error('MISSING_KEY:gensuite');
+      if (resp.status === 401 || code === 'INVALID_API_KEY' || code === 'AUTH_REQUIRED') throw new Error('AUTH_REQUIRED:gensuite');
+      if (code === 'FEATURE_UPGRADE_REQUIRED') throw new Error('UPGRADE_REQUIRED:basic');
       if (resp.status === 402 || code === 'INSUFFICIENT_CREDITS') throw new Error('Tài khoản GenSuite không đủ credits để tạo nội dung.');
-      throw new Error(`GenSuite lỗi ${resp.status}: ${message || code || 'yêu cầu thất bại'}`.slice(0, 300));
+      throw new Error(String(message || code || 'Không thể tạo nội dung. Vui lòng thử lại.').slice(0, 300));
     }
     const data = await resp.json().catch(() => null);
     const text = String((data as any)?.text ?? '').trim();

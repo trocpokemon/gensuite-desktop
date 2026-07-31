@@ -11,6 +11,7 @@ export interface EngineOption<T extends string> {
   premium?: boolean;
   /** Small pill shown after the label: green "Free" or amber "Cloud". */
   badge?: 'free' | 'cloud';
+  disabled?: boolean;
   icon?: ReactNode;
 }
 
@@ -32,9 +33,10 @@ export function EngineToggle<T extends string>({ label, value, options, onChange
             <button
               key={opt.value}
               type="button"
+              disabled={opt.disabled}
               onClick={() => onChange(opt.value)}
               title={opt.hint}
-              className={`flex cursor-pointer items-center gap-sm rounded-lg px-md py-2 text-[13px] font-semibold transition-all duration-200 ${
+              className={`flex cursor-pointer items-center gap-sm rounded-lg px-md py-2 text-[13px] font-semibold transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-40 ${
                 active
                   ? opt.premium
                     ? 'bg-emerald-400/15 text-emerald-300 shadow-sm ring-1 ring-inset ring-emerald-400/15'

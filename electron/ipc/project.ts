@@ -1,4 +1,4 @@
-import { app, ipcMain } from 'electron';
+import { app, ipcMain, shell } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { ProjectState } from '../../src/shared/types';
@@ -29,6 +29,17 @@ function sanitize(name: string): string {
 async function exists(filePath?: string): Promise<boolean> {
   if (!filePath) return false;
   return fs.access(filePath).then(() => true).catch(() => false);
+}
+
+async function directorySize(dir: string): Promise<number> {
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const sizes = await Promise.all(entries.map(async (entry) => {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) return directorySize(entryPath);
+    if (!entry.isFile()) return 0;
+    return fs.stat(entryPath).then((stat) => stat.size).catch(() => 0);
+  }));
+  return sizes.reduce((total, size) => total + size, 0);
 }
 
 async function latestSceneFile(dir: string, sceneId: string): Promise<string | undefined> {
@@ -136,6 +147,19 @@ export function registerProjectIpc(): void {
     const dir = projectDir(id);
     await ensureDir(dir);
     return dir;
+  });
+
+  ipcMain.handle('project:size', async (_e, id: string): Promise<number> => {
+    if (!id) return 0;
+    return directorySize(projectDir(id));
+  });
+
+  ipcMain.handle('project:openDir', async (_e, id: string): Promise<void> => {
+    if (!id) return;
+    const dir = projectDir(id);
+    await ensureDir(dir);
+    const error = await shell.openPath(dir);
+    if (error) throw new Error('Không thể mở thư mục dự án.');
   });
 
   // Remove draft media/audio after a successful export to free disk space.

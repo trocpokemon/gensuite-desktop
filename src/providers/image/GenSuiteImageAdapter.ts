@@ -1,8 +1,9 @@
 import type { AspectRatio } from '../../shared/types';
 import type { IImageProvider, ImageEngine, ImageGenRequest } from './types';
+import { gensuiteFetch } from '../../lib/gensuiteAuth';
 
-// GenSuite paid AI image API. Authenticates with a `gsk_live_...` key against the
-// public Developer API (api.gensuite.site/v1). Generation is asynchronous:
+// GenSuite paid image flow. Desktop authenticates with the signed-in account.
+// Generation is asynchronous:
 // POST /v1/images submits a job, then we poll GET /v1/images/{jobId} until it is
 // done and returns signed image URLs. See supabase/functions/api-v1 +
 // supabase/functions/image-studio in the Gensuite-Audio repo.
@@ -27,10 +28,9 @@ const POLL_TIMEOUT_MS = 180_000;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class GenSuiteImageAdapter implements IImageProvider {
-  constructor(readonly engine: ImageEngine, private apiKey: string) {}
+  constructor(readonly engine: ImageEngine) {}
 
   async generate(req: ImageGenRequest): Promise<string[]> {
-    if (!this.apiKey?.trim()) throw new Error('MISSING_KEY:gensuite');
     const prompt = req.prompt.trim();
     if (!prompt) throw new Error('Hãy nhập câu lệnh tạo ảnh.');
 
@@ -38,25 +38,22 @@ export class GenSuiteImageAdapter implements IImageProvider {
     return await this.poll(jobId);
   }
 
-  private headers(extra: Record<string, string> = {}): Record<string, string> {
-    return { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey.trim()}`, ...extra };
-  }
-
   private async fail(resp: Response): Promise<never> {
     const data = await resp.json().catch(() => null as any);
     const code = String(data?.error ?? '');
     const message = String(data?.message ?? '');
-    if (resp.status === 401 || resp.status === 403 || code === 'INVALID_API_KEY') throw new Error('MISSING_KEY:gensuite');
+    if (resp.status === 401 || code === 'INVALID_API_KEY' || code === 'AUTH_REQUIRED') throw new Error('AUTH_REQUIRED:gensuite');
+    if (code === 'FEATURE_UPGRADE_REQUIRED') throw new Error('UPGRADE_REQUIRED:basic');
     if (resp.status === 402 || code === 'INSUFFICIENT_CREDITS') throw new Error('Tài khoản GenSuite không đủ credits để tạo ảnh.');
-    throw new Error(`GenSuite lỗi ${resp.status}: ${message || code || 'yêu cầu thất bại'}`.slice(0, 300));
+    throw new Error(String(message || code || 'Không thể tạo ảnh. Vui lòng thử lại.').slice(0, 300));
   }
 
   private async submit(prompt: string, req: ImageGenRequest): Promise<string> {
     const count = Math.max(1, Math.min(4, req.count ?? 1));
     const refs = (req.referenceImageDataUrls ?? []).filter((url) => url.startsWith('data:image/')).slice(0, 4);
-    const resp = await fetch(`${BASE_URL}/images`, {
+    const resp = await gensuiteFetch(`${BASE_URL}/images`, {
       method: 'POST',
-      headers: this.headers(),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: MODEL_BY_ENGINE[this.engine],
         prompt,
@@ -77,7 +74,7 @@ export class GenSuiteImageAdapter implements IImageProvider {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await sleep(POLL_INTERVAL_MS);
-      const resp = await fetch(`${BASE_URL}/images/${encodeURIComponent(jobId)}`, { headers: this.headers() });
+      const resp = await gensuiteFetch(`${BASE_URL}/images/${encodeURIComponent(jobId)}`);
       if (!resp.ok) await this.fail(resp);
       const data = await resp.json().catch(() => null as any);
       const status = String(data?.status ?? '');

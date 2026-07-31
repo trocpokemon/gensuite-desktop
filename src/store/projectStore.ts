@@ -97,6 +97,9 @@ function normalizeProject(raw: ProjectState): ProjectState {
     currentStep,
     status: raw.status ?? 'draft',
     kind: raw.kind ?? 'topic',
+    sourceLanguage: (raw.kind ?? 'topic') === 'localize'
+      ? (!raw.sourceLanguage || raw.sourceLanguage === 'auto' ? 'vi' : raw.sourceLanguage)
+      : raw.sourceLanguage,
     topic: raw.topic ?? null,
     topicCustomizations: raw.topicCustomizations ?? (raw.topic ? { [raw.topic.id]: raw.topic } : {}),
     script: raw.script ?? {
@@ -138,6 +141,9 @@ function normalizeProject(raw: ProjectState): ProjectState {
 }
 
 function summary(project: ProjectState): ProjectSummary {
+  const thumbnailScene = project.scenes.find((scene) => scene.imagePath);
+  const thumbnailPath = project.sourceVideoPath ?? thumbnailScene?.imagePath;
+  const thumbnailType = project.sourceVideoPath || thumbnailScene?.visualType === 'stock-video' ? 'video' : thumbnailPath ? 'image' : undefined;
   return {
     id: project.id,
     name: project.name,
@@ -148,7 +154,16 @@ function summary(project: ProjectState): ProjectSummary {
     topicName: project.topic?.name ?? 'Chưa chọn chủ đề',
     wordCount: project.script.content.trim().split(/\s+/).filter(Boolean).length,
     sceneCount: project.scenes.length,
+    thumbnailPath,
+    thumbnailType,
   };
+}
+
+async function summariesWithSizes(rows: ProjectState[]): Promise<ProjectSummary[]> {
+  return Promise.all(rows.map(async (row) => ({
+    ...summary(normalizeProject(row)),
+    sizeBytes: await window.gensuite.project.size(row.id).catch(() => 0),
+  })));
 }
 
 interface ProjectStore {
@@ -215,11 +230,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
 
     hydrate: async () => {
       const rows = await window.gensuite?.project.list().catch(() => []) ?? [];
-      set({ projects: rows.map(normalizeProject).map(summary), hydrated: true, home: true });
+      set({ projects: await summariesWithSizes(rows), hydrated: true, home: true });
     },
     refreshProjects: async () => {
       const rows = await window.gensuite.project.list();
-      set({ projects: rows.map(normalizeProject).map(summary) });
+      set({ projects: await summariesWithSizes(rows) });
     },
     createProject: async (name) => {
       const project = newProject(name?.trim() || undefined, true);
@@ -232,6 +247,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
         ...newProject(name?.trim() || 'Video dịch & lồng tiếng', true),
         kind: 'localize',
         currentStep: 'localize',
+        sourceLanguage: 'vi',
       };
       await window.gensuite.project.save(project);
       set({ project, home: false });

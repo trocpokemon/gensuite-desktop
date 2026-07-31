@@ -14,7 +14,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   pexelsApiKey: '',
   pixabayApiKey: '',
   unsplashApiKey: '',
-  gensuiteApiKey: '',
   subtitlePresets: [],
   defaultSubtitlePresetId: DEFAULT_SUBTITLE_PRESET_ID,
 };
@@ -22,12 +21,15 @@ const DEFAULT_SETTINGS: AppSettings = {
 async function readSettings(): Promise<AppSettings> {
   try {
     const raw = await fs.readFile(settingsPath(), 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    return {
+    const parsed = JSON.parse(raw) as Partial<AppSettings> & { gensuiteApiKey?: unknown };
+    const { gensuiteApiKey: legacyKey, ...safeSettings } = parsed;
+    const settings = {
       ...DEFAULT_SETTINGS,
-      ...parsed,
-      subtitlePresets: Array.isArray(parsed.subtitlePresets) ? parsed.subtitlePresets : [],
+      ...safeSettings,
+      subtitlePresets: Array.isArray(safeSettings.subtitlePresets) ? safeSettings.subtitlePresets : [],
     };
+    if (legacyKey !== undefined) await writeSettings(settings).catch(() => undefined);
+    return settings;
   } catch {
     return { ...DEFAULT_SETTINGS };
   }

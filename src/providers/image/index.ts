@@ -8,5 +8,6 @@ export type { IImageProvider, ImageEngine, ImageGenRequest } from './types';
 // Developer API; only the underlying model id differs. The UI calls this factory
 // and never the adapter class directly.
 export function getImageProvider(engine: ImageEngine, keys: AppSettings): IImageProvider {
-  return new GenSuiteImageAdapter(engine, keys.gensuiteApiKey);
+  void keys;
+  return new GenSuiteImageAdapter(engine);
 }

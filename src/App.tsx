@@ -15,6 +15,7 @@ import { useProjectStore } from './store/projectStore';
 import { useSettingsStore } from './store/settingsStore';
 import { useTopicStore } from './store/topicStore';
 import { useAuthStore } from './store/authStore';
+import { useEntitlementStore } from './store/entitlementStore';
 import type { StepId } from './shared/types';
 
 const TOPIC_STEPS: Array<{ id: StepId; label: string; icon: typeof Film }> = [
@@ -45,11 +46,17 @@ export default function App() {
   const authEmail = useAuthStore((state) => state.email);
   const initAuth = useAuthStore((state) => state.init);
   const signOut = useAuthStore((state) => state.signOut);
+  const loadEntitlements = useEntitlementStore((state) => state.load);
+  const resetEntitlements = useEntitlementStore((state) => state.reset);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const steps = project.kind === 'localize' ? LOCALIZE_STEPS : TOPIC_STEPS;
 
   useEffect(() => { initAuth(); }, [initAuth]);
   useEffect(() => { hydrate(); loadSettings(); loadTopics(); }, [hydrate, loadSettings, loadTopics]);
+  useEffect(() => {
+    if (authStatus === 'signedIn') void loadEntitlements();
+    else if (authStatus === 'signedOut') resetEntitlements();
+  }, [authStatus, loadEntitlements, resetEntitlements]);
 
   return (
     <div className="app-background flex h-full flex-col bg-background text-text">

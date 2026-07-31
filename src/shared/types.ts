@@ -256,15 +256,17 @@ export interface ProjectSummary {
   topicName: string;
   wordCount: number;
   sceneCount: number;
+  sizeBytes?: number;
+  thumbnailPath?: string;
+  thumbnailType?: 'image' | 'video';
 }
 
-/** Persisted API keys. Field names match electron/ipc/settings.ts DEFAULT_SETTINGS. */
+/** Persisted third-party keys and user preferences. */
 export interface AppSettings {
   googleApiKey: string;
   pexelsApiKey: string;
   pixabayApiKey: string;
   unsplashApiKey: string;
-  gensuiteApiKey: string;
   /** User-created caption presets shared by every project. */
   subtitlePresets: SubtitlePreset[];
   /** Preset applied to newly created projects. */
@@ -394,6 +396,10 @@ export interface RedubArgs {
   subtitleConfig?: SubtitleConfig;
   /** Percentage of the source audio retained under the translated voice. Defaults to 8. */
   originalAudioVolume?: number;
+  /** When provided, save directly inside the project's output folder instead of asking for a location. */
+  automaticOutputName?: string;
+  /** Reveal the finished file in the file manager. Defaults to true for interactive exports. */
+  revealOutput?: boolean;
 }
 
 export interface WhisperAlignArgs {
@@ -511,6 +517,8 @@ export interface GensuiteBridge {
     list(): Promise<ProjectState[]>;
     remove(id: string): Promise<void>;
     dir(id: string): Promise<string>;
+    size(id: string): Promise<number>;
+    openDir(id: string): Promise<void>;
     cleanup(id: string): Promise<void>;
   };
   topics: {
@@ -560,6 +568,8 @@ export interface GensuiteBridge {
     clearTikTokSession(): Promise<void>;
     /** Open a file picker and copy a local video/audio into <project>/source/. Returns null if cancelled. */
     import(projectId: string): Promise<string | null>;
+    /** Pick and copy multiple local video/audio files into <project>/source/. */
+    importMany(projectId: string): Promise<string[]>;
     onProgress(cb: (p: YtdlpProgress) => void): () => void;
   };
   files: {

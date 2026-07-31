@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { SubtitleConfig, SubtitleWordTiming } from '../../src/shared/types';
 import { DEFAULT_SUBTITLE_CONFIG } from '../../src/shared/subtitlePresets';
+import { projectDir } from './project';
 
 // Video assembly via bundled FFmpeg. Builds a concat of image clips (one per
 // scene, duration matched to its audio) muxed with the narration track.
@@ -45,6 +46,8 @@ type RedubArgs = {
   subtitles?: boolean;
   subtitleConfig?: SubtitleConfig;
   originalAudioVolume?: number;
+  automaticOutputName?: string;
+  revealOutput?: boolean;
 };
 
 export function ffmpegBinary(): string {
@@ -659,13 +662,30 @@ export function registerFfmpegIpc(): void {
       return { ...seg, ttsDur, factor };
     }));
 
-    const saveRes = await dialog.showSaveDialog(win!, {
-      title: 'Lưu video đã lồng tiếng',
-      defaultPath: path.join(app.getPath('videos'), `gensuite-dub-${Date.now()}.mp4`),
-      filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
-    });
-    if (saveRes.canceled || !saveRes.filePath) return null;
-    const outPath = saveRes.filePath;
+    let outPath: string;
+    if (args.automaticOutputName) {
+      const outputDir = path.join(projectDir(projectId), 'output');
+      await fs.mkdir(outputDir, { recursive: true });
+      const safeBase = path.basename(args.automaticOutputName, path.extname(args.automaticOutputName))
+        .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 100) || 'video-long-tieng';
+      let candidate = path.join(outputDir, `${safeBase}.mp4`);
+      let suffix = 2;
+      while (await fs.access(candidate).then(() => true).catch(() => false)) {
+        candidate = path.join(outputDir, `${safeBase}-${suffix}.mp4`);
+        suffix += 1;
+      }
+      outPath = candidate;
+    } else {
+      const saveRes = await dialog.showSaveDialog(win!, {
+        title: 'Lưu video đã lồng tiếng',
+        defaultPath: path.join(app.getPath('videos'), `gensuite-dub-${Date.now()}.mp4`),
+        filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
+      });
+      if (saveRes.canceled || !saveRes.filePath) return null;
+      outPath = saveRes.filePath;
+    }
 
     const totalDurationSec = videoDur > 0
       ? videoDur
@@ -786,7 +806,7 @@ export function registerFfmpegIpc(): void {
             totalSec: totalDurationSec,
             phase: 'complete',
           });
-          shell.showItemInFolder(outPath);
+          if (args.revealOutput !== false) shell.showItemInFolder(outPath);
           resolve(outPath);
         } else {
           reject(new Error('Không thể hoàn thiện video. Hãy kiểm tra các tệp đầu vào và thử lại.'));

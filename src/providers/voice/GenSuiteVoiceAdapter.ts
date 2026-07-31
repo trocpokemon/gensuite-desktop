@@ -1,5 +1,7 @@
 import type { VoiceEngine } from '../../shared/types';
 import type { IVoiceProvider, VoiceRequest, VoiceResult } from './types';
+import { gensuiteFetch } from '../../lib/gensuiteAuth';
+import type { GenSuiteFeature } from '../../lib/gensuiteAuth';
 
 const BASE_URL = 'https://api.gensuite.site/v1';
 const POLL_INTERVAL_MS = 3000;
@@ -37,24 +39,19 @@ export interface GenSuiteCloneRequest {
   durationSeconds?: number;
 }
 
-function authorization(apiKey: string): Record<string, string> {
-  const key = String(apiKey || '').trim();
-  if (!key) throw new Error('MISSING_KEY:gensuite');
-  return { Authorization: `Bearer ${key}` };
-}
-
 async function readJson(response: Response): Promise<any> {
   const data = await response.json().catch(() => null);
-  if (response.status === 401 || data?.error === 'INVALID_API_KEY' || data?.error === 'UNAUTHORIZED') throw new Error('MISSING_KEY:gensuite');
+  if (response.status === 401 || data?.error === 'INVALID_API_KEY' || data?.error === 'AUTH_REQUIRED') throw new Error('AUTH_REQUIRED:gensuite');
+  if (data?.error === 'FEATURE_UPGRADE_REQUIRED') throw new Error('UPGRADE_REQUIRED:basic');
   if (!response.ok) {
-    const message = String(data?.message || data?.error || `GenSuite API lỗi ${response.status}`);
+    const message = String(data?.message || data?.error || 'Không thể tải dữ liệu giọng.');
     throw new Error(message);
   }
   return data;
 }
 
-export async function listGenSuiteModels(apiKey: string): Promise<Record<GenSuiteVoiceEngine, GenSuiteModel[]>> {
-  const response = await fetch(`${BASE_URL}/models`, { headers: authorization(apiKey) });
+export async function listGenSuiteModels(): Promise<Record<GenSuiteVoiceEngine, GenSuiteModel[]>> {
+  const response = await gensuiteFetch(`${BASE_URL}/models`);
   const data = await readJson(response);
   const result: Record<GenSuiteVoiceEngine, GenSuiteModel[]> = { genvoice: [], elevenlabs: [], minimax: [] };
   for (const group of Array.isArray(data?.engines) ? data.engines : []) {
@@ -70,7 +67,7 @@ export async function listGenSuiteModels(apiKey: string): Promise<Record<GenSuit
   return result;
 }
 
-export async function listGenSuiteVoicePage(apiKey: string, engine: GenSuiteVoiceEngine, options: {
+export async function listGenSuiteVoicePage(engine: GenSuiteVoiceEngine, options: {
   type?: 'all' | 'system' | 'clone' | 'explore';
   page?: number;
   pageSize?: number;
@@ -93,7 +90,7 @@ export async function listGenSuiteVoicePage(apiKey: string, engine: GenSuiteVoic
   if (options.accent) query.set('accent', options.accent);
   if (options.category) query.set('category', options.category);
   if (options.useCase) query.set('useCase', options.useCase);
-  const response = await fetch(`${BASE_URL}/voices?${query}`, { headers: authorization(apiKey) });
+  const response = await gensuiteFetch(`${BASE_URL}/voices?${query}`);
   const data = await readJson(response);
   const voices = (Array.isArray(data?.voices) ? data.voices : []).map((voice: any) => ({
     voiceId: String(voice?.voiceId || ''),
@@ -109,11 +106,11 @@ export async function listGenSuiteVoicePage(apiKey: string, engine: GenSuiteVoic
   };
 }
 
-async function listVoiceType(apiKey: string, engine: GenSuiteVoiceEngine, type: 'all' | 'system' | 'clone'): Promise<GenSuiteVoice[]> {
+async function listVoiceType(engine: GenSuiteVoiceEngine, type: 'all' | 'system' | 'clone'): Promise<GenSuiteVoice[]> {
   const voices: GenSuiteVoice[] = [];
   let page = 1;
   for (;;) {
-    const result = await listGenSuiteVoicePage(apiKey, engine, { type, page, pageSize: 100 });
+    const result = await listGenSuiteVoicePage(engine, { type, page, pageSize: 100 });
     for (const voice of result.voices) {
       if (voices.some((item) => item.voiceId === voice.voiceId)) continue;
       voices.push(voice);
@@ -124,14 +121,14 @@ async function listVoiceType(apiKey: string, engine: GenSuiteVoiceEngine, type: 
   return voices;
 }
 
-export async function listGenSuiteVoices(apiKey: string, engine: GenSuiteVoiceEngine): Promise<GenSuiteVoice[]> {
+export async function listGenSuiteVoices(engine: GenSuiteVoiceEngine): Promise<GenSuiteVoice[]> {
   // Product rule: MiniMax exposes only voices cloned by the current user.
   // System voices must never appear in the desktop voice library.
-  if (engine === 'minimax') return listVoiceType(apiKey, engine, 'clone');
-  return listVoiceType(apiKey, engine, 'all');
+  if (engine === 'minimax') return listVoiceType(engine, 'clone');
+  return listVoiceType(engine, 'all');
 }
 
-export async function cloneGenSuiteVoice(apiKey: string, request: GenSuiteCloneRequest): Promise<{ voiceId: string; status: string; name: string }> {
+export async function cloneGenSuiteVoice(request: GenSuiteCloneRequest): Promise<{ voiceId: string; status: string; name: string }> {
   const form = new FormData();
   form.set('engine', request.engine);
   form.set('name', request.name.trim());
@@ -139,8 +136,8 @@ export async function cloneGenSuiteVoice(apiKey: string, request: GenSuiteCloneR
   if (request.language) form.set('language', request.language);
   if (request.gender && request.engine === 'minimax') form.set('gender', request.gender);
   if (Number.isFinite(request.durationSeconds)) form.set('durationSeconds', String(request.durationSeconds));
-  const response = await fetch(`${BASE_URL}/voices/clone`, {
-    method: 'POST', headers: authorization(apiKey), body: form,
+  const response = await gensuiteFetch(`${BASE_URL}/voices/clone`, {
+    method: 'POST', body: form,
   });
   const data = await readJson(response);
   return {
@@ -150,14 +147,14 @@ export async function cloneGenSuiteVoice(apiKey: string, request: GenSuiteCloneR
   };
 }
 
-export async function getGenSuiteVoicePreview(apiKey: string, request: {
+export async function getGenSuiteVoicePreview(request: {
   engine: GenSuiteVoiceEngine;
   voiceId: string;
   modelId?: string;
 }): Promise<Blob> {
-  const response = await fetch(`${BASE_URL}/voices/preview`, {
+  const response = await gensuiteFetch(`${BASE_URL}/voices/preview`, {
     method: 'POST',
-    headers: { ...authorization(apiKey), 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
   });
   if (!response.ok) {
@@ -248,13 +245,13 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
   private controller: AbortController | null = null;
   private jobId: string | null = null;
 
-  constructor(readonly engine: GenSuiteVoiceEngine, private apiKey: string) {}
+  constructor(readonly engine: GenSuiteVoiceEngine, private feature?: GenSuiteFeature) {}
 
   async synthesize(req: VoiceRequest): Promise<VoiceResult> {
     if (!req.text?.trim()) throw new Error('Đoạn văn trống.');
     this.controller = new AbortController();
     const signal = this.controller.signal;
-    const headers = { ...authorization(this.apiKey), 'Content-Type': 'application/json' };
+    const headers = { 'Content-Type': 'application/json' };
     const body: Record<string, unknown> = {
       engine: this.engine,
       model: req.modelId,
@@ -266,21 +263,21 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
       body.language = req.language === 'auto' ? 'vi' : req.language;
     }
 
-    const submitResponse = await fetch(`${BASE_URL}/tts`, {
+    const submitResponse = await gensuiteFetch(`${BASE_URL}/tts`, {
       method: 'POST', headers, body: JSON.stringify(body), signal,
-    });
+    }, this.feature);
     const submit = await readJson(submitResponse);
     this.jobId = String(submit?.jobId || '');
-    if (!this.jobId) throw new Error('GenSuite API không trả về jobId.');
+    if (!this.jobId) throw new Error('Không thể bắt đầu tạo giọng. Vui lòng thử lại.');
 
     const startedAt = Date.now();
     let job = submit;
     while (job?.status === 'pending' || job?.status === 'processing') {
-      if (Date.now() - startedAt > POLL_TIMEOUT_MS) throw new Error('GenSuite TTS quá thời gian chờ (10 phút).');
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) throw new Error('Tạo giọng quá thời gian chờ. Vui lòng thử lại.');
       await delay(POLL_INTERVAL_MS, signal);
-      const response = await fetch(`${BASE_URL}/tts/${encodeURIComponent(this.jobId)}`, {
-        headers: authorization(this.apiKey), signal,
-      });
+      const response = await gensuiteFetch(`${BASE_URL}/tts/${encodeURIComponent(this.jobId)}`, {
+        signal,
+      }, this.feature);
       job = await readJson(response);
     }
     if (job?.status !== 'done' || !job?.audioUrl) {
@@ -301,9 +298,9 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
     const jobId = this.jobId;
     this.controller?.abort();
     if (jobId) {
-      fetch(`${BASE_URL}/tts/${encodeURIComponent(jobId)}`, {
-        method: 'DELETE', headers: authorization(this.apiKey),
-      }).catch(() => undefined);
+      gensuiteFetch(`${BASE_URL}/tts/${encodeURIComponent(jobId)}`, {
+        method: 'DELETE',
+      }, this.feature).catch(() => undefined);
     }
   }
 }

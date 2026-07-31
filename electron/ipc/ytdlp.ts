@@ -716,4 +716,25 @@ export function registerYtdlpIpc(): void {
     await fs.copyFile(source, dest);
     return dest;
   });
+
+  ipcMain.handle('ytdlp:importMany', async (e, projectId: string): Promise<string[]> => {
+    if (!projectId) throw new Error('Thiếu thông tin cần thiết để nhập tệp.');
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const picked = await dialog.showOpenDialog(win!, {
+      title: 'Chọn nhiều video hoặc audio nguồn',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Video/Audio', extensions: ['mp4', 'mkv', 'mov', 'webm', 'avi', 'm4a', 'mp3', 'wav', 'aac', 'flac', 'ogg'] }],
+    });
+    if (picked.canceled || !picked.filePaths.length) return [];
+
+    const sourceDir = path.join(projectDir(projectId), 'source');
+    await fs.mkdir(sourceDir, { recursive: true });
+    return await Promise.all(picked.filePaths.map(async (source, index) => {
+      const ext = (path.extname(source).replace('.', '').toLowerCase() || 'mp4').replace(/[^a-z0-9]/gi, '') || 'mp4';
+      const originalName = path.basename(source, path.extname(source)).replace(/[^\p{L}\p{N}._-]+/gu, '-').slice(0, 80) || `video-${index + 1}`;
+      const dest = path.join(sourceDir, `${originalName}-${Date.now()}-${index}.${ext}`);
+      await fs.copyFile(source, dest);
+      return dest;
+    }));
+  });
 }
