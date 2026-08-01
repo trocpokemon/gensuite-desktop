@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, protocol, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { registerHardwareIpc } from './ipc/hardware';
@@ -7,6 +7,7 @@ import { registerSettingsIpc } from './ipc/settings';
 import { registerMediaIpc } from './ipc/media';
 import { registerAudioIpc } from './ipc/audio';
 import { registerEdgeTtsIpc } from './ipc/edgetts';
+import { registerCapCutTtsIpc } from './ipc/capcuttts';
 import { registerFfmpegIpc } from './ipc/ffmpeg';
 import { registerMusicIpc } from './ipc/music';
 import { registerCharacterIpc } from './ipc/character';
@@ -98,6 +99,16 @@ function registerWindowIpc(): void {
   ipcMain.on('shell:showItemInFolder', (_e, filePath: string) => {
     if (path.isAbsolute(filePath)) shell.showItemInFolder(filePath);
   });
+  ipcMain.handle('shell:selectDirectory', async (e, defaultPath?: string) => {
+    const owner = BrowserWindow.fromWebContents(e.sender) ?? undefined;
+    const options = {
+      title: 'Chọn nơi lưu video',
+      defaultPath: defaultPath && path.isAbsolute(defaultPath) ? defaultPath : app.getPath('videos'),
+      properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>,
+    };
+    const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
 }
 
 function registerIpc(): void {
@@ -108,6 +119,7 @@ function registerIpc(): void {
   registerMediaIpc();
   registerAudioIpc();
   registerEdgeTtsIpc();
+  registerCapCutTtsIpc();
   registerFfmpegIpc();
   registerMusicIpc();
   registerCharacterIpc();

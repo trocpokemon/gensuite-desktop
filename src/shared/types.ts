@@ -3,10 +3,11 @@
 // matches an actual handler signature in electron/ipc/*.
 
 export type AspectRatio = '16:9' | '9:16';
+export type LocalizeAspectRatio = 'original' | AspectRatio;
 
 export type ScriptEngine = 'gemini' | 'gensuite';
 export type MediaEngine = 'pexels' | 'pixabay' | 'unsplash';
-export type VoiceEngine = 'edgetts' | 'genvoice' | 'elevenlabs' | 'minimax';
+export type VoiceEngine = 'edgetts' | 'capcuttts' | 'genvoice' | 'elevenlabs' | 'minimax';
 export type TranscriptionEngine = 'local' | 'cloud';
 
 export type StepId = 'topic' | 'content' | 'storyboard' | 'voice' | 'timeline' | 'localize';
@@ -105,6 +106,22 @@ export interface MediaResult {
 
 export type SubtitlePosition = 'top' | 'middle' | 'bottom';
 export type SubtitleBackgroundStyle = 'rounded' | 'bar' | 'none';
+export type OriginalSubtitleCoverMode = 'overlay' | 'blur' | 'restore';
+
+export interface OriginalSubtitleCoverConfig {
+  enabled: boolean;
+  mode: OriginalSubtitleCoverMode;
+  /** Cover rectangle in percentages of the source frame. */
+  xPct: number;
+  yPct: number;
+  widthPct: number;
+  heightPct: number;
+  opacity: number;
+  blurStrength: number;
+  /** Percentage of the cover's shorter edge blended into the surrounding frame. */
+  featherPct: number;
+  color: string;
+}
 
 export interface SubtitleWordTiming {
   word: string;
@@ -141,6 +158,13 @@ export interface SubtitleConfig extends SubtitleStyle {
   enabled: boolean;
   /** Selected built-in or user-created preset. Empty means the style was edited. */
   presetId: string;
+  /** Exact caption anchor used by the draggable review stage. */
+  xPct: number;
+  yPct: number;
+  /** Width of the caption layout box as a percentage of the output frame. */
+  widthPct: number;
+  /** Project-specific treatment for subtitles already present in the source video. */
+  originalSubtitleCover: OriginalSubtitleCoverConfig;
 }
 
 export interface SubtitlePreset {
@@ -174,13 +198,24 @@ export interface ProjectSettings {
   scriptModel: string;
   mediaEngine: MediaEngine;
   voiceEngine: VoiceEngine;
+  /** One-time migration marker for the preferred free voice source. */
+  freeVoicePriorityVersion?: number;
   aspectRatio: AspectRatio;
+  /** Frame used by localized-video review and export. */
+  localizeAspectRatio: LocalizeAspectRatio;
+  /** Explicit choices required before a newly-created localize project can advance. */
+  localizeSourceLanguageConfirmed?: boolean;
+  localizeTargetLanguageConfirmed?: boolean;
+  localizeAccuracyConfirmed?: boolean;
+  localizeVoiceProviderConfirmed?: boolean;
   tone: string;
   voiceId: string;
   voiceConfigs: Record<VoiceEngine, VoiceConfig>;
   subtitle: SubtitleConfig;
   /** Source-video audio retained below the translated voice (0–100). */
   originalAudioVolume: number;
+  /** Optional user-selected folder for localized video exports. */
+  localizeOutputDirectory: string;
   music: MusicConfig;
   /** Transcription engine for localize projects (local whisper.cpp vs cloud GenSuite STT). */
   transcriptionEngine: TranscriptionEngine;
@@ -338,6 +373,32 @@ export interface EdgeTtsVoice {
   gender: string;
 }
 
+export interface CapCutTtsSynthesizeArgs {
+  projectId: string;
+  jobId: string;
+  segmentId: string;
+  text: string;
+  voiceId: string;
+  resourceId: string;
+  speed?: number;
+}
+
+export interface CapCutTtsSynthesizeResult {
+  audioPath: string;
+}
+
+export interface CapCutTtsPreviewArgs {
+  jobId: string;
+  text: string;
+  voiceId: string;
+  resourceId: string;
+  speed?: number;
+}
+
+export interface CapCutTtsPreviewResult {
+  audioBase64: string;
+}
+
 export interface ExportScene {
   id: string;
   imagePath: string;
@@ -394,8 +455,12 @@ export interface RedubArgs {
   /** Burn the translated text into the video as a hard subtitle. */
   subtitles?: boolean;
   subtitleConfig?: SubtitleConfig;
+  /** Preserve the source frame or fit it inside a selected delivery frame. */
+  outputAspectRatio?: LocalizeAspectRatio;
   /** Percentage of the source audio retained under the translated voice. Defaults to 8. */
   originalAudioVolume?: number;
+  /** Optional absolute folder selected before processing starts. */
+  outputDirectory?: string;
   /** When provided, save directly inside the project's output folder instead of asking for a location. */
   automaticOutputName?: string;
   /** Reveal the finished file in the file manager. Defaults to true for interactive exports. */
@@ -506,6 +571,8 @@ export interface GensuiteBridge {
     openExternal(url: string): void;
     /** Reveal a generated/downloaded file in the OS file manager. */
     showItemInFolder(filePath: string): void;
+    /** Ask the user to choose a folder. */
+    selectDirectory(defaultPath?: string): Promise<string | null>;
   };
   hardware: {
     scan(): Promise<HardwareInfo>;
@@ -547,6 +614,11 @@ export interface GensuiteBridge {
   edgetts: {
     voices(): Promise<EdgeTtsVoice[]>;
     synthesize(args: EdgeTtsSynthesizeArgs): Promise<EdgeTtsSynthesizeResult>;
+    kill(jobId: string): Promise<boolean>;
+  };
+  capcuttts: {
+    synthesize(args: CapCutTtsSynthesizeArgs): Promise<CapCutTtsSynthesizeResult>;
+    preview(args: CapCutTtsPreviewArgs): Promise<CapCutTtsPreviewResult>;
     kill(jobId: string): Promise<boolean>;
   };
   ffmpeg: {

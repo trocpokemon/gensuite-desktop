@@ -50,15 +50,25 @@ export const useEntitlementStore = create<EntitlementStore>((set) => ({
       const response = await gensuiteFetch(ACCOUNT_URL);
       const data = await response.json().catch(() => null as any);
       if (!response.ok) throw new Error(String(data?.message || 'Không thể tải quyền tài khoản.'));
+      const tier = normalizeTier(data?.tier ?? data?.plan?.tier ?? data?.plan?.name ?? data?.plan ?? data?.subscription?.tier);
+      const paidLocalizeTier = tier === 'basic' || tier === 'standard' || tier === 'pro';
+      const paidVoiceTier = tier === 'starter' || paidLocalizeTier;
+      const rawFeatures = data?.features ?? data?.entitlements ?? {};
+      const allowedEngines = normalizeEngines(
+        data?.allowedEngines
+        ?? data?.allowedVoiceEngines
+        ?? rawFeatures?.allowedVoiceEngines
+        ?? rawFeatures?.voiceEngines,
+      );
       set({
         status: 'ready',
-        tier: normalizeTier(data?.tier),
+        tier,
         credits: Math.max(0, Number(data?.credits || 0)),
-        allowedVoiceEngines: normalizeEngines(data?.allowedEngines),
+        allowedVoiceEngines: paidVoiceTier && (!allowedEngines || allowedEngines.length === 0) ? null : allowedEngines,
         features: {
-          localize: Boolean(data?.features?.localize),
-          localizeCloud: Boolean(data?.features?.localizeCloud),
-          premiumVoiceModels: Boolean(data?.features?.premiumVoiceModels),
+          localize: Boolean(rawFeatures?.localize ?? rawFeatures?.videoLocalize ?? true),
+          localizeCloud: Boolean(rawFeatures?.localizeCloud || rawFeatures?.localize_cloud || paidLocalizeTier),
+          premiumVoiceModels: Boolean(rawFeatures?.premiumVoiceModels || rawFeatures?.premium_voice_models || paidVoiceTier),
         },
       });
     } catch {

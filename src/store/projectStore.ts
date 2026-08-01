@@ -18,6 +18,7 @@ import type {
   TranscriptSegment,
 } from '../shared/types';
 import { DEFAULT_EDGE_VOICE } from '../providers/voice/edgeTtsCatalog';
+import { DEFAULT_CAPCUT_VOICE } from '../providers/voice/capcutTtsCatalog';
 import { useSettingsStore } from './settingsStore';
 import { DEFAULT_SUBTITLE_CONFIG, findSubtitlePreset, subtitleConfigFromStyle } from '../shared/subtitlePresets';
 
@@ -38,17 +39,25 @@ const DEFAULT_SETTINGS: ProjectSettings = {
   scriptEngine: 'gemini',
   scriptModel: '',
   mediaEngine: 'pexels',
-  voiceEngine: 'edgetts',
+  voiceEngine: 'capcuttts',
+  freeVoicePriorityVersion: 1,
   aspectRatio: '16:9',
+  localizeAspectRatio: 'original',
+  localizeSourceLanguageConfirmed: false,
+  localizeTargetLanguageConfirmed: false,
+  localizeAccuracyConfirmed: false,
+  localizeVoiceProviderConfirmed: false,
   tone: 'Kể chuyện truyền cảm',
   voiceId: '',
   transcriptionEngine: 'local',
   whisperModel: 'base',
   subtitle: { ...DEFAULT_SUBTITLE },
   originalAudioVolume: 8,
+  localizeOutputDirectory: '',
   music: { ...DEFAULT_MUSIC },
   voiceConfigs: {
     edgetts: { voiceId: DEFAULT_EDGE_VOICE, modelId: '', language: 'vi-VN', speed: 1, temperature: 1, stability: 0.5, similarityBoost: 0.75, style: 0, useSpeakerBoost: true, pitch: 0, volume: 100, deliveryMode: 'BALANCED' },
+    capcuttts: { voiceId: DEFAULT_CAPCUT_VOICE, modelId: '', language: 'vi-VN', speed: 1, temperature: 1, stability: 0.5, similarityBoost: 0.75, style: 0, useSpeakerBoost: true, pitch: 0, volume: 100, deliveryMode: 'BALANCED' },
     genvoice: { voiceId: 'Aanya', modelId: 'genvoice-tts-2', language: 'vi-VN', speed: 1, temperature: 1.1, stability: 0.5, similarityBoost: 0.75, style: 0, useSpeakerBoost: true, pitch: 0, volume: 1, deliveryMode: 'BALANCED' },
     elevenlabs: { voiceId: '', modelId: 'eleven_flash_v2_5', language: 'english', speed: 1, temperature: 1, stability: 0.5, similarityBoost: 0.75, style: 0, useSpeakerBoost: true, pitch: 0, volume: 1, deliveryMode: 'BALANCED' },
     minimax: { voiceId: '', modelId: 'speech-2.8-turbo', language: 'english', speed: 1, temperature: 1, stability: 0.5, similarityBoost: 0.75, style: 0, useSpeakerBoost: true, pitch: 0, volume: 1, deliveryMode: 'BALANCED' },
@@ -92,6 +101,12 @@ function normalizeProject(raw: ProjectState): ProjectState {
     legacyStep === 'script' ? 'content' : legacyStep === 'media' ? 'storyboard' :
       (['topic', 'content', 'storyboard', 'voice', 'timeline', 'localize'].includes(legacyStep) ? legacyStep as StepId : 'topic');
   const legacyContent = raw.script?.content || raw.scenes?.map((scene) => scene.narration).join('\n\n') || '';
+  const storedVoiceEngine = raw.settings?.voiceEngine as VoiceEngine | 'piper' | 'kokoro' | undefined;
+  const preferredVoiceEngine: VoiceEngine = !storedVoiceEngine || ['piper', 'kokoro'].includes(storedVoiceEngine)
+    ? 'capcuttts'
+    : (raw.settings?.freeVoicePriorityVersion ?? 0) < 1 && storedVoiceEngine === 'edgetts'
+      ? 'capcuttts'
+      : storedVoiceEngine as VoiceEngine;
   return {
     ...raw,
     currentStep,
@@ -119,11 +134,28 @@ function normalizeProject(raw: ProjectState): ProjectState {
         ...DEFAULT_SUBTITLE,
         ...(raw.settings?.subtitle ?? {}),
         enabled: raw.settings?.subtitle?.enabled ?? DEFAULT_SUBTITLE.enabled,
+        xPct: raw.settings?.subtitle?.xPct ?? DEFAULT_SUBTITLE.xPct,
+        yPct: raw.settings?.subtitle?.yPct ?? DEFAULT_SUBTITLE.yPct,
+        widthPct: raw.settings?.subtitle?.widthPct ?? DEFAULT_SUBTITLE.widthPct,
+        originalSubtitleCover: {
+          ...DEFAULT_SUBTITLE.originalSubtitleCover,
+          ...(raw.settings?.subtitle?.originalSubtitleCover ?? {}),
+        },
       },
       originalAudioVolume: raw.settings?.originalAudioVolume ?? DEFAULT_SETTINGS.originalAudioVolume,
+      localizeOutputDirectory: raw.settings?.localizeOutputDirectory ?? DEFAULT_SETTINGS.localizeOutputDirectory,
+      localizeAspectRatio: raw.settings?.localizeAspectRatio ?? DEFAULT_SETTINGS.localizeAspectRatio,
+      // Cached localize projects created before these markers already contain
+      // intentional selections. Explicit `false` is reserved for new projects.
+      localizeSourceLanguageConfirmed: raw.settings?.localizeSourceLanguageConfirmed ?? raw.kind === 'localize',
+      localizeTargetLanguageConfirmed: raw.settings?.localizeTargetLanguageConfirmed ?? raw.kind === 'localize',
+      localizeAccuracyConfirmed: raw.settings?.localizeAccuracyConfirmed ?? raw.kind === 'localize',
+      localizeVoiceProviderConfirmed: raw.settings?.localizeVoiceProviderConfirmed ?? raw.kind === 'localize',
       music: { ...DEFAULT_MUSIC, ...(raw.settings?.music ?? {}) },
-      // The local engine has changed over time (piper → kokoro → edgetts); migrate any project still on a retired one.
-      voiceEngine: ['piper', 'kokoro'].includes(raw.settings?.voiceEngine as string) ? 'edgetts' : (raw.settings?.voiceEngine ?? DEFAULT_SETTINGS.voiceEngine),
+      // Move projects to the new preferred free source once. After migration,
+      // an explicit legacy selection is preserved on future loads.
+      voiceEngine: preferredVoiceEngine,
+      freeVoicePriorityVersion: 1,
       voiceConfigs: Object.fromEntries((Object.keys(DEFAULT_SETTINGS.voiceConfigs) as VoiceEngine[]).map((engine) => [
         engine,
         (() => {
@@ -243,11 +275,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
       await get().refreshProjects();
     },
     createLocalizeProject: async (name) => {
+      const base = newProject(name?.trim() || 'Video dịch & lồng tiếng', true);
       const project: ProjectState = {
-        ...newProject(name?.trim() || 'Video dịch & lồng tiếng', true),
+        ...base,
         kind: 'localize',
         currentStep: 'localize',
         sourceLanguage: 'vi',
+        settings: {
+          ...base.settings,
+          localizeSourceLanguageConfirmed: false,
+          localizeTargetLanguageConfirmed: false,
+          localizeAccuracyConfirmed: false,
+          localizeVoiceProviderConfirmed: false,
+        },
       };
       await window.gensuite.project.save(project);
       set({ project, home: false });
@@ -376,7 +416,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
     removeCharacterRef: (id) => commit({ ...get().project, characterRefs: get().project.characterRefs.filter((ref) => ref.id !== id) }),
     setTranscriptionEngine: (transcriptionEngine) => commit({ ...get().project, settings: { ...get().project.settings, transcriptionEngine } }),
     setWhisperModel: (whisperModel) => commit({ ...get().project, settings: { ...get().project.settings, whisperModel } }),
-    setSourceVideo: (sourceVideoPath) => commit({ ...get().project, sourceVideoPath }),
+    setSourceVideo: (sourceVideoPath) => {
+      const current = get().project;
+      const changed = current.sourceVideoPath !== sourceVideoPath;
+      commit({
+        ...current,
+        sourceVideoPath,
+        ...(changed ? { transcript: undefined, scenes: [], dubbedVideoPath: undefined } : {}),
+      });
+    },
     setTranscript: (segments) => commit({ ...get().project, transcript: segments }),
     setLanguages: (patch) => commit({ ...get().project, ...patch }),
     setDubbedVideo: (dubbedVideoPath) => commit({ ...get().project, dubbedVideoPath }),

@@ -1,6 +1,7 @@
 import type { VoiceEngine, AppSettings } from '../../shared/types';
 import type { IVoiceProvider } from './types';
 import { EdgeTtsAdapter } from './EdgeTtsAdapter';
+import { CapCutTtsAdapter } from './CapCutTtsAdapter';
 import { GenSuiteVoiceAdapter } from './GenSuiteVoiceAdapter';
 import type { GenSuiteFeature } from '../../lib/gensuiteAuth';
 
@@ -12,6 +13,8 @@ export function getVoiceProvider(engine: VoiceEngine, keys: AppSettings, feature
   switch (engine) {
     case 'edgetts':
       return new EdgeTtsAdapter();
+    case 'capcuttts':
+      return new CapCutTtsAdapter();
     case 'genvoice':
     case 'elevenlabs':
     case 'minimax':

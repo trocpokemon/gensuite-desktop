@@ -46,11 +46,39 @@ export const BUILTIN_SUBTITLE_PRESETS: SubtitlePreset[] = [
 ];
 
 export function subtitleConfigFromStyle(style: SubtitleStyle, presetId = ''): SubtitleConfig {
-  return { enabled: true, presetId, ...style };
+  const yPct = style.position === 'top' ? 12 : style.position === 'middle' ? 50 : 88;
+  return {
+    enabled: true,
+    presetId,
+    ...style,
+    xPct: 50,
+    yPct,
+    widthPct: 88,
+    originalSubtitleCover: {
+      enabled: false,
+      mode: 'overlay',
+      xPct: 18,
+      yPct: 76,
+      widthPct: 64,
+      heightPct: 14,
+      opacity: 82,
+      blurStrength: 14,
+      featherPct: 12,
+      color: '#0F172A',
+    },
+  };
 }
 
 export function subtitleStyleFromConfig(config: SubtitleConfig): SubtitleStyle {
-  const { enabled: _enabled, presetId: _presetId, ...style } = config;
+  const {
+    enabled: _enabled,
+    presetId: _presetId,
+    xPct: _xPct,
+    yPct: _yPct,
+    widthPct: _widthPct,
+    originalSubtitleCover: _originalSubtitleCover,
+    ...style
+  } = config;
   return style;
 }
 

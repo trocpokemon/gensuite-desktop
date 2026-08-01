@@ -7,6 +7,8 @@ import type {
   AudioWriteArgs,
   AudioDownloadArgs,
   EdgeTtsSynthesizeArgs,
+  CapCutTtsSynthesizeArgs,
+  CapCutTtsPreviewArgs,
   ExportArgs,
   RedubArgs,
   FfmpegProgress,
@@ -32,6 +34,7 @@ const bridge: GensuiteBridge = {
   shell: {
     openExternal: (url: string) => ipcRenderer.send('shell:openExternal', url),
     showItemInFolder: (filePath: string) => ipcRenderer.send('shell:showItemInFolder', filePath),
+    selectDirectory: (defaultPath?: string) => ipcRenderer.invoke('shell:selectDirectory', defaultPath),
   },
   hardware: {
     scan: () => ipcRenderer.invoke('hardware:scan'),
@@ -66,6 +69,11 @@ const bridge: GensuiteBridge = {
     voices: () => ipcRenderer.invoke('edgetts:voices'),
     synthesize: (args: EdgeTtsSynthesizeArgs) => ipcRenderer.invoke('edgetts:synthesize', args),
     kill: (jobId: string) => ipcRenderer.invoke('edgetts:kill', jobId),
+  },
+  capcuttts: {
+    synthesize: (args: CapCutTtsSynthesizeArgs) => ipcRenderer.invoke('capcuttts:synthesize', args),
+    preview: (args: CapCutTtsPreviewArgs) => ipcRenderer.invoke('capcuttts:preview', args),
+    kill: (jobId: string) => ipcRenderer.invoke('capcuttts:kill', jobId),
   },
   music: {
     import: (projectId: string) => ipcRenderer.invoke('music:import', projectId),

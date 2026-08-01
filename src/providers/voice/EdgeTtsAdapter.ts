@@ -29,6 +29,13 @@ export class EdgeTtsAdapter implements IVoiceProvider {
         pitch: req.pitch,
         volume: req.volume,
       });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('edgetts:killed')) throw new Error('voice:cancelled');
+      if (message.includes('ngắt kết nối giữa chừng')) {
+        throw new Error('Kết nối tạo giọng bị gián đoạn. Hãy chờ vài giây rồi thử lại.');
+      }
+      throw new Error('Chưa thể tạo giọng lúc này. Hãy kiểm tra kết nối mạng hoặc thử lại sau.');
     } finally {
       if (this.jobId === jobId) this.jobId = null;
     }

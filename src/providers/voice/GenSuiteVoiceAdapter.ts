@@ -7,13 +7,14 @@ const BASE_URL = 'https://api.gensuite.site/v1';
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 
-export type GenSuiteVoiceEngine = Exclude<VoiceEngine, 'edgetts'>;
+export type GenSuiteVoiceEngine = Exclude<VoiceEngine, 'edgetts' | 'capcuttts'>;
 
 export interface GenSuiteModel {
   id: string;
   name: string;
   paidOnly: boolean;
   requiresLanguage: boolean;
+  creditRate?: number;
 }
 
 export interface GenSuiteVoice {
@@ -62,6 +63,9 @@ export async function listGenSuiteModels(): Promise<Record<GenSuiteVoiceEngine, 
       name: String(model?.name || model?.id || ''),
       paidOnly: Boolean(model?.paidOnly),
       requiresLanguage: Boolean(model?.requiresLanguage),
+      creditRate: Number.isFinite(Number(model?.creditRate ?? model?.rate ?? model?.creditMultiplier))
+        ? Number(model?.creditRate ?? model?.rate ?? model?.creditMultiplier)
+        : undefined,
     })).filter((model: GenSuiteModel) => model.id);
   }
   return result;

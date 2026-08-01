@@ -68,7 +68,7 @@ export function SoundStage({ onOpenSettings }: Props) {
         subtitleTimingAudioPath: result.wordTimings?.length ? result.audioPath : undefined,
       });
     } catch (err) {
-      if (errorMessage(err) === 'edgetts:killed') return;
+      if (errorMessage(err) === 'edgetts:killed' || errorMessage(err).includes('voice:cancelled')) return;
       const service = missingKeyService(err);
       if (service) setMissingKey(service);
       else setErrors((old) => ({ ...old, [sceneId]: errorMessage(err) }));

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { SubtitleConfig, SubtitleWordTiming } from '../../src/shared/types';
+import type { LocalizeAspectRatio, SubtitleConfig, SubtitleWordTiming } from '../../src/shared/types';
 import { DEFAULT_SUBTITLE_CONFIG } from '../../src/shared/subtitlePresets';
 import { projectDir } from './project';
 
@@ -45,7 +45,9 @@ type RedubArgs = {
   segments: RedubSegment[];
   subtitles?: boolean;
   subtitleConfig?: SubtitleConfig;
+  outputAspectRatio?: LocalizeAspectRatio;
   originalAudioVolume?: number;
+  outputDirectory?: string;
   automaticOutputName?: string;
   revealOutput?: boolean;
 };
@@ -300,11 +302,14 @@ function styledPageText(page: TimedWord[], activeIndex: number, joiner: string, 
 
 export function buildCaptionAss(items: TimedCaption[], w: number, h: number, style?: SubtitleConfig): string {
   const config: SubtitleConfig = { ...DEFAULT_SUBTITLE_CONFIG, ...(style ?? {}) };
-  const fontSize = Math.max(18, Math.round(h * (config.fontSizePct / 100)));
+  const fontSize = Math.max(1, Math.round(h * (config.fontSizePct / 100)));
   const marginV = Math.round(h * (config.marginPct / 100));
   const fontName = items.some((item) => containsCJK(item.text)) ? cjkFontFamily() : config.fontFamily;
-  const alignment = config.position === 'top' ? 8 : config.position === 'middle' ? 5 : 2;
-  const maxUnits = Math.max(8, Math.floor((w * 0.82) / (fontSize * 0.54)));
+  const alignment = 5;
+  const captionX = Math.round(w * (Math.max(0, Math.min(100, config.xPct)) / 100));
+  const captionY = Math.round(h * (Math.max(0, Math.min(100, config.yPct)) / 100));
+  const captionWidthRatio = Math.max(0.15, Math.min(0.96, config.widthPct / 100));
+  const maxUnits = Math.max(8, Math.floor((w * captionWidthRatio) / (fontSize * 0.54)));
   const bold = config.bold ? -1 : 0;
   const italic = config.italic ? -1 : 0;
 
@@ -333,16 +338,14 @@ export function buildCaptionAss(items: TimedCaption[], w: number, h: number, sty
       const pageEnd = page[page.length - 1].end;
       const pageText = page.map((word) => word.text).join(joiner);
       const estimatedWidth = displayWidth(pageText) * fontSize * 0.54 + fontSize * 1.25;
+      const maximumBoxWidth = Math.round(w * captionWidthRatio);
       const boxWidth = config.backgroundStyle === 'bar'
-        ? Math.round(w * 0.92)
-        : Math.round(Math.min(w * 0.86, Math.max(fontSize * 4, estimatedWidth)));
+        ? maximumBoxWidth
+        : Math.round(Math.min(maximumBoxWidth, Math.max(fontSize * 4, estimatedWidth)));
       const boxHeight = Math.round(fontSize * 1.65);
-      const x1 = Math.round((w - boxWidth) / 2);
+      const x1 = Math.max(0, Math.min(w - boxWidth, Math.round(captionX - boxWidth / 2)));
       const x2 = x1 + boxWidth;
-      let y1: number;
-      if (config.position === 'top') y1 = Math.round(marginV - fontSize * 0.35);
-      else if (config.position === 'middle') y1 = Math.round((h - boxHeight) / 2);
-      else y1 = Math.round(h - marginV - boxHeight + fontSize * 0.35);
+      const y1 = Math.max(0, Math.min(h - boxHeight, Math.round(captionY - boxHeight / 2)));
       const y2 = y1 + boxHeight;
       const radius = config.backgroundStyle === 'rounded' ? Math.round(config.backgroundRadius * (h / 1080)) : 0;
       const shape = roundedRectPath(x1, y1, x2, y2, radius);
@@ -351,12 +354,72 @@ export function buildCaptionAss(items: TimedCaption[], w: number, h: number, sty
       }
       page.forEach((word, activeIndex) => {
         const fade = activeIndex === 0 ? '\\fad(90,0)' : '';
-        events.push(`Dialogue: 1,${assTime(word.start)},${assTime(word.end)},Caption,,0,0,0,,{${fade}}${styledPageText(page, activeIndex, joiner, config)}`);
+        events.push(`Dialogue: 1,${assTime(word.start)},${assTime(word.end)},Caption,,0,0,0,,{\\an5\\pos(${captionX},${captionY})${fade}}${styledPageText(page, activeIndex, joiner, config)}`);
       });
     }
   }
 
   return `${header.join('\n')}\n${events.join('\n')}\n`;
+}
+
+function sourceSubtitleCoverFilters(config: SubtitleConfig, w: number, h: number, input = '0:v'): { filters: string[]; output: string } | null {
+  const cover = config.originalSubtitleCover;
+  if (!cover?.enabled) return null;
+  const x = Math.max(0, Math.min(w - 2, Math.round(w * cover.xPct / 100))) & ~1;
+  const y = Math.max(0, Math.min(h - 2, Math.round(h * cover.yPct / 100))) & ~1;
+  const width = Math.max(2, Math.min(w - x, Math.round(w * cover.widthPct / 100))) & ~1;
+  const height = Math.max(2, Math.min(h - y, Math.round(h * cover.heightPct / 100))) & ~1;
+  const featherPx = Math.max(0, Math.round(Math.min(width, height) * Math.max(0, Math.min(40, cover.featherPct ?? 12)) / 100));
+  const featherMask = (opacity = 1) => {
+    const peak = Math.round(255 * Math.max(0, Math.min(1, opacity)));
+    return `color=c=white:s=${width}x${height},format=gray,geq=lum='${peak}*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/${featherPx})'[vcovermask]`;
+  };
+  if (cover.mode === 'blur') {
+    const strength = Math.max(2, Math.min(30, Math.round(cover.blurStrength)));
+    if (featherPx > 0) return {
+      filters: [
+        `[${input}]split=2[vcoverbase][vcoversource]`,
+        `[vcoversource]crop=${width}:${height}:${x}:${y},boxblur=luma_radius=${strength}:luma_power=2:chroma_radius=${Math.max(1, Math.round(strength / 2))}:chroma_power=1[vcoverarea]`,
+        featherMask(),
+        `[vcoverarea][vcovermask]alphamerge[vcoverblend]`,
+        `[vcoverbase][vcoverblend]overlay=${x}:${y}[vcover]`,
+      ],
+      output: 'vcover',
+    };
+    return {
+      filters: [
+        `[${input}]split=2[vcoverbase][vcoversource]`,
+        `[vcoversource]crop=${width}:${height}:${x}:${y},boxblur=luma_radius=${strength}:luma_power=2:chroma_radius=${Math.max(1, Math.round(strength / 2))}:chroma_power=1[vcoverarea]`,
+        `[vcoverbase][vcoverarea]overlay=${x}:${y}[vcover]`,
+      ],
+      output: 'vcover',
+    };
+  }
+  if (cover.mode === 'restore') {
+    if (featherPx > 0) return {
+      filters: [
+        `[${input}]split=2[vcoverbase][vcoversource]`,
+        `[vcoversource]delogo=x=${x}:y=${y}:w=${width}:h=${height}:show=0,crop=${width}:${height}:${x}:${y}[vcoverarea]`,
+        featherMask(),
+        `[vcoverarea][vcovermask]alphamerge[vcoverblend]`,
+        `[vcoverbase][vcoverblend]overlay=${x}:${y}[vcover]`,
+      ],
+      output: 'vcover',
+    };
+    return { filters: [`[${input}]delogo=x=${x}:y=${y}:w=${width}:h=${height}:show=0[vcover]`], output: 'vcover' };
+  }
+  const color = /^#[0-9a-f]{6}$/i.test(cover.color) ? `0x${cover.color.slice(1)}` : '0x0F172A';
+  const opacity = Math.max(0.2, Math.min(1, cover.opacity / 100));
+  if (featherPx > 0) return {
+    filters: [
+      `color=c=${color}:s=${width}x${height},format=rgba[vcoverarea]`,
+      featherMask(opacity),
+      `[vcoverarea][vcovermask]alphamerge[vcoverblend]`,
+      `[${input}][vcoverblend]overlay=${x}:${y}[vcover]`,
+    ],
+    output: 'vcover',
+  };
+  return { filters: [`[${input}]drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=${color}@${opacity.toFixed(3)}:t=fill[vcover]`], output: 'vcover' };
 }
 
 // Narration audio is concatenated, so each caption starts at the cumulative scene time.
@@ -394,6 +457,13 @@ async function probeVideoDimensions(videoPath: string): Promise<[number, number]
       else resolve([1920, 1080]);
     });
   });
+}
+
+function localizeFrameDimensions(w: number, h: number, ratio: LocalizeAspectRatio = 'original'): [number, number] {
+  if (ratio === 'original') return [w, h];
+  const longEdge = Math.max(2, Math.max(w, h)) & ~1;
+  if (ratio === '9:16') return [Math.max(2, Math.round(longEdge * 9 / 16)) & ~1, longEdge];
+  return [longEdge, Math.max(2, Math.round(longEdge * 9 / 16)) & ~1];
 }
 
 async function probeHasAudio(videoPath: string): Promise<boolean> {
@@ -663,10 +733,13 @@ export function registerFfmpegIpc(): void {
     }));
 
     let outPath: string;
-    if (args.automaticOutputName) {
-      const outputDir = path.join(projectDir(projectId), 'output');
+    if (args.automaticOutputName || (args.outputDirectory && path.isAbsolute(args.outputDirectory))) {
+      const outputDir = args.outputDirectory && path.isAbsolute(args.outputDirectory)
+        ? args.outputDirectory
+        : path.join(projectDir(projectId), 'output');
       await fs.mkdir(outputDir, { recursive: true });
-      const safeBase = path.basename(args.automaticOutputName, path.extname(args.automaticOutputName))
+      const requestedName = args.automaticOutputName || `gensuite-dub-${Date.now()}`;
+      const safeBase = path.basename(requestedName, path.extname(requestedName))
         .replace(/[^\p{L}\p{N}._-]+/gu, '-')
         .replace(/^-+|-+$/g, '')
         .slice(0, 100) || 'video-long-tieng';
@@ -725,20 +798,34 @@ export function registerFfmpegIpc(): void {
     const mixCount = prepared.length + 1 + (keepOriginalAudio ? 1 : 0);
     filters.push(`${mixInputs}amix=inputs=${mixCount}:duration=first:normalize=0[adub]`);
 
-    // Subtitles force a video re-encode (the ass filter must touch the frames);
-    // without them we stream-copy the original video untouched.
+    // Visual caption work requires a video re-encode; otherwise preserve the source stream.
     const wantSubtitles = args.subtitles === true && prepared.some((s) => (s.text ?? '').trim());
+    const subtitleConfig: SubtitleConfig = { ...DEFAULT_SUBTITLE_CONFIG, ...(args.subtitleConfig ?? {}) };
+    const outputAspectRatio = args.outputAspectRatio ?? 'original';
+    const [outputW, outputH] = localizeFrameDimensions(vw, vh, outputAspectRatio);
+    const hasFrameTransform = outputAspectRatio !== 'original';
     let assPath: string | null = null;
     const videoArgs: string[] = [];
+    let videoOutput = '0:v';
+    if (hasFrameTransform) {
+      filters.push(`[0:v]scale=${outputW}:${outputH}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,pad=${outputW}:${outputH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vframe]`);
+      videoOutput = 'vframe';
+    }
+    const coverGraph = sourceSubtitleCoverFilters(subtitleConfig, outputW, outputH, videoOutput);
+    videoOutput = coverGraph?.output ?? videoOutput;
+    if (coverGraph) filters.push(...coverGraph.filters);
     if (wantSubtitles) {
       assPath = path.join(os.tmpdir(), `gensuite-dub-${projectId}-${Date.now()}.ass`);
-      await fs.writeFile(assPath, buildRedubAssFile(prepared, vw, vh, args.subtitleConfig), 'utf8');
+      await fs.writeFile(assPath, buildRedubAssFile(prepared, outputW, outputH, subtitleConfig), 'utf8');
       const assArgs = [`f='${escapeAssPath(assPath)}'`];
       if (process.platform === 'win32' && process.env.WINDIR) {
         assArgs.push(`fontsdir='${escapeAssPath(path.join(process.env.WINDIR, 'Fonts'))}'`);
       }
-      filters.push(`[0:v]ass=${assArgs.join(':')}[vsub]`);
-      videoArgs.push('-map', '[vsub]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p');
+      filters.push(`[${videoOutput}]ass=${assArgs.join(':')}[vsub]`);
+      videoOutput = 'vsub';
+    }
+    if (wantSubtitles || coverGraph || hasFrameTransform) {
+      videoArgs.push('-map', `[${videoOutput}]`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p');
     } else {
       videoArgs.push('-map', '0:v', '-c:v', 'copy');
     }
