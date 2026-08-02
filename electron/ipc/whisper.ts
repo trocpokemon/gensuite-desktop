@@ -3,6 +3,8 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createWriteStream } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import log from 'electron-log';
 import { projectDir } from './project';
 import { ffmpegBinary } from './ffmpeg';
 import type {
@@ -38,6 +40,16 @@ function modelPath(model: WhisperModelName): string {
   return path.join(modelsDir(), `ggml-${model}.bin`);
 }
 
+// Reject clearly incomplete cached downloads left by an interrupted older app
+// version. These are deliberately conservative lower bounds so upstream model
+// revisions do not cause a needless re-download.
+const MIN_MODEL_BYTES: Record<WhisperModelName, number> = {
+  tiny: 70_000_000,
+  base: 130_000_000,
+  small: 430_000_000,
+  medium: 1_300_000_000,
+};
+
 // HuggingFace mirror of the official ggml whisper models.
 function modelUrl(model: WhisperModelName): string {
   return `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model}.bin`;
@@ -51,11 +63,19 @@ async function fileExists(filePath: string): Promise<boolean> {
   return fs.access(filePath).then(() => true).catch(() => false);
 }
 
+async function modelIsUsable(filePath: string, model: WhisperModelName): Promise<boolean> {
+  const stat = await fs.stat(filePath).catch(() => null);
+  return Boolean(stat?.isFile() && stat.size >= MIN_MODEL_BYTES[model]);
+}
+
 async function ensureModel(model: WhisperModelName, win: BrowserWindow | null): Promise<string> {
   const dest = modelPath(model);
-  if (await fileExists(dest)) return dest;
+  if (await modelIsUsable(dest, model)) return dest;
 
   await fs.mkdir(modelsDir(), { recursive: true });
+  // A short file can otherwise remain cached forever and make every later run
+  // fail at the recognition step.
+  await fs.unlink(dest).catch(() => undefined);
   emit(win, { phase: 'downloading-model', percent: 0, model });
 
   const resp = await fetch(modelUrl(model));
@@ -65,6 +85,7 @@ async function ensureModel(model: WhisperModelName, win: BrowserWindow | null): 
   // Write to a temp file first so an interrupted download never leaves a
   // truncated model that later looks "present".
   const tmp = `${dest}.part`;
+  await fs.unlink(tmp).catch(() => undefined);
   const out = createWriteStream(tmp);
   let received = 0;
   const reader = resp.body.getReader();
@@ -77,10 +98,20 @@ async function ensureModel(model: WhisperModelName, win: BrowserWindow | null): 
         out.write(value, (err) => (err ? reject(err) : resolve())));
       if (total > 0) emit(win, { phase: 'downloading-model', percent: Math.round((received / total) * 100), model });
     }
-  } finally {
-    out.close();
+    await new Promise<void>((resolve, reject) => {
+      out.once('finish', resolve);
+      out.once('error', reject);
+      out.end();
+    });
+    if ((total > 0 && received !== total) || received < MIN_MODEL_BYTES[model]) {
+      throw new Error('Dữ liệu nhận dạng tải xuống chưa đầy đủ. Vui lòng thử lại.');
+    }
+    await fs.rename(tmp, dest);
+  } catch (error) {
+    out.destroy();
+    await fs.unlink(tmp).catch(() => undefined);
+    throw error;
   }
-  await fs.rename(tmp, dest);
   return dest;
 }
 
@@ -290,6 +321,7 @@ export function registerWhisperIpc(): void {
     const whisperArgs = [
       '-m', modelFile,
       '-f', wavPath,
+      '-t', String(Math.max(1, Math.min(4, os.availableParallelism()))),
       '-oj',
       '-of', outBase,
     ];
@@ -301,8 +333,17 @@ export function registerWhisperIpc(): void {
       const child = spawn(binary, whisperArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
       let stderr = '';
       child.stderr?.on('data', (d) => { stderr += String(d); });
-      child.on('error', () => reject(new Error('Không thể khởi động bộ nhận dạng. Vui lòng thử lại.')));
-      child.on('close', (code) => code === 0 ? resolve() : reject(new Error('Không thể nhận dạng lời thoại từ tệp này.')));
+      child.on('error', (error) => {
+        log.error('speech recognition spawn failed', { code: (error as NodeJS.ErrnoException).code });
+        reject(new Error('Không thể khởi động bộ nhận dạng. Vui lòng thử lại.'));
+      });
+      child.on('close', (code) => {
+        if (code === 0) resolve();
+        else {
+          log.error('speech recognition failed', { code, model, detail: stderr.slice(-1200) });
+          reject(new Error('Không thể nhận dạng lời thoại từ tệp này. Hãy thử mức độ chính xác thấp hơn.'));
+        }
+      });
     });
 
     const jsonPath = `${outBase}.json`;

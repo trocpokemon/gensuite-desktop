@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import log from 'electron-log';
 import type { LocalizeAspectRatio, SubtitleConfig, SubtitleWordTiming } from '../../src/shared/types';
 import { DEFAULT_SUBTITLE_CONFIG } from '../../src/shared/subtitlePresets';
 import { projectDir } from './project';
@@ -460,7 +461,9 @@ async function probeVideoDimensions(videoPath: string): Promise<[number, number]
 }
 
 function localizeFrameDimensions(w: number, h: number, ratio: LocalizeAspectRatio = 'original'): [number, number] {
-  if (ratio === 'original') return [w, h];
+  // The output encoder requires even dimensions. Some phone/social sources have
+  // an odd width or height; pad those by one pixel instead of failing at 100%.
+  if (ratio === 'original') return [Math.max(2, (w + 1) & ~1), Math.max(2, (h + 1) & ~1)];
   const longEdge = Math.max(2, Math.max(w, h)) & ~1;
   if (ratio === '9:16') return [Math.max(2, Math.round(longEdge * 9 / 16)) & ~1, longEdge];
   return [longEdge, Math.max(2, Math.round(longEdge * 9 / 16)) & ~1];
@@ -803,7 +806,7 @@ export function registerFfmpegIpc(): void {
     const subtitleConfig: SubtitleConfig = { ...DEFAULT_SUBTITLE_CONFIG, ...(args.subtitleConfig ?? {}) };
     const outputAspectRatio = args.outputAspectRatio ?? 'original';
     const [outputW, outputH] = localizeFrameDimensions(vw, vh, outputAspectRatio);
-    const hasFrameTransform = outputAspectRatio !== 'original';
+    const hasFrameTransform = outputAspectRatio !== 'original' || outputW !== vw || outputH !== vh;
     let assPath: string | null = null;
     const videoArgs: string[] = [];
     let videoOutput = '0:v';
@@ -882,6 +885,7 @@ export function registerFfmpegIpc(): void {
       });
       child.on('error', (err) => {
         cleanupSubs();
+        log.error('video completion spawn failed', { code: (err as NodeJS.ErrnoException).code });
         reject(new Error('Không thể khởi động quá trình hoàn thiện video.'));
       });
       child.on('close', (code) => {
@@ -896,6 +900,7 @@ export function registerFfmpegIpc(): void {
           if (args.revealOutput !== false) shell.showItemInFolder(outPath);
           resolve(outPath);
         } else {
+          log.error('video completion failed', { code, detail: stderr.slice(-1600) });
           reject(new Error('Không thể hoàn thiện video. Hãy kiểm tra các tệp đầu vào và thử lại.'));
         }
       });
