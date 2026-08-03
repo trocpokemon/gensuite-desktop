@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, CheckCircle2, Cloud, KeyRound, Loader2, RotateCcw, Sparkles, WandSparkles } from 'lucide-react';
 import { EngineToggle } from '../components/EngineToggle';
+import { AppSelect } from '../components/AppSelect';
 import { useProjectStore } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { getScriptProvider, listScriptModels, type ScriptModel } from '../providers/script';
@@ -175,20 +176,15 @@ export function DirectorRoom({ onOpenSettings }: Props) {
           <div className="col-span-2"><EngineToggle<ScriptEngine> label="Nguồn AI" value={project.settings.scriptEngine} onChange={setScriptEngine} options={[{ value: 'gemini', label: 'Gemini' }, { value: 'gensuite', label: 'GenSuite', premium: true, icon: <Cloud size={14} /> }]} /></div>
           {scriptEngine === 'gensuite' && (
             <label className="col-span-2 text-xs font-semibold uppercase tracking-wide text-text/45">Mô hình LLM
-              <select
+              <AppSelect
                 value={scriptModel}
-                onChange={(e) => setScriptModel(e.target.value)}
+                onChange={setScriptModel}
+                options={models.map((model) => ({ value: model.id, label: `${model.name} · ${model.outputCreditsPerK} credits/1K` }))}
+                placeholder={modelsLoading ? 'Đang tải danh sách…' : 'Chưa có lựa chọn — kiểm tra cấu hình'}
                 disabled={modelsLoading || !models.length}
-                className="field-surface mt-2 w-full rounded-xl px-3 py-3 text-sm normal-case text-white outline-none disabled:opacity-50"
-              >
-                {modelsLoading && <option className="bg-[#181819]">Đang tải danh sách model…</option>}
-                {!modelsLoading && !models.length && <option className="bg-[#181819]">Chưa có model — kiểm tra API key</option>}
-                {models.map((m) => (
-                  <option key={m.id} value={m.id} className="bg-[#181819]">
-                    {m.name} · {m.outputCreditsPerK} credits/1K
-                  </option>
-                ))}
-              </select>
+                ariaLabel="Mô hình nội dung"
+                className="mt-2 rounded-xl px-3 py-3 text-sm normal-case"
+              />
               {modelsError && !missingKeyService(modelsError) && <span className="mt-1 block text-[11px] normal-case text-red-300/80">{modelsError}</span>}
             </label>
           )}
@@ -247,10 +243,7 @@ export function DirectorRoom({ onOpenSettings }: Props) {
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/8 px-5 py-3">
             <div className="flex items-center gap-2">
               <RotateCcw size={14} className="text-white/35" />
-              <select defaultValue="" onChange={(event) => { if (event.target.value) restoreScriptVersion(event.target.value); event.target.value = ''; }} className="bg-transparent text-xs text-white/45 outline-none">
-                <option value="" className="bg-[#181819]">Lịch sử phiên bản ({project.script.versions.length})</option>
-                {[...project.script.versions].reverse().map((version) => <option key={version.id} value={version.id} className="bg-[#181819]">{version.label} · {new Date(version.createdAt).toLocaleTimeString('vi-VN')}</option>)}
-              </select>
+              <AppSelect value="" onChange={(value) => value && restoreScriptVersion(value)} options={[{ value: '', label: `Lịch sử phiên bản (${project.script.versions.length})` }, ...[...project.script.versions].reverse().map((version) => ({ value: version.id, label: `${version.label} · ${new Date(version.createdAt).toLocaleTimeString('vi-VN')}` }))]} ariaLabel="Lịch sử phiên bản" className="border-0 bg-transparent px-2 py-1.5 text-xs text-white/45 shadow-none" menuClassName="min-w-72" />
             </div>
             <span className={`flex items-center gap-1 text-xs ${project.script.status === 'approved' ? 'text-emerald-300' : 'text-white/35'}`}><CheckCircle2 size={14} /> {project.script.status === 'approved' ? 'Nội dung đã chốt' : 'Bản nháp đang tự lưu'}</span>
           </div>

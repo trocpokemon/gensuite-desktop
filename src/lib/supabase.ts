@@ -17,6 +17,12 @@ export const getMissingSupabaseEnvKeys = (): string[] => {
   return missing;
 };
 
+/** Base URL for authenticated app functions used by first-party features. */
+export const getSupabaseFunctionsBaseUrl = (): string | null => {
+  const baseUrl = clean(env.VITE_SUPABASE_URL);
+  return baseUrl ? `${baseUrl.replace(/\/$/, '')}/functions/v1` : null;
+};
+
 let cached: SupabaseClient | null = null;
 
 // detectSessionInUrl is false because desktop never receives the OAuth hash on a

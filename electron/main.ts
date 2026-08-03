@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
 import { createReadStream, promises as fs } from 'node:fs';
 import { Readable } from 'node:stream';
 import path from 'node:path';
+import log from 'electron-log';
 import { registerHardwareIpc } from './ipc/hardware';
 import { registerProjectIpc } from './ipc/project';
 import { registerSettingsIpc } from './ipc/settings';
@@ -86,6 +87,17 @@ function handleAuthDeepLink(url: string): void {
 }
 
 function registerWindowIpc(): void {
+  ipcMain.on('diagnostics:preload-failure', (_e, payload: unknown) => {
+    const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : null;
+    if (record?.code !== 'DESKTOP_BRIDGE_UNAVAILABLE') return;
+    if (typeof record.diagnosticId !== 'string' || !/^GS-[A-Z0-9]{8}$/.test(record.diagnosticId)) return;
+    log.error('operation failed', {
+      diagnosticId: record.diagnosticId,
+      code: record.code,
+      stage: 'desktop',
+      cause: 'transport-failed',
+    });
+  });
   ipcMain.on('window:minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize());
   ipcMain.on('window:toggleMaximize', (e) => {
     const w = BrowserWindow.fromWebContents(e.sender);

@@ -4,12 +4,13 @@ import { useProjectStore } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
 import { EngineToggle } from '../components/EngineToggle';
 import { VoiceConfigPanel } from '../components/VoiceConfigPanel';
+import { AppSelect } from '../components/AppSelect';
 import { SubtitleDesigner } from '../components/SubtitleDesigner';
 import { getTranscriptionProvider } from '../providers/transcription';
 import { getScriptProvider } from '../providers/script';
 import { getVoiceProvider } from '../providers/voice';
 import { missingKeyService, serviceLabel, errorMessage, loginRequiredPlatform, type VideoLoginPlatform } from '../providers/errors';
-import type { WhisperModelName } from '../shared/types';
+import type { FfmpegProgress, WhisperModelName } from '../shared/types';
 import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
 import { useEntitlementStore } from '../store/entitlementStore';
 
@@ -43,6 +44,19 @@ const WHISPER_MODELS: Array<[WhisperModelName, string]> = [
   ['base', 'Cân bằng · Khuyến nghị'],
   ['small', 'Chính xác hơn'],
   ['medium', 'Chính xác cao nhất'],
+];
+
+const SOURCE_LANGUAGE_OPTIONS = [
+  { value: '', label: 'Chọn ngôn ngữ gốc', disabled: true },
+  ...SOURCE_LANGUAGES.map(([value, label]) => ({ value, label })),
+];
+const TARGET_LANGUAGE_OPTIONS = [
+  { value: '', label: 'Chọn ngôn ngữ đích', disabled: true },
+  ...TARGET_LANGUAGES.map(([value, label]) => ({ value, label })),
+];
+const ACCURACY_OPTIONS = [
+  { value: '', label: 'Chọn độ chính xác', disabled: true },
+  ...WHISPER_MODELS.map(([value, label]) => ({ value, label })),
 ];
 
 // The paid translation flow uses GenSuite's Gemini model; free uses Google AI Studio directly.
@@ -123,9 +137,12 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
   const [downloadPhase, setDownloadPhase] = useState('');
   const [transcribePhase, setTranscribePhase] = useState('');
   const [modelPercent, setModelPercent] = useState<number | null>(null);
+  const [transcribePercent, setTranscribePercent] = useState<number | null>(null);
   const [voiceProgress, setVoiceProgress] = useState({ done: 0, total: 0 });
   const [voiceErrorMsg, setVoiceErrorMsg] = useState('');
   const [mergePercent, setMergePercent] = useState(0);
+  const [mergePhase, setMergePhase] = useState<FfmpegProgress['phase']>('preparing');
+  const [mergeGroup, setMergeGroup] = useState({ current: 0, total: 0 });
   const [alignmentProgress, setAlignmentProgress] = useState({ done: 0, total: 0 });
   const [resultPath, setResultPath] = useState('');
   const [missingKey, setMissingKey] = useState<string | null>(null);
@@ -157,11 +174,17 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
   useEffect(() => window.gensuite.whisper.onProgress((p) => {
     setTranscribePhase(p.phase);
     setModelPercent(p.phase === 'downloading-model' && typeof p.percent === 'number' ? p.percent : null);
+    setTranscribePercent(p.phase === 'transcribing' && typeof p.percent === 'number' ? p.percent : null);
   }), []);
 
   useEffect(() => window.gensuite.ffmpeg.onProgress((p) => {
-    if (p.projectId !== project.id || !p.totalSec) return;
-    setMergePercent(Math.min(100, Math.round((p.timeSec / p.totalSec) * 100)));
+    if (p.projectId !== project.id) return;
+    setMergePhase(p.phase);
+    setMergeGroup({ current: p.groupNumber ?? 0, total: p.groupCount ?? 0 });
+    const nextPercent = typeof p.percent === 'number'
+      ? p.percent
+      : p.totalSec && p.totalSec > 0 ? (p.timeSec / p.totalSec) * 100 : 0;
+    setMergePercent((current) => Math.max(current, Math.min(100, Math.round(nextPercent))));
   }), [project.id]);
 
   const sourceName = sourcePath ? sourcePath.replace(/\\/g, '/').split('/').pop() : '';
@@ -243,6 +266,8 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     setResultPath('');
     setDownloadPercent(0);
     setMergePercent(0);
+    setMergePhase('preparing');
+    setMergeGroup({ current: 0, total: 0 });
     setVoiceProgress({ done: 0, total: 0 });
     setAlignmentProgress({ done: 0, total: 0 });
   };
@@ -487,9 +512,16 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     setStage('merge');
     const redubSegments = finalScenes
       .filter((s) => s.audioPath && typeof s.sourceStart === 'number' && typeof s.sourceEnd === 'number')
-      .map((s) => ({ audioPath: s.audioPath as string, sourceStart: s.sourceStart as number, sourceEnd: s.sourceEnd as number, text: s.narration, wordTimings: s.subtitleWords }));
+      .map((s) => ({
+        audioPath: s.audioPath as string,
+        sourceStart: s.sourceStart as number,
+        sourceEnd: s.sourceEnd as number,
+        text: s.narration,
+        wordTimings: s.subtitleWords,
+        audioDuration: s.audioDuration,
+      }));
     if (!redubSegments.length) throw new Error('Không có câu thoại nào để lồng tiếng.');
-    const out = await window.gensuite.ffmpeg.redub({
+    const completion = await window.gensuite.ffmpeg.redub({
       projectId, sourceVideoPath: src, segments: redubSegments,
       subtitles: settings.subtitle.enabled,
       subtitleConfig: settings.subtitle,
@@ -499,6 +531,8 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       automaticOutputName: options?.automaticOutputName,
       revealOutput: options?.batch ? false : undefined,
     });
+    if (!completion.ok) throw completion.error;
+    const out = completion.value;
     if (!out) { setStage('idle'); return null; } // save dialog cancelled
     useProjectStore.getState().setDubbedVideo(out);
     setResultPath(out);
@@ -529,11 +563,15 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       case 'transcribe':
         return transcribePhase === 'extracting' ? 'Đang trích âm thanh…'
           : transcribePhase === 'downloading-model' ? `Đang chuẩn bị dữ liệu nhận dạng${modelPercent !== null ? ` ${modelPercent}%` : '…'}`
-          : transcribePhase === 'transcribing' ? 'Đang nhận dạng lời thoại…' : 'Đang nhận dạng…';
+          : transcribePhase === 'transcribing' ? `Đang nhận dạng lời thoại${transcribePercent !== null ? ` ${transcribePercent}%` : '…'}` : 'Đang nhận dạng…';
       case 'translate': return 'Đang dịch lời thoại…';
       case 'voice': return `Đang lồng tiếng ${voiceProgress.done}/${voiceProgress.total}…`;
       case 'align': return `Đang căn phụ đề với lời đọc ${alignmentProgress.done}/${alignmentProgress.total}…`;
-      case 'merge': return `Đang ghép vào video gốc ${mergePercent}%`;
+      case 'merge': return mergePhase === 'preparing'
+        ? `Đang kiểm tra dữ liệu đầu vào ${mergePercent}%`
+        : mergePhase === 'mixing-audio'
+        ? `Đang chuẩn bị giọng đọc${mergeGroup.total ? ` ${mergeGroup.current}/${mergeGroup.total}` : ''} · ${mergePercent}%`
+        : `Đang hoàn thiện video ${mergePercent}%`;
       default: return '';
     }
   };
@@ -641,7 +679,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
           <h1 className="truncate text-2xl font-bold tracking-[-0.04em]">Tạo bản lồng tiếng</h1>
           <p className="mt-1 text-xs text-white/40">Hoàn thành 4 bước, sau đó GenSuite tự xử lý phần còn lại.</p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">{reviewPreparationActive && <div className="hidden min-w-48 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] px-3 py-2 md:block"><div className="flex items-center justify-between gap-3 text-[10px] font-semibold text-emerald-100"><span className="flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" />{stageLabel()}</span>{stage === 'download' && <span className="text-emerald-300">{Math.round(downloadPercent)}%</span>}</div><div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10"><div className={`h-full rounded-full bg-emerald-400 transition-all ${stage !== 'download' ? 'animate-pulse' : ''}`} style={{ width: stage === 'download' ? `${downloadPercent}%` : stage === 'transcribe' ? '62%' : '84%' }} /></div></div>}<div className="flex items-center rounded-xl border border-white/[0.08] bg-white/[0.025] p-1 text-xs">
+        <div className="flex shrink-0 items-center gap-2">{reviewPreparationActive && <div className="hidden min-w-48 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] px-3 py-2 md:block"><div className="flex items-center justify-between gap-3 text-[10px] font-semibold text-emerald-100"><span className="flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" />{stageLabel()}</span>{stage === 'download' && <span className="text-emerald-300">{Math.round(downloadPercent)}%</span>}</div><div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10"><div className={`h-full rounded-full bg-emerald-400 transition-all ${stage !== 'download' && !(stage === 'transcribe' && transcribePercent !== null) ? 'animate-pulse' : ''}`} style={{ width: stage === 'download' ? `${downloadPercent}%` : stage === 'transcribe' ? `${transcribePercent ?? 1}%` : '84%' }} /></div></div>}<div className="flex items-center rounded-xl border border-white/[0.08] bg-white/[0.025] p-1 text-xs">
           <button type="button" disabled={running} onClick={() => setTaskMode('single')} className={`flex items-center gap-2 rounded-lg px-3 py-2 font-bold transition disabled:cursor-default ${taskMode === 'single' ? 'bg-white/[0.08] text-white' : 'text-white/35 hover:text-white/65'}`}><FileVideo size={14} /> 1 video</button>
           <button type="button" disabled={running} onClick={() => setTaskMode('batch')} className={`flex items-center gap-2 rounded-lg px-3 py-2 font-bold transition disabled:cursor-default ${taskMode === 'batch' ? 'bg-emerald-400/15 text-emerald-200' : 'text-white/35 hover:text-white/65'}`}><Layers3 size={14} /> Hàng loạt{batchItems.length ? ` (${batchItems.length})` : ''}</button>
         </div></div>
@@ -680,9 +718,9 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
               <p className="mt-3 text-[10px] leading-4 text-white/25">Các video dùng chung cấu hình bên dưới và được xử lý lần lượt để giữ máy ổn định.</p>
             </div>}
             <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Ngôn ngữ gốc <span className="text-emerald-300">*</span></span><select value={project.settings.localizeSourceLanguageConfirmed ? selectedSourceLanguage : ''} onChange={(event) => { const value = event.target.value; setSourceLanguage(value); setLanguages({ sourceLanguage: value }); patchSettings({ localizeSourceLanguageConfirmed: true }); }} disabled={running} className="field-surface w-full rounded-xl px-3 py-3 text-sm outline-none"><option value="" disabled className="bg-[#181819]">Chọn ngôn ngữ gốc</option>{SOURCE_LANGUAGES.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}</select></label>
-              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Dịch sang <span className="text-emerald-300">*</span></span><select value={project.settings.localizeTargetLanguageConfirmed ? targetLanguage : ''} onChange={(event) => { const value = event.target.value; setTargetLanguage(value); setLanguages({ targetLanguage: value }); patchSettings({ localizeTargetLanguageConfirmed: true }); }} disabled={running} className="field-surface w-full rounded-xl px-3 py-3 text-sm outline-none"><option value="" disabled className="bg-[#181819]">Chọn ngôn ngữ đích</option>{TARGET_LANGUAGES.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}</select></label>
-              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Độ chính xác <span className="text-emerald-300">*</span></span><select value={project.settings.localizeAccuracyConfirmed ? whisperModel : ''} onChange={(event) => { setWhisperModel(event.target.value as WhisperModelName); patchSettings({ localizeAccuracyConfirmed: true }); }} disabled={running} className="field-surface w-full rounded-xl px-3 py-3 text-sm outline-none"><option value="" disabled className="bg-[#181819]">Chọn độ chính xác</option>{WHISPER_MODELS.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}</select></label>
+              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Ngôn ngữ gốc <span className="text-emerald-300">*</span></span><AppSelect value={project.settings.localizeSourceLanguageConfirmed ? selectedSourceLanguage : ''} options={SOURCE_LANGUAGE_OPTIONS} onChange={(value) => { setSourceLanguage(value); setLanguages({ sourceLanguage: value }); patchSettings({ localizeSourceLanguageConfirmed: true }); }} disabled={running} ariaLabel="Ngôn ngữ gốc" className="rounded-xl px-3 py-3 text-sm" /></label>
+              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Dịch sang <span className="text-emerald-300">*</span></span><AppSelect value={project.settings.localizeTargetLanguageConfirmed ? targetLanguage : ''} options={TARGET_LANGUAGE_OPTIONS} onChange={(value) => { setTargetLanguage(value); setLanguages({ targetLanguage: value }); patchSettings({ localizeTargetLanguageConfirmed: true }); }} disabled={running} ariaLabel="Ngôn ngữ đích" className="rounded-xl px-3 py-3 text-sm" /></label>
+              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Độ chính xác <span className="text-emerald-300">*</span></span><AppSelect value={project.settings.localizeAccuracyConfirmed ? whisperModel : ''} options={ACCURACY_OPTIONS} onChange={(value) => { setWhisperModel(value as WhisperModelName); patchSettings({ localizeAccuracyConfirmed: true }); }} disabled={running} ariaLabel="Độ chính xác" className="rounded-xl px-3 py-3 text-sm" /></label>
             </div>
             <div className="mt-4 rounded-2xl border border-white/[0.07] p-4"><EngineToggle<'free' | 'paid'> label="Cách dịch" value={scriptEngine === 'gensuite' ? 'paid' : 'free'} options={[{ value: 'free', label: 'Dùng khóa riêng', hint: 'Dùng khóa dịch thuật bạn đã cấu hình', badge: 'free' }, { value: 'paid', label: 'Dùng credits', hint: canUseCloud ? 'Trừ credits trong tài khoản' : 'Cần gói Basic trở lên', premium: true, badge: 'cloud', disabled: entitlementStatus !== 'ready' || !canUseCloud }]} onChange={(value) => setTranslatePaid(value === 'paid')} /></div>
           </div>}
@@ -725,7 +763,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
         </section>
 
       <footer className={`mx-auto flex w-full shrink-0 items-center gap-3 rounded-2xl border border-white/[0.08] bg-[#151516]/95 p-3 shadow-2xl backdrop-blur-xl ${setupStep === 'subtitle' ? 'mt-2 max-w-none' : 'mt-4 max-w-5xl'}`}>
-        {running ? <div className="min-w-0 flex-1 px-2"><p className="flex items-center gap-2 truncate text-xs font-semibold text-emerald-200"><Loader2 size={15} className="shrink-0 animate-spin" /> {taskMode === 'batch' && activeBatchId ? `Video ${Math.max(1, batchItems.findIndex((item) => item.id === activeBatchId) + 1)}/${batchItems.length} · ` : ''}{stageLabel()}</p><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${stage === 'download' ? downloadPercent : stage === 'merge' ? mergePercent : stage === 'align' ? (alignmentProgress.total ? (alignmentProgress.done / alignmentProgress.total) * 100 : 0) : stage === 'voice' && voiceProgress.total ? (voiceProgress.done / voiceProgress.total) * 100 : 18}%` }} /></div></div> : <div className="min-w-0 flex-1 px-2"><p className="truncate text-xs font-semibold text-white/60">Bước {currentStepIndex + 1}/4 · {SETUP_STEPS[currentStepIndex].label}</p><p className="mt-0.5 truncate text-[10px] text-white/25">{sourceReady ? taskMode === 'batch' ? `${batchItems.length} video · ${completedBatchCount} đã xong` : `${sourceLanguageLabel} → ${targetLanguageLabel}` : 'Hãy chọn video để bắt đầu'}</p></div>}
+        {running ? <div className="min-w-0 flex-1 px-2"><p className="flex items-center gap-2 truncate text-xs font-semibold text-emerald-200"><Loader2 size={15} className="shrink-0 animate-spin" /> {taskMode === 'batch' && activeBatchId ? `Video ${Math.max(1, batchItems.findIndex((item) => item.id === activeBatchId) + 1)}/${batchItems.length} · ` : ''}{stageLabel()}</p><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${stage === 'download' ? downloadPercent : stage === 'transcribe' ? (transcribePercent ?? 1) : stage === 'merge' ? mergePercent : stage === 'align' ? (alignmentProgress.total ? (alignmentProgress.done / alignmentProgress.total) * 100 : 0) : stage === 'voice' && voiceProgress.total ? (voiceProgress.done / voiceProgress.total) * 100 : 18}%` }} /></div></div> : <div className="min-w-0 flex-1 px-2"><p className="truncate text-xs font-semibold text-white/60">Bước {currentStepIndex + 1}/4 · {SETUP_STEPS[currentStepIndex].label}</p><p className="mt-0.5 truncate text-[10px] text-white/25">{sourceReady ? taskMode === 'batch' ? `${batchItems.length} video · ${completedBatchCount} đã xong` : `${sourceLanguageLabel} → ${targetLanguageLabel}` : 'Hãy chọn video để bắt đầu'}</p></div>}
         {currentStepIndex > 0 && !running && <button onClick={goBack} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-xs font-bold text-white/55 hover:text-white"><ArrowLeft size={14} /> Quay lại</button>}
         {setupStep !== 'export' ? <button onClick={() => void goNext()} disabled={running || !stepReady(setupStep)} className="primary-action inline-flex items-center gap-2 rounded-xl px-5 py-3 text-xs font-bold disabled:opacity-40">{running && setupStep === 'voice' ? <><Loader2 size={14} className="animate-spin" /> Đang chuẩn bị review</> : <>Tiếp tục <ChevronRight size={14} /></>}</button> : <button onClick={run} disabled={running || !sourceReady || !voiceConfig.voiceId || (taskMode === 'batch' && remainingBatchCount === 0)} className="primary-action inline-flex min-w-40 items-center justify-center gap-2 rounded-xl px-5 py-3 text-xs font-bold disabled:opacity-40">{running ? <><Loader2 size={15} className="animate-spin" /> Đang xử lý</> : <><Play size={15} /> {taskMode === 'batch' ? remainingBatchCount === 0 ? 'Đã hoàn tất' : completedBatchCount ? 'Chạy phần còn lại' : `Tạo ${batchItems.length} video` : 'Tạo video'}</>}</button>}
       </footer>

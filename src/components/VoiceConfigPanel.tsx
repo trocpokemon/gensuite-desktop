@@ -4,7 +4,7 @@ import { useProjectStore } from '../store/projectStore';
 import { useAuthStore } from '../store/authStore';
 import { cloneGenSuiteVoice, getGenSuiteVoicePreview, listGenSuiteModels, listGenSuiteVoicePage, listGenSuiteVoices } from '../providers/voice/GenSuiteVoiceAdapter';
 import type { GenSuiteModel, GenSuiteVoice, GenSuiteVoiceEngine } from '../providers/voice/GenSuiteVoiceAdapter';
-import { missingKeyService, errorMessage } from '../providers/errors';
+import { missingKeyService, errorMessage, isCancellationError } from '../providers/errors';
 import type { ProjectSettings, VoiceConfig, VoiceEngine } from '../shared/types';
 import { CompactFilter, LanguageDropdown, ModelPickerSheet } from './VoiceSettingControls';
 import { EDGE_TTS_FALLBACK_VOICES, localeLabel, edgeVoiceName } from '../providers/voice/edgeTtsCatalog';
@@ -189,6 +189,7 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [previewLoadingVoiceId, setPreviewLoadingVoiceId] = useState<string | null>(null);
   const [previewErrorVoiceId, setPreviewErrorVoiceId] = useState<string | null>(null);
+  const [previewErrorMessage, setPreviewErrorMessage] = useState('');
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewJobIdRef = useRef<string | null>(null);
   const dynamicPreviewUrlsRef = useRef<Map<string, string>>(new Map());
@@ -425,6 +426,7 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
     }
     stopVoicePreview();
     setPreviewErrorVoiceId(null);
+    setPreviewErrorMessage('');
     setPreviewLoadingVoiceId(voice.voiceId);
     let previewUrl = voice.previewUrl || dynamicPreviewUrlsRef.current.get(voice.voiceId) || '';
     if (!previewUrl && canPreviewDynamically) {
@@ -432,16 +434,18 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
         let blob: Blob;
         if (engine === 'capcuttts') {
           const sourceVoice = capCutVoiceById(voice.voiceId);
-          if (!sourceVoice) throw new Error('voice unavailable');
+          if (!sourceVoice) throw new Error('Giọng đã chọn không còn khả dụng. Hãy chọn lại giọng.');
           const jobId = `preview_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
           previewJobIdRef.current = jobId;
-          const result = await window.gensuite.capcuttts.preview({
+          const response = await window.gensuite.capcuttts.preview({
             jobId,
             text: PREVIEW_TEXT[voice.labels?.language || 'vi-VN'] || PREVIEW_TEXT['en-US'],
             voiceId: sourceVoice.voiceId,
             resourceId: sourceVoice.resourceId,
             speed: config.speed,
           });
+          if (!response.ok) throw response.error;
+          const result = response.value;
           if (previewJobIdRef.current !== jobId) return;
           previewJobIdRef.current = null;
           const binary = window.atob(result.audioBase64);
@@ -456,8 +460,9 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
         dynamicPreviewUrlsRef.current.set(voice.voiceId, previewUrl);
       } catch (error) {
         previewJobIdRef.current = null;
-        if (error instanceof Error && error.message.includes('voice:cancelled')) return;
+        if (isCancellationError(error)) return;
         setPreviewErrorVoiceId(voice.voiceId);
+        setPreviewErrorMessage(errorMessage(error));
         setPreviewLoadingVoiceId(null);
         return;
       }
@@ -471,10 +476,12 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
     audio.addEventListener('ended', stopVoicePreview, { once: true });
     audio.addEventListener('error', () => {
       setPreviewErrorVoiceId(voice.voiceId);
+      setPreviewErrorMessage('Không phát được bản nghe thử trên thiết bị này.');
       stopVoicePreview();
     }, { once: true });
     void audio.play().catch(() => {
       setPreviewErrorVoiceId(voice.voiceId);
+      setPreviewErrorMessage('Không phát được bản nghe thử trên thiết bị này.');
       stopVoicePreview();
     });
   };
@@ -673,6 +680,7 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
           {freeEngine && <div className="shrink-0 border-y border-white/[0.055] bg-white/[0.012] px-6 py-4"><div className="grid max-w-xs grid-cols-1"><CompactFilter label="Ngôn ngữ" value={edgeLanguage} options={edgeLanguageOptions} onChange={setEdgeLanguage} /></div></div>}
           <div ref={voiceLibraryScrollRef} className="relative min-h-0 flex-1 overflow-y-auto p-6">
             {exploreError && librarySource === 'explore' && <p className="mb-4 rounded-xl border border-red-400/20 bg-red-400/5 p-3 text-xs text-red-300">{exploreError}</p>}
+            {previewErrorMessage && <p className="mb-4 rounded-xl border border-red-400/20 bg-red-400/5 p-3 text-xs leading-5 text-red-300">{previewErrorMessage}</p>}
             {exploreBusy && librarySource === 'explore' && visibleLibraryVoices.length > 0 && <div className="pointer-events-none sticky top-0 z-20 -mb-10 flex justify-center"><div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-black/80 px-5 py-3 shadow-[0_12px_38px_rgba(0,0,0,.5)] backdrop-blur-xl"><span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 animate-bounce rounded-full bg-teal-300 [animation-delay:-.24s]" /><span className="h-1.5 w-1.5 animate-bounce rounded-full bg-white/30 [animation-delay:-.12s]" /><span className="h-1.5 w-1.5 animate-bounce rounded-full bg-white/20" /></span><span className="text-[9px] font-bold uppercase tracking-[0.28em] text-white/55">Đang đồng bộ giọng</span></div></div>}
             {exploreBusy && librarySource === 'explore' && !visibleLibraryVoices.length ? <div className="flex h-full items-center justify-center gap-3 text-xs uppercase tracking-widest text-white/40"><Loader2 size={18} className="animate-spin text-teal-300" /> Đang tải giọng khám phá…</div> : visibleLibraryVoices.length ? <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">{visibleLibraryVoices.map((voice) => { const isPreviewing = previewingVoiceId === voice.voiceId; const isPreviewLoading = previewLoadingVoiceId === voice.voiceId; const previewFailed = previewErrorVoiceId === voice.voiceId; const canPreview = Boolean(voice.previewUrl) || engine === 'genvoice' || engine === 'capcuttts'; return <div key={voice.voiceId} className={`group flex min-w-0 items-center gap-3 rounded-2xl border p-3 text-left transition duration-200 ${voice.voiceId === config.voiceId ? 'border-teal-400/35 bg-teal-400/[0.075] shadow-[0_0_0_1px_rgba(45,212,191,.04)]' : 'border-white/[0.065] bg-white/[0.018] hover:border-white/[0.14] hover:bg-white/[0.035]'}`}><button type="button" title={previewFailed ? 'Không phát được bản nghe thử' : canPreview ? (isPreviewing ? 'Dừng nghe thử' : 'Nghe thử giọng') : 'Giọng này chưa có bản nghe thử'} disabled={!canPreview || isPreviewLoading} onClick={() => void toggleVoicePreview(voice)} className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition ${canPreview ? 'bg-white/[0.055] text-white/45 hover:bg-emerald-400/15 hover:text-emerald-300' : 'cursor-not-allowed bg-white/[0.025] text-white/10'} ${previewFailed ? 'text-red-300/60' : ''}`}>{isPreviewLoading ? <Loader2 size={17} className="animate-spin text-emerald-300" /> : isPreviewing ? <Pause size={17} className="text-emerald-300" /> : <Play size={17} />}</button><button type="button" onClick={() => selectLibraryVoice(voice)} className="flex min-w-0 flex-1 items-center gap-3 self-stretch text-left"><span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-white/85">{voice.name}</span><span className="mt-1 block truncate text-[9px] font-black uppercase tracking-wider text-white/22">{previewFailed ? 'Không phát được bản nghe thử' : voice.category || voice.labels?.use_case || voice.labels?.gender || 'Voice'}</span></span>{voice.voiceId === config.voiceId && <Check size={16} className="shrink-0 text-teal-300" />}</button></div>; })}</div> : <div className="flex h-full flex-col items-center justify-center text-center text-white/30"><Search size={42} className="mb-4 opacity-20" /><p className="text-sm">Không tìm thấy giọng phù hợp.</p></div>}
             {engine === 'elevenlabs' && librarySource === 'explore' && visibleLibraryVoices.length > 0 && <div ref={exploreLoadMoreRef} className="flex h-16 items-end justify-center pb-1 text-xs text-white/30">{exploreBusy ? <span className="flex items-center gap-2"><Loader2 size={14} className="animate-spin text-teal-300" /> Đang đồng bộ thêm giọng…</span> : exploreHasMore ? 'Cuộn xuống để xem thêm' : 'Đã tải hết kết quả'}</div>}

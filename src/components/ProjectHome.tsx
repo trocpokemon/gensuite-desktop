@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { AudioLines, Copy, Download, FileText, Film, FolderOpen, HardDrive, Languages, Mic, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
+import { AudioLines, Copy, Download, FileText, Film, FolderOpen, HardDrive, ImagePlus, Languages, Mic, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { localFileUrl } from '../shared/localFile';
 import type { ProjectSummary } from '../shared/types';
@@ -16,7 +16,15 @@ const QUICK_TOOLS: Array<{ id: QuickToolId; title: string; description: string; 
   { id: 'voice', title: 'Tạo Voice AI', description: 'Chuyển văn bản thành giọng nói', icon: Mic, color: 'text-violet-300 bg-violet-400/10' },
   { id: 'srt', title: 'Xuất SRT', description: 'Tạo phụ đề từ video hoặc audio', icon: FileText, color: 'text-amber-300 bg-amber-400/10' },
   { id: 'translate', title: 'Dịch', description: 'Dịch văn bản hoặc tệp SRT', icon: Languages, color: 'text-emerald-300 bg-emerald-400/10' },
+  { id: 'image', title: 'Tạo ảnh', description: 'Tạo ảnh từ mô tả', icon: ImagePlus, color: 'text-fuchsia-300 bg-fuchsia-400/10' },
 ];
+
+function HeroBadges({ isNew = false }: { isNew?: boolean }) {
+  return <span className="absolute right-4 top-4 flex items-center gap-1.5">
+    {isNew && <span className="rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-[10px] font-bold text-amber-100">Mới</span>}
+    <span className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-bold text-emerald-200">Miễn Phí</span>
+  </span>;
+}
 
 function formatProjectSize(bytes?: number): string {
   if (!bytes) return '0 MB';
@@ -76,7 +84,7 @@ export function ProjectHome({ onOpenSettings }: Props) {
 
         <div className="mb-7 grid grid-cols-1 gap-4 md:grid-cols-3">
           <button onClick={() => void createNarrationProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-amber-300/20 bg-gradient-to-br from-amber-300/[0.13] via-orange-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-amber-300/45">
-            <span className="absolute right-4 top-4 rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-[10px] font-bold text-amber-100">Mới</span>
+            <HeroBadges isNew />
             <div className="mb-4 inline-flex rounded-xl bg-amber-300/15 p-3 text-amber-200"><AudioLines size={24} /></div>
             <h2 className="text-lg font-bold text-white">Thuyết minh video</h2>
             <p className="mt-1.5 text-sm leading-5 text-white/50">Đưa video có sẵn vào, tự hiểu diễn biến, viết lời và tạo giọng khớp với từng cảnh.</p>
@@ -86,7 +94,7 @@ export function ProjectHome({ onOpenSettings }: Props) {
           </button>
 
           <button onClick={() => void createLocalizeProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-400/[0.12] via-indigo-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-sky-400/40">
-            <span className="absolute right-4 top-4 rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-bold text-emerald-200">Có chế độ miễn phí</span>
+            <HeroBadges />
             <div className="mb-4 inline-flex rounded-xl bg-sky-400/15 p-3 text-sky-300"><Languages size={24} /></div>
             <h2 className="text-lg font-bold text-white">Dịch & lồng tiếng video</h2>
             <p className="mt-1.5 text-sm leading-5 text-white/50">Đưa video có sẵn vào, tự nhận dạng lời thoại, dịch và lồng lại giọng sang ngôn ngữ khác.</p>
@@ -95,15 +103,15 @@ export function ProjectHome({ onOpenSettings }: Props) {
             </span>
           </button>
 
-          <div aria-disabled className="hero-tool relative cursor-not-allowed overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-emerald-400/[0.12] via-teal-400/[0.04] to-transparent p-6 text-left opacity-40 grayscale">
-            <span className="absolute right-4 top-4 rounded-full border border-amber-400/30 bg-amber-400/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-300">Sắp ra mắt</span>
+          <button onClick={() => setCreating(true)} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-emerald-400/[0.12] via-teal-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-emerald-400/40">
+            <HeroBadges isNew />
             <div className="mb-4 inline-flex rounded-xl bg-emerald-400/15 p-3 text-emerald-300"><Sparkles size={24} /></div>
             <h2 className="text-lg font-bold text-white">Tạo dự án nội dung</h2>
             <p className="mt-1.5 text-sm leading-5 text-white/50">Từ chủ đề đến video hoàn chỉnh: viết kịch bản, storyboard, lồng giọng và xuất video.</p>
             <span className="mt-4 inline-flex items-center gap-1.5 text-xs font-bold text-emerald-300">
               <Plus size={14} /> Bắt đầu từ chủ đề
             </span>
-          </div>
+          </button>
         </div>
 
         <section className="mb-10" aria-labelledby="quick-tools-title">
@@ -111,7 +119,7 @@ export function ProjectHome({ onOpenSettings }: Props) {
             <h2 id="quick-tools-title" className="text-xs font-bold uppercase tracking-[0.16em] text-white/35">Công cụ nhanh</h2>
             <div className="h-px flex-1 bg-white/[0.07]" />
           </div>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
             {QUICK_TOOLS.map(({ id, title, description, icon: Icon, color }) => (
               <button key={id} onClick={() => setQuickTool(id)} className="group flex items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.025] p-3.5 text-left transition hover:-translate-y-0.5 hover:border-white/[0.16] hover:bg-white/[0.045]">
                 <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${color}`}><Icon size={19} /></span>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Film, Loader2, FolderOpen, AlertTriangle, Captions, Music, X } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { errorMessage } from '../providers/errors';
-import type { ExportScene, SubtitleConfig, MusicConfig } from '../shared/types';
+import type { ExportScene, FfmpegProgress, SubtitleConfig, MusicConfig } from '../shared/types';
 import { SubtitleDesigner } from '../components/SubtitleDesigner';
 import { localFileUrl } from '../shared/localFile';
 import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
@@ -27,7 +27,7 @@ export function Timeline() {
   const [outputPath, setOutputPath] = useState<string | null>(null);
   const [progressSec, setProgressSec] = useState(0);
   const [progressTotalSec, setProgressTotalSec] = useState(0);
-  const [exportPhase, setExportPhase] = useState<'preparing' | 'encoding' | 'complete'>('preparing');
+  const [exportPhase, setExportPhase] = useState<FfmpegProgress['phase']>('preparing');
   const [alignmentProgress, setAlignmentProgress] = useState({ done: 0, total: 0 });
   const unsub = useRef<(() => void) | null>(null);
 

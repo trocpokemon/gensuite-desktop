@@ -252,6 +252,23 @@ function languageCode(language?: string): string | undefined {
   return names[value] ?? value.split('-')[0];
 }
 
+const TRANSCRIPTION_STALL_TIMEOUT_MS = 10 * 60 * 1000;
+
+function recognitionTimestampSeconds(value: string): number {
+  const match = value.match(/(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if (!match) return 0;
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+export function recognitionProgressFromLine(line: string, duration: number): number | null {
+  if (!(duration > 0)) return null;
+  const match = line.match(/-->\s*(\d+:\d+:\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  const processedSeconds = recognitionTimestampSeconds(match[1]);
+  if (!(processedSeconds >= 0)) return null;
+  return Math.max(1, Math.min(99, Math.round((processedSeconds / duration) * 100)));
+}
+
 async function mediaDuration(sourcePath: string): Promise<number> {
   const probe = path.join(path.dirname(ffmpegBinary()), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
   return await new Promise<number>((resolve) => {
@@ -314,10 +331,13 @@ export function registerWhisperIpc(): void {
     if (!(await fileExists(binary))) throw new Error('Không thể khởi tạo bộ nhận dạng. Vui lòng cài lại ứng dụng.');
 
     const modelFile = await ensureModel(model, win);
-    emit(win, { phase: 'transcribing', model });
+    const audioDuration = await mediaDuration(wavPath);
+    emit(win, { phase: 'transcribing', percent: audioDuration > 0 ? 1 : undefined, model });
 
     const workDir = path.join(projectDir(projectId), 'work');
     const outBase = path.join(workDir, 'transcript');
+    const jsonPath = `${outBase}.json`;
+    await fs.unlink(jsonPath).catch(() => undefined);
     const whisperArgs = [
       '-m', modelFile,
       '-f', wavPath,
@@ -330,14 +350,53 @@ export function registerWhisperIpc(): void {
     whisperArgs.push('-l', language && language !== 'auto' ? language : 'auto');
 
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(binary, whisperArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
+      const child = spawn(binary, whisperArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'pipe', 'pipe'] });
       let stderr = '';
-      child.stderr?.on('data', (d) => { stderr += String(d); });
+      let outputBuffer = '';
+      let lastPercent = audioDuration > 0 ? 1 : 0;
+      let stalled = false;
+      let stallTimer: NodeJS.Timeout;
+      const armStallTimer = () => {
+        clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+          stalled = true;
+          log.error('speech recognition stalled', { model, duration: audioDuration, lastPercent });
+          child.kill();
+        }, TRANSCRIPTION_STALL_TIMEOUT_MS);
+      };
+      const consumeOutput = (data: unknown) => {
+        armStallTimer();
+        outputBuffer += String(data);
+        const lines = outputBuffer.split(/\r?\n/);
+        outputBuffer = lines.pop() ?? '';
+        for (const line of lines) {
+          const percent = recognitionProgressFromLine(line, audioDuration);
+          if (percent !== null && percent > lastPercent) {
+            lastPercent = percent;
+            emit(win, { phase: 'transcribing', percent, model });
+          }
+        }
+        if (outputBuffer.length > 2048) outputBuffer = outputBuffer.slice(-1024);
+      };
+      armStallTimer();
+      child.stdout?.on('data', consumeOutput);
+      child.stderr?.on('data', (data) => {
+        const text = String(data);
+        stderr += text;
+        consumeOutput(text);
+        if (stderr.length > 8192) stderr = stderr.slice(-4096);
+      });
       child.on('error', (error) => {
+        clearTimeout(stallTimer);
         log.error('speech recognition spawn failed', { code: (error as NodeJS.ErrnoException).code });
         reject(new Error('Không thể khởi động bộ nhận dạng. Vui lòng thử lại.'));
       });
       child.on('close', (code) => {
+        clearTimeout(stallTimer);
+        if (stalled) {
+          reject(new Error('Quá trình nhận dạng không phản hồi. Hãy thử lại hoặc chọn mức độ chính xác thấp hơn.'));
+          return;
+        }
         if (code === 0) resolve();
         else {
           log.error('speech recognition failed', { code, model, detail: stderr.slice(-1200) });
@@ -346,7 +405,6 @@ export function registerWhisperIpc(): void {
       });
     });
 
-    const jsonPath = `${outBase}.json`;
     const raw = await fs.readFile(jsonPath, 'utf-8').catch(() => '');
     if (!raw) throw new Error('Không thể đọc kết quả nhận dạng. Vui lòng thử lại.');
     const segments = parseWhisperJson(raw);

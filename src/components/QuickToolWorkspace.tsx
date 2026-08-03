@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, Check, Download, FileText, FolderOpen, KeyRound, Languages, Loader2, LogIn, Mic, Save, Trash2, Upload } from 'lucide-react';
 import { AudioPlayer } from './AudioPlayer';
 import { EngineToggle } from './EngineToggle';
+import { AppSelect } from './AppSelect';
+import { ImageStudioWorkspace } from './ImageStudioWorkspace';
 import { VoiceConfigPanel, GENMAX_LANGUAGE_IDS } from './VoiceConfigPanel';
 import { useProjectStore, uid } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
@@ -12,7 +14,7 @@ import { errorMessage, loginRequiredPlatform, missingKeyService, serviceLabel, t
 import { localFileUrl } from '../shared/localFile';
 import type { ScriptEngine, TranscriptSegment } from '../shared/types';
 
-export type QuickToolId = 'download' | 'voice' | 'srt' | 'translate';
+export type QuickToolId = 'download' | 'voice' | 'srt' | 'translate' | 'image';
 
 interface Props {
   tool: QuickToolId;
@@ -25,6 +27,7 @@ const META: Record<QuickToolId, { title: string; eyebrow: string }> = {
   voice: { title: 'Tạo Voice AI', eyebrow: 'Văn bản thành giọng nói' },
   srt: { title: 'Xuất phụ đề SRT', eyebrow: 'Nhận dạng lời thoại' },
   translate: { title: 'Dịch nội dung', eyebrow: 'Văn bản & tệp SRT' },
+  image: { title: 'Tạo ảnh', eyebrow: 'Sáng tạo hình ảnh' },
 };
 
 const TARGET_LANGUAGES: Array<[string, string]> = [
@@ -32,6 +35,7 @@ const TARGET_LANGUAGES: Array<[string, string]> = [
   ['korean', '한국어'], ['thai', 'ภาษาไทย'], ['french', 'Français'], ['german', 'Deutsch'],
   ['spanish', 'Español'], ['portuguese', 'Português'], ['indonesian', 'Bahasa Indonesia'], ['russian', 'Русский'],
 ];
+const TARGET_LANGUAGE_OPTIONS = TARGET_LANGUAGES.map(([value, label]) => ({ value, label }));
 
 function timecode(seconds: number): string {
   const ms = Math.max(0, Math.round(seconds * 1000));
@@ -84,6 +88,7 @@ export function QuickToolWorkspace({ tool, onClose, onOpenSettings }: Props) {
       {tool === 'voice' && <VoiceTool onOpenSettings={onOpenSettings} />}
       {tool === 'srt' && <SrtTool />}
       {tool === 'translate' && <TranslateTool onOpenSettings={onOpenSettings} />}
+      {tool === 'image' && <ImageStudioWorkspace />}
     </div>
   );
 }
@@ -223,7 +228,7 @@ function SrtTool() {
   const [phase, setPhase] = useState('');
   const [result, setResult] = useState('');
   const [error, setError] = useState('');
-  useEffect(() => window.gensuite.whisper.onProgress((progress) => setPhase(progress.phase === 'downloading-model' ? `Đang chuẩn bị dữ liệu nhận dạng ${Math.round(progress.percent || 0)}%` : progress.phase === 'extracting' ? 'Đang chuẩn bị âm thanh…' : progress.phase === 'transcribing' ? 'Đang nhận dạng lời thoại…' : '')), []);
+  useEffect(() => window.gensuite.whisper.onProgress((progress) => setPhase(progress.phase === 'downloading-model' ? `Đang chuẩn bị dữ liệu nhận dạng ${Math.round(progress.percent || 0)}%` : progress.phase === 'extracting' ? 'Đang chuẩn bị âm thanh…' : progress.phase === 'transcribing' ? `Đang nhận dạng lời thoại${typeof progress.percent === 'number' ? ` ${Math.round(progress.percent)}%` : '…'}` : '')), []);
   const choose = async () => { const path = await window.gensuite.ytdlp.import(project.id); if (path) { setSourcePath(path); setResult(''); setError(''); } };
   const run = async () => { if (!sourcePath || busy) return; setBusy(true); setError(''); setResult(''); try { const segments = await getTranscriptionProvider('local', useSettingsStore.getState().keys).transcribe({ projectId: project.id, sourcePath, model: project.settings.whisperModel }); const path = await window.gensuite.files.saveText({ content: `${segmentsToSrt(segments)}\n`, defaultName: 'phu-de.srt', extensions: ['srt'] }); if (path) setResult(path); } catch (err) { setError(errorMessage(err)); } finally { setBusy(false); } };
   const name = sourcePath.replace(/\\/g, '/').split('/').pop();
@@ -246,5 +251,5 @@ function TranslateTool({ onOpenSettings }: { onOpenSettings: () => void }) {
   const importFile = async () => { const file = await window.gensuite.files.pickText(); if (file) { setSource(file.content); setSourceName(file.name); setOutput(''); } };
   const run = async () => { if (!parsed.segments.length || busy) return; setBusy(true); setError(''); setMissingKey(null); try { const translated = await getScriptProvider(project.settings.scriptEngine, keys, project.settings.scriptModel).translateSegments({ segments: parsed.segments, targetLanguage: target }); setWasSrt(parsed.srt); setOutput(parsed.srt ? segmentsToSrt(translated) : translated.map((segment) => segment.text).join('\n')); } catch (err) { const service = missingKeyService(err); if (service) setMissingKey(service); else setError(errorMessage(err)); } finally { setBusy(false); } };
   const save = async () => { if (!output) return; const ext = wasSrt ? 'srt' : 'txt'; await window.gensuite.files.saveText({ content: `${output}\n`, defaultName: sourceName ? `${sourceName.replace(/\.(srt|txt)$/i, '')}-${target}.${ext}` : `ban-dich.${ext}`, extensions: [ext] }); };
-  return <ToolShell><div className="workspace-panel rounded-2xl p-7"><div className="flex flex-wrap items-start justify-between gap-4"><div><div className="mb-4 inline-flex rounded-xl bg-emerald-400/10 p-3 text-emerald-300"><Languages size={23} /></div><h2 className="text-lg font-bold">Dịch văn bản hoặc phụ đề</h2></div><EngineToggle value={project.settings.scriptEngine} onChange={(value: ScriptEngine) => setScriptEngine(value)} options={[{ value: 'gemini', label: 'Google AI', badge: 'free' }, { value: 'gensuite', label: 'GenSuite', badge: 'cloud', premium: true }]} /></div><div className="mt-6 grid gap-4 md:grid-cols-2"><div><div className="mb-2 flex items-center justify-between"><label className="text-xs font-bold text-white/50">Nội dung gốc</label><button onClick={() => void importFile()} className="flex items-center gap-1.5 text-xs font-bold text-emerald-300 hover:text-emerald-200"><Upload size={13} />Nhập TXT/SRT</button></div><textarea value={source} onChange={(event) => { setSource(event.target.value); setSourceName(''); setOutput(''); }} rows={14} placeholder="Dán văn bản hoặc nội dung SRT…" className="field-surface w-full resize-y rounded-xl p-4 text-sm leading-6 outline-none" /></div><div><div className="mb-2 flex items-center justify-between"><label className="text-xs font-bold text-white/50">Bản dịch</label>{output && <button onClick={() => void save()} className="flex items-center gap-1.5 text-xs font-bold text-emerald-300"><Save size={13} />Lưu {wasSrt ? 'SRT' : 'TXT'}</button>}</div><textarea readOnly value={output} rows={14} placeholder="Bản dịch sẽ xuất hiện tại đây…" className="field-surface w-full resize-y rounded-xl p-4 text-sm leading-6 text-white/75 outline-none" /></div></div><div className="mt-4 flex flex-wrap items-end gap-3"><label className="min-w-52 flex-1 text-xs font-bold text-white/50">Ngôn ngữ đích<select value={target} onChange={(event) => setTarget(event.target.value)} className="field-surface mt-2 w-full rounded-xl px-3 py-3 text-sm text-white outline-none">{TARGET_LANGUAGES.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}</select></label><button onClick={() => void run()} disabled={!parsed.segments.length || busy} className="primary-action flex min-w-48 items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold disabled:opacity-40">{busy ? <Loader2 size={16} className="animate-spin" /> : <Languages size={16} />}{busy ? 'Đang dịch…' : 'Dịch ngay'}</button></div>{parsed.srt && <p className="mt-3 text-xs text-emerald-300/65">Đã nhận diện tệp SRT · mốc thời gian sẽ được giữ nguyên.</p>}{missingKey && <div className="mt-4 flex items-center justify-between rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-sm text-amber-100/75"><span><KeyRound size={15} className="mr-2 inline" />Thiếu API key cho {serviceLabel(missingKey)}</span><button onClick={onOpenSettings} className="rounded-lg bg-amber-300 px-3 py-1.5 text-xs font-bold text-black">Cài đặt</button></div>}{error && <p className="mt-4 text-sm text-red-300">{error}</p>}</div></ToolShell>;
+  return <ToolShell><div className="workspace-panel rounded-2xl p-7"><div className="flex flex-wrap items-start justify-between gap-4"><div><div className="mb-4 inline-flex rounded-xl bg-emerald-400/10 p-3 text-emerald-300"><Languages size={23} /></div><h2 className="text-lg font-bold">Dịch văn bản hoặc phụ đề</h2></div><EngineToggle value={project.settings.scriptEngine} onChange={(value: ScriptEngine) => setScriptEngine(value)} options={[{ value: 'gemini', label: 'Google AI', badge: 'free' }, { value: 'gensuite', label: 'GenSuite', badge: 'cloud', premium: true }]} /></div><div className="mt-6 grid gap-4 md:grid-cols-2"><div><div className="mb-2 flex items-center justify-between"><label className="text-xs font-bold text-white/50">Nội dung gốc</label><button onClick={() => void importFile()} className="flex items-center gap-1.5 text-xs font-bold text-emerald-300 hover:text-emerald-200"><Upload size={13} />Nhập TXT/SRT</button></div><textarea value={source} onChange={(event) => { setSource(event.target.value); setSourceName(''); setOutput(''); }} rows={14} placeholder="Dán văn bản hoặc nội dung SRT…" className="field-surface w-full resize-y rounded-xl p-4 text-sm leading-6 outline-none" /></div><div><div className="mb-2 flex items-center justify-between"><label className="text-xs font-bold text-white/50">Bản dịch</label>{output && <button onClick={() => void save()} className="flex items-center gap-1.5 text-xs font-bold text-emerald-300"><Save size={13} />Lưu {wasSrt ? 'SRT' : 'TXT'}</button>}</div><textarea readOnly value={output} rows={14} placeholder="Bản dịch sẽ xuất hiện tại đây…" className="field-surface w-full resize-y rounded-xl p-4 text-sm leading-6 text-white/75 outline-none" /></div></div><div className="mt-4 flex flex-wrap items-end gap-3"><label className="min-w-52 flex-1 text-xs font-bold text-white/50">Ngôn ngữ đích<AppSelect value={target} options={TARGET_LANGUAGE_OPTIONS} onChange={setTarget} ariaLabel="Ngôn ngữ đích" className="mt-2 rounded-xl px-3 py-3 text-sm" /></label><button onClick={() => void run()} disabled={!parsed.segments.length || busy} className="primary-action flex min-w-48 items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold disabled:opacity-40">{busy ? <Loader2 size={16} className="animate-spin" /> : <Languages size={16} />}{busy ? 'Đang dịch…' : 'Dịch ngay'}</button></div>{parsed.srt && <p className="mt-3 text-xs text-emerald-300/65">Đã nhận diện tệp SRT · mốc thời gian sẽ được giữ nguyên.</p>}{missingKey && <div className="mt-4 flex items-center justify-between rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-sm text-amber-100/75"><span><KeyRound size={15} className="mr-2 inline" />Thiếu API key cho {serviceLabel(missingKey)}</span><button onClick={onOpenSettings} className="rounded-lg bg-amber-300 px-3 py-1.5 text-xs font-bold text-black">Cài đặt</button></div>}{error && <p className="mt-4 text-sm text-red-300">{error}</p>}</div></ToolShell>;
 }

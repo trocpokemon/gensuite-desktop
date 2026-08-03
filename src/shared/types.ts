@@ -2,6 +2,8 @@
 // This file is the single source of truth for the IPC contract: every field here
 // matches an actual handler signature in electron/ipc/*.
 
+import type { IpcResult } from './appErrors';
+
 export type AspectRatio = '16:9' | '9:16';
 export type LocalizeAspectRatio = 'original' | AspectRatio;
 
@@ -521,6 +523,7 @@ export interface CapCutTtsSynthesizeArgs {
 
 export interface CapCutTtsSynthesizeResult {
   audioPath: string;
+  durationSec: number;
 }
 
 export interface CapCutTtsPreviewArgs {
@@ -564,7 +567,11 @@ export interface FfmpegProgress {
   projectId: string;
   timeSec: number;
   totalSec?: number;
-  phase?: 'preparing' | 'encoding' | 'complete';
+  /** Monotonic overall progress for multi-stage completion. */
+  percent?: number;
+  phase?: 'preparing' | 'mixing-audio' | 'encoding' | 'complete';
+  groupNumber?: number;
+  groupCount?: number;
 }
 
 /** One dubbed line: its synthesized audio plus the source-video time window it
@@ -580,6 +587,8 @@ export interface RedubSegment {
   text: string;
   /** Word timing relative to this synthesized audio. */
   wordTimings?: SubtitleWordTiming[];
+  /** Known synthesized duration. Avoids re-reading every audio file for large projects. */
+  audioDuration?: number;
 }
 
 export interface RedubArgs {
@@ -680,7 +689,7 @@ export interface WhisperModelDownloadArgs {
 export interface WhisperProgress {
   /** Coarse phase so the renderer can label the bar. */
   phase: 'extracting' | 'downloading-model' | 'transcribing' | 'complete';
-  /** 0–100 where measurable (model download); omitted for indeterminate work. */
+  /** 0–100 where measurable (data download or recognized audio); omitted for indeterminate work. */
   percent?: number;
   model?: WhisperModelName;
 }
@@ -758,14 +767,14 @@ export interface GensuiteBridge {
     kill(jobId: string): Promise<boolean>;
   };
   capcuttts: {
-    synthesize(args: CapCutTtsSynthesizeArgs): Promise<CapCutTtsSynthesizeResult>;
-    preview(args: CapCutTtsPreviewArgs): Promise<CapCutTtsPreviewResult>;
+    synthesize(args: CapCutTtsSynthesizeArgs): Promise<IpcResult<CapCutTtsSynthesizeResult>>;
+    preview(args: CapCutTtsPreviewArgs): Promise<IpcResult<CapCutTtsPreviewResult>>;
     kill(jobId: string): Promise<boolean>;
   };
   ffmpeg: {
     export(args: ExportArgs): Promise<string | null>;
     /** Re-dub: keep the source video's visuals, replace its audio with the translated lines. Returns the output path or null if cancelled. */
-    redub(args: RedubArgs): Promise<string | null>;
+    redub(args: RedubArgs): Promise<IpcResult<string | null>>;
     onProgress(cb: (p: FfmpegProgress) => void): () => void;
   };
   narration: {

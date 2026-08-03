@@ -10,6 +10,7 @@ import { errorMessage, missingKeyService, serviceLabel } from '../providers/erro
 import { getVoiceProvider } from '../providers/voice';
 import { GENMAX_LANGUAGE_IDS, VoiceConfigPanel } from '../components/VoiceConfigPanel';
 import { AudioPlayer } from '../components/AudioPlayer';
+import { AppSelect } from '../components/AppSelect';
 import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
 import { localFileUrl } from '../shared/localFile';
 import type { MusicConfig, NarrationDensity, NarrationProgressPhase, Scene, SubtitleConfig } from '../shared/types';
@@ -29,6 +30,10 @@ const NARRATION_DENSITIES: Array<[NarrationDensity, string]> = [
   ['balanced', 'Cân bằng — nhịp tự nhiên'],
   ['dense', 'Dày — review liên tục'],
 ];
+
+const NARRATION_LANGUAGE_OPTIONS = NARRATION_LANGUAGES.map(([value, label]) => ({ value, label }));
+const NARRATION_AUDIENCE_OPTIONS = NARRATION_AUDIENCES.map(([value, label]) => ({ value, label }));
+const NARRATION_DENSITY_OPTIONS = NARRATION_DENSITIES.map(([value, label]) => ({ value, label }));
 
 const MIN_SPEECH_RATIO: Record<NarrationDensity, number> = { sparse: 0, balanced: 0.3, dense: 0.35 };
 const MAX_GAP_SECONDS: Record<NarrationDensity, number> = { sparse: 10, balanced: 6, dense: 3 };
@@ -162,8 +167,13 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
 
   useEffect(() => window.gensuite.ffmpeg.onProgress((event) => {
     if (event.projectId !== project.id) return;
-    const percent = event.totalSec && event.totalSec > 0 ? (event.timeSec / event.totalSec) * 100 : 0;
-    setRenderPercent(Math.max(0, Math.min(100, event.phase === 'complete' ? 100 : percent)));
+    const percent = typeof event.percent === 'number'
+      ? event.percent
+      : event.totalSec && event.totalSec > 0 ? (event.timeSec / event.totalSec) * 100 : 0;
+    setRenderPercent((current) => Math.max(
+      current,
+      Math.max(0, Math.min(100, event.phase === 'complete' ? 100 : percent)),
+    ));
   }), [project.id]);
 
   const clearNotice = () => {
@@ -435,7 +445,7 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
         scenes = useProjectStore.getState().project.scenes;
       }
       patchNarrationWorkflow({ stage: 'rendering' });
-      const out = await window.gensuite.ffmpeg.redub({
+      const completion = await window.gensuite.ffmpeg.redub({
         projectId: project.id,
         sourceVideoPath: project.sourceVideoPath,
         segments: scenes.map((scene) => ({
@@ -444,6 +454,7 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
           sourceEnd: scene.sourceEnd as number,
           text: scene.narration,
           wordTimings: scene.subtitleWords,
+          audioDuration: scene.audioDuration,
         })),
         maxTempoFactor: 1.08,
         subtitles: sub.enabled,
@@ -455,6 +466,8 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
         automaticOutputName: kind === 'preview' ? `xem-truoc-${Date.now()}` : undefined,
         revealOutput: kind === 'final',
       });
+      if (!completion.ok) throw completion.error;
+      const out = completion.value;
       if (!out) {
         patchNarrationWorkflow({ stage: project.narrationWorkflow?.previewPath ? 'preview-ready' : 'voice-ready' });
         return;
@@ -530,9 +543,9 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
           </div>
 
           <div className="mt-4 grid gap-3 md:grid-cols-3">
-            <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Ngôn ngữ thuyết minh</span><select value={narrationLanguage} onChange={(event) => patchSettings({ narrationLanguage: event.target.value as typeof narrationLanguage })} disabled={running} className="field-surface w-full rounded-xl px-3 py-3 text-sm outline-none">{NARRATION_LANGUAGES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Khán giả mục tiêu</span><select value={narrationAudience} onChange={(event) => patchSettings({ narrationAudience: event.target.value as typeof narrationAudience })} disabled={running} className="field-surface w-full rounded-xl px-3 py-3 text-sm outline-none">{NARRATION_AUDIENCES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Mật độ bình luận</span><select value={narrationDensity} onChange={(event) => patchSettings({ narrationDensity: event.target.value as NarrationDensity })} disabled={running} className="field-surface w-full rounded-xl px-3 py-3 text-sm outline-none">{NARRATION_DENSITIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+            <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Ngôn ngữ thuyết minh</span><AppSelect value={narrationLanguage} options={NARRATION_LANGUAGE_OPTIONS} onChange={(value) => patchSettings({ narrationLanguage: value })} disabled={running} ariaLabel="Ngôn ngữ thuyết minh" className="rounded-xl px-3 py-3 text-sm" /></label>
+            <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Khán giả mục tiêu</span><AppSelect value={narrationAudience} options={NARRATION_AUDIENCE_OPTIONS} onChange={(value) => patchSettings({ narrationAudience: value })} disabled={running} ariaLabel="Khán giả mục tiêu" className="rounded-xl px-3 py-3 text-sm" /></label>
+            <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Mật độ bình luận</span><AppSelect value={narrationDensity} options={NARRATION_DENSITY_OPTIONS} onChange={(value) => patchSettings({ narrationDensity: value })} disabled={running} ariaLabel="Mật độ bình luận" className="rounded-xl px-3 py-3 text-sm" /></label>
           </div>
           <p className="mt-3 text-[11px] leading-5 text-white/35">Ngôn ngữ video nguồn không quyết định lời đọc. Chế độ Dày phù hợp video review và chủ động lấp các khoảng trống dài.</p>
           {outputChoiceChanged && <div className="mt-4 rounded-xl border border-amber-300/25 bg-amber-300/[0.08] px-4 py-3 text-xs leading-5 text-amber-100/80">Bản nháp hiện tại chưa theo lựa chọn đầu ra này. Hãy phân tích lại để áp dụng thiết lập mới.</div>}

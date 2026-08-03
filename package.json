@@ -1,15 +1,19 @@
 {
   "name": "gensuite-desktop",
   "private": true,
-  "version": "0.1.15",
+  "version": "0.2.0",
   "description": "GenSuite Desktop - topic-driven YouTube production studio (Content, Storyboard, Voice, Video)",
   "author": "GenSuite",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -p tsconfig.node.json --noEmit && tsc --noEmit && vite build",
+    "ui:check": "node scripts/check-ui-consistency.mjs",
+    "errors:check": "node scripts/check-error-contract.mjs",
+    "voice:check": "node scripts/check-voice-batching.mjs",
+    "video:check": "node scripts/check-video-watchdog.mjs",
+    "build": "npm run ui:check && npm run errors:check && npm run voice:check && npm run video:check && tsc -p tsconfig.node.json --noEmit && tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "npm run ui:check && npm run errors:check && npm run voice:check && npm run video:check && tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "dist": "vite build && electron-builder",
     "release": "vite build && electron-builder --publish always"
   },

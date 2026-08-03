@@ -1,12 +1,13 @@
 import { ipcMain, BrowserWindow, dialog, shell, app } from 'electron';
 import { spawn } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import log from 'electron-log';
-import type { LocalizeAspectRatio, SubtitleConfig, SubtitleWordTiming } from '../../src/shared/types';
+import type { FfmpegProgress, LocalizeAspectRatio, SubtitleConfig, SubtitleWordTiming } from '../../src/shared/types';
+import type { AppErrorCode, AppErrorContext, IpcResult } from '../../src/shared/appErrors';
 import { DEFAULT_SUBTITLE_CONFIG } from '../../src/shared/subtitlePresets';
 import { projectDir } from './project';
+import { appFailure, appFailureResult, appSuccess, type AppFailure } from './appErrors';
 
 // Video assembly via bundled FFmpeg. Builds a concat of image clips (one per
 // scene, duration matched to its audio) muxed with the narration track.
@@ -38,6 +39,7 @@ type RedubSegment = {
   sourceEnd: number;   // seconds into the source video
   text: string;        // translated text, burned as a subtitle when requested
   wordTimings?: SubtitleWordTiming[];
+  audioDuration?: number;
 };
 
 type RedubArgs = {
@@ -65,6 +67,16 @@ export function ffmpegBinary(): string {
 
 export function ffprobeBinary(): string {
   return path.join(path.dirname(ffmpegBinary()), process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe');
+}
+
+function emitFfmpegProgress(win: BrowserWindow | null, progress: FfmpegProgress): void {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  try {
+    win.webContents.send('ffmpeg:progress', progress);
+  } catch {
+    // A long render may outlive its window. Progress delivery must never crash
+    // the media job or the main process.
+  }
 }
 
 async function probeDuration(audioPath: string): Promise<number> {
@@ -443,23 +455,116 @@ function escapeAssPath(assPath: string): string {
   return assPath.replace(/\\/g, '/').replace(/:/g, '\\:');
 }
 
-// Read the pixel dimensions of a video stream via ffprobe. Falls back to 1080p
-// landscape if the probe fails so subtitle sizing still has sane numbers.
-async function probeVideoDimensions(videoPath: string): Promise<[number, number]> {
-  return await new Promise<[number, number]>((resolve) => {
-    const child = spawn(ffprobeBinary(), [
-      '-v', 'error', '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height',
-      '-of', 'csv=s=x:p=0', videoPath,
-    ], { cwd: path.dirname(ffprobeBinary()), stdio: ['ignore', 'pipe', 'pipe'] });
+const MEDIA_PROBE_TIMEOUT_MS = 90_000;
+const MEDIA_PROCESS_INACTIVITY_TIMEOUT_MS = 180_000;
+const MEDIA_INACTIVITY_GRACE_MS = 20_000;
+const MEDIA_TERMINATION_GRACE_MS = 10_000;
+
+class MediaProbeFailure extends Error {
+  constructor(
+    readonly kind: 'spawn' | 'timeout' | 'invalid',
+    readonly systemCode?: string,
+    readonly exitCode?: number | null,
+  ) {
+    super(kind);
+    this.name = 'MediaProbeFailure';
+  }
+}
+
+async function runMediaProbe<T>(args: string[], parse: (stdout: string, exitCode: number | null) => T | undefined): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      const binary = ffprobeBinary();
+      child = spawn(binary, args, { cwd: path.dirname(binary), stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch (error) {
+      reject(new MediaProbeFailure('spawn', normalizedSystemCode(error)));
+      return;
+    }
     let stdout = '';
+    let settled = false;
+    let timedOut = false;
+    let timeout: NodeJS.Timeout | undefined;
+    let closeFallback: NodeJS.Timeout | undefined;
+    const finish = (value?: T, error?: MediaProbeFailure) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (closeFallback) clearTimeout(closeFallback);
+      value !== undefined ? resolve(value) : reject(error ?? new MediaProbeFailure('invalid'));
+    };
+    timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+      closeFallback = setTimeout(
+        () => finish(undefined, new MediaProbeFailure('timeout')),
+        MEDIA_TERMINATION_GRACE_MS,
+      );
+    }, MEDIA_PROBE_TIMEOUT_MS);
     child.stdout?.on('data', (data) => { stdout += String(data); });
-    child.on('error', () => resolve([1920, 1080]));
-    child.on('close', () => {
-      const match = stdout.trim().match(/(\d+)x(\d+)/);
-      if (match) resolve([Number(match[1]), Number(match[2])]);
-      else resolve([1920, 1080]);
+    child.once('error', (error) => finish(
+      undefined,
+      timedOut
+        ? new MediaProbeFailure('timeout')
+        : new MediaProbeFailure('spawn', normalizedSystemCode(error)),
+    ));
+    child.once('close', (code) => {
+      if (timedOut) {
+        finish(undefined, new MediaProbeFailure('timeout'));
+        return;
+      }
+      try {
+        const value = parse(stdout, code);
+        finish(value, value === undefined ? new MediaProbeFailure('invalid', undefined, code) : undefined);
+      } catch {
+        finish(undefined, new MediaProbeFailure('invalid', undefined, code));
+      }
     });
+  });
+}
+
+// Read a required video stream. Re-dubbing cannot continue with an audio-only
+// or damaged source, so this probe deliberately has no synthetic fallback.
+async function probeVideoDimensions(videoPath: string): Promise<[number, number]> {
+  return runMediaProbe([
+    '-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height',
+    '-of', 'csv=s=x:p=0', videoPath,
+  ], (stdout, code) => {
+    const match = stdout.trim().match(/(\d+)x(\d+)/);
+    const width = Number(match?.[1]);
+    const height = Number(match?.[2]);
+    return code === 0 && Number.isInteger(width) && width > 0 && Number.isInteger(height) && height > 0
+      ? [width, height]
+      : undefined;
+  });
+}
+
+async function probeVideoDuration(videoPath: string): Promise<number> {
+  return runMediaProbe([
+    '-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=duration:format=duration',
+    '-of', 'json', videoPath,
+  ], (stdout, code) => {
+    const payload = JSON.parse(stdout) as { streams?: Array<{ duration?: unknown }>; format?: { duration?: unknown } };
+    const duration = [payload.streams?.[0]?.duration, payload.format?.duration]
+      .map((value) => Number(value))
+      .find((value) => Number.isFinite(value) && value > 0);
+    return code === 0 && payload.streams?.length && typeof duration === 'number' ? duration : undefined;
+  });
+}
+
+async function probeAudioDuration(audioPath: string): Promise<number> {
+  return runMediaProbe([
+    '-v', 'error', '-select_streams', 'a:0',
+    '-show_entries', 'stream=index,duration:format=duration',
+    '-of', 'json', audioPath,
+  ], (stdout, code) => {
+    const payload = JSON.parse(stdout) as { streams?: Array<{ duration?: unknown }>; format?: { duration?: unknown } };
+    const duration = [payload.format?.duration, payload.streams?.[0]?.duration]
+      .map((value) => Number(value))
+      .find((value) => Number.isFinite(value) && value > 0);
+    return code === 0 && payload.streams?.length && typeof duration === 'number' ? duration : undefined;
   });
 }
 
@@ -473,15 +578,9 @@ function localizeFrameDimensions(w: number, h: number, ratio: LocalizeAspectRati
 }
 
 async function probeHasAudio(videoPath: string): Promise<boolean> {
-  return await new Promise<boolean>((resolve) => {
-    const child = spawn(ffprobeBinary(), [
-      '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', videoPath,
-    ], { cwd: path.dirname(ffprobeBinary()), stdio: ['ignore', 'pipe', 'ignore'] });
-    let stdout = '';
-    child.stdout?.on('data', (data) => { stdout += String(data); });
-    child.on('error', () => resolve(false));
-    child.on('close', (code) => resolve(code === 0 && Boolean(stdout.trim())));
-  });
+  return runMediaProbe([
+    '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=index', '-of', 'csv=p=0', videoPath,
+  ], (stdout, code) => code === 0 ? Boolean(stdout.trim()) : undefined);
 }
 
 // atempo only accepts 0.5–2.0 per instance, so a speed-up beyond 2x is expressed
@@ -512,6 +611,462 @@ function buildRedubAssFile(segments: Array<RedubSegment & { factor: number }>, w
   })), w, h, config);
 }
 
+const REDUB_PROBE_CONCURRENCY = 8;
+const REDUB_BATCH_MAX_INPUTS = 64;
+const REDUB_BATCH_ARG_BUDGET = 12_000;
+const REDUB_BATCH_MAX_SPAN_SEC = 240;
+const REDUB_INPUT_VALIDATION_PERCENT = 10;
+const REDUB_AUDIO_PREP_PERCENT = 35;
+const REDUB_TIMING_TOLERANCE_SEC = 1;
+
+type PreparedRedubSegment = RedubSegment & {
+  segmentNumber: number;
+  segmentCount: number;
+  ttsDur: number;
+  factor: number;
+  effectiveDuration: number;
+};
+
+type RedubAudioBatch = {
+  segments: PreparedRedubSegment[];
+  startSec: number;
+  durationSec: number;
+};
+
+type RedubSpeechTrack = {
+  audioPath: string;
+  startSec: number;
+  factor?: number;
+  groupNumber?: number;
+  groupCount?: number;
+};
+
+class MediaProcessFailure extends Error {
+  constructor(
+    readonly kind: 'spawn' | 'exit' | 'timeout',
+    readonly systemCode: string | undefined,
+    readonly exitCode: number | null,
+    readonly detail: string,
+  ) {
+    super(kind);
+    this.name = 'MediaProcessFailure';
+  }
+}
+
+function normalizedSystemCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) return undefined;
+  const value = (error as { code?: unknown }).code;
+  return typeof value === 'string' ? value.toUpperCase() : undefined;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const failures: unknown[] = [];
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (true) {
+      if (failures.length) return;
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      try {
+        results[index] = await mapper(items[index], index);
+      } catch (error) {
+        if (!failures.length) failures.push(error);
+        return;
+      }
+    }
+  });
+  await Promise.allSettled(workers);
+  if (failures.length) throw failures[0];
+  return results;
+}
+
+function segmentCommandCost(segment: PreparedRedubSegment): number {
+  return segment.audioPath.length + 16;
+}
+
+function needsRedubAudioBatches(segments: PreparedRedubSegment[]): boolean {
+  return segments.length > REDUB_BATCH_MAX_INPUTS
+    || segments.reduce((total, segment) => total + segmentCommandCost(segment), 0) > REDUB_BATCH_ARG_BUDGET;
+}
+
+function makeRedubAudioBatch(segments: PreparedRedubSegment[]): RedubAudioBatch {
+  const startSec = Math.max(0, Math.min(...segments.map((segment) => segment.sourceStart)));
+  const endSec = Math.max(
+    startSec + 0.1,
+    ...segments.map((segment) => Math.max(
+      segment.sourceEnd,
+      segment.sourceStart + segment.effectiveDuration,
+    )),
+  );
+  return { segments, startSec, durationSec: Math.max(0.1, endSec - startSec) };
+}
+
+function partitionRedubAudioBatches(segments: PreparedRedubSegment[]): RedubAudioBatch[] {
+  const sorted = [...segments].sort((left, right) => left.sourceStart - right.sourceStart);
+  const batches: RedubAudioBatch[] = [];
+  let current: PreparedRedubSegment[] = [];
+  let currentCost = 0;
+
+  const flush = () => {
+    if (!current.length) return;
+    batches.push(makeRedubAudioBatch(current));
+    current = [];
+    currentCost = 0;
+  };
+
+  for (const segment of sorted) {
+    const cost = segmentCommandCost(segment);
+    const startSec = current.length ? Math.max(0, current[0].sourceStart) : Math.max(0, segment.sourceStart);
+    const candidateEnd = Math.max(
+      segment.sourceEnd,
+      segment.sourceStart + segment.effectiveDuration,
+      ...current.map((item) => Math.max(item.sourceEnd, item.sourceStart + item.effectiveDuration)),
+    );
+    const exceedsLimit = current.length > 0 && (
+      current.length >= REDUB_BATCH_MAX_INPUTS
+      || currentCost + cost > REDUB_BATCH_ARG_BUDGET
+      || candidateEnd - startSec > REDUB_BATCH_MAX_SPAN_SEC
+    );
+    if (exceedsLimit) flush();
+    current.push(segment);
+    currentCost += cost;
+  }
+  flush();
+  return batches;
+}
+
+async function runMediaProcess(options: {
+  binary: string;
+  args: string[];
+  onProgress?: (timeSec: number) => void;
+  inactivityTimeoutMs?: number;
+}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(options.binary, options.args, {
+        cwd: path.dirname(options.binary),
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+    } catch (error) {
+      reject(new MediaProcessFailure('spawn', normalizedSystemCode(error), null, ''));
+      return;
+    }
+
+    let settled = false;
+    let detail = '';
+    let progressBuffer = '';
+    let lastProgressSec = -1;
+    let timedOut = false;
+    let inactivityTimer: NodeJS.Timeout | undefined;
+    let inactivityGrace: NodeJS.Timeout | undefined;
+    let closeFallback: NodeJS.Timeout | undefined;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      if (inactivityGrace) clearTimeout(inactivityGrace);
+      if (closeFallback) clearTimeout(closeFallback);
+      error ? reject(error) : resolve();
+    };
+    const timeoutFailure = () => new MediaProcessFailure('timeout', 'ETIMEDOUT', null, detail);
+    const armInactivityWatchdog = () => {
+      if (settled || timedOut) return;
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      if (inactivityGrace) clearTimeout(inactivityGrace);
+      inactivityGrace = undefined;
+      inactivityTimer = setTimeout(() => {
+        inactivityTimer = undefined;
+        inactivityGrace = setTimeout(() => {
+          timedOut = true;
+          child.kill();
+          closeFallback = setTimeout(() => finish(timeoutFailure()), MEDIA_TERMINATION_GRACE_MS);
+        }, MEDIA_INACTIVITY_GRACE_MS);
+      }, options.inactivityTimeoutMs ?? MEDIA_PROCESS_INACTIVITY_TIMEOUT_MS);
+    };
+    armInactivityWatchdog();
+
+    child.stderr?.on('data', (data) => {
+      const line = String(data);
+      armInactivityWatchdog();
+      detail = `${detail}${line}`.slice(-16_000);
+      if (!options.onProgress) return;
+      progressBuffer = `${progressBuffer}${line}`.slice(-16_000);
+      const matches = [...progressBuffer.matchAll(/out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
+      const match = matches.at(-1);
+      if (!match) return;
+      const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number.parseFloat(match[3]);
+      if (Number.isFinite(seconds) && seconds > lastProgressSec) {
+        lastProgressSec = seconds;
+        options.onProgress(seconds);
+      }
+    });
+    child.once('error', (error) => {
+      finish(timedOut
+        ? timeoutFailure()
+        : new MediaProcessFailure('spawn', normalizedSystemCode(error), null, detail));
+    });
+    child.once('close', (code) => {
+      finish(timedOut
+        ? timeoutFailure()
+        : code === 0 ? undefined : new MediaProcessFailure('exit', undefined, code, detail));
+    });
+  });
+}
+
+function processFailure(
+  error: unknown,
+  fallback: AppFailure,
+  context?: AppErrorContext,
+  writeTarget: 'temporary' | 'output' = 'output',
+  classifyExitPermission = true,
+): AppFailure {
+  if (!(error instanceof MediaProcessFailure)) return fallback;
+  const detail = error.detail.toLowerCase();
+  const diagnostics = {
+    processKind: error.kind,
+    systemCode: error.systemCode,
+    exitCode: error.exitCode ?? undefined,
+  };
+  if (error.kind === 'timeout') {
+    const code = fallback.code === 'VIDEO_AUDIO_PREPARATION_FAILED'
+      ? 'VIDEO_AUDIO_PREPARATION_TIMEOUT'
+      : 'VIDEO_COMPLETION_TIMEOUT';
+    return appFailure(code, context ?? fallback.context, { ...diagnostics, classifier: 'inactivity-timeout' });
+  }
+  if (error.systemCode === 'ENAMETOOLONG' || error.systemCode === 'E2BIG' || /argument list too long|filename or extension is too long/.test(detail)) {
+    return appFailure('VIDEO_TOO_MANY_SEGMENTS', context, { ...diagnostics, classifier: 'argument-limit' });
+  }
+  if (error.systemCode === 'ENOENT') {
+    return appFailure('VIDEO_COMPONENT_UNAVAILABLE', context, { ...diagnostics, classifier: 'component-missing' });
+  }
+  if (error.systemCode === 'EACCES' || error.systemCode === 'EPERM') {
+    return appFailure('VIDEO_PROCESS_START_DENIED', context, { ...diagnostics, classifier: 'start-denied' });
+  }
+  if (error.systemCode === 'ENOSPC' || /no space left|not enough space|disk(?: is)? full/.test(detail)) {
+    return writeTarget === 'output'
+      ? appFailure('OUTPUT_STORAGE_FULL', context, { ...diagnostics, classifier: 'storage-full' })
+      : appFailure('TEMP_STORAGE_FULL', context, { ...diagnostics, classifier: 'storage-full' });
+  }
+  if (/permission denied|access is denied|read-only file system/.test(detail)) {
+    if (error.kind === 'exit' && !classifyExitPermission) {
+      return appFailure(fallback.code, context ?? fallback.context, { ...diagnostics, classifier: 'permission-unclassified' });
+    }
+    return writeTarget === 'output'
+      ? appFailure('OUTPUT_PERMISSION_DENIED', context, { ...diagnostics, classifier: 'write-denied' })
+      : appFailure('TEMP_STORAGE_PERMISSION_DENIED', context, { ...diagnostics, classifier: 'write-denied' });
+  }
+  if (error.kind === 'spawn') {
+    return appFailure('VIDEO_PROCESS_START_FAILED', context, { ...diagnostics, classifier: 'start-failed' });
+  }
+  return appFailure(fallback.code, context ?? fallback.context, { ...diagnostics, classifier: 'process-exit' });
+}
+
+function probeInfrastructureFailure(
+  error: unknown,
+  timeoutCode: AppErrorCode,
+  context?: AppErrorContext,
+): AppFailure | null {
+  if (!(error instanceof MediaProbeFailure)) return null;
+  const diagnostics = {
+    processKind: error.kind,
+    systemCode: error.systemCode,
+    exitCode: error.exitCode ?? undefined,
+  };
+  if (error.kind === 'timeout') {
+    return appFailure(timeoutCode, context, { ...diagnostics, classifier: 'probe-timeout' });
+  }
+  if (error.systemCode === 'ENOENT') {
+    return appFailure('VIDEO_COMPONENT_UNAVAILABLE', context, { ...diagnostics, classifier: 'component-missing' });
+  }
+  if (error.systemCode === 'EACCES' || error.systemCode === 'EPERM') {
+    return appFailure('VIDEO_PROCESS_START_DENIED', context, { ...diagnostics, classifier: 'start-denied' });
+  }
+  if (error.kind === 'spawn') {
+    return appFailure('VIDEO_PROCESS_START_FAILED', context, { ...diagnostics, classifier: 'probe-start-failed' });
+  }
+  return null;
+}
+
+function fileFailure(
+  error: unknown,
+  purpose: 'temporary' | 'output',
+  context?: AppErrorContext,
+): AppFailure {
+  const code = normalizedSystemCode(error);
+  if (code === 'ENOSPC') {
+    return purpose === 'output'
+      ? appFailure('OUTPUT_STORAGE_FULL', context, { systemCode: code, classifier: 'storage-full' })
+      : appFailure('TEMP_STORAGE_FULL', context, { systemCode: code, classifier: 'storage-full' });
+  }
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
+    return purpose === 'output'
+      ? appFailure('OUTPUT_PERMISSION_DENIED', context, { systemCode: code, classifier: 'write-denied' })
+      : appFailure('TEMP_STORAGE_PERMISSION_DENIED', context, { systemCode: code, classifier: 'write-denied' });
+  }
+  if (code === 'ENOENT' || code === 'ENOTDIR') {
+    return purpose === 'output'
+      ? appFailure('OUTPUT_DIRECTORY_UNAVAILABLE', context, { systemCode: code, classifier: 'directory-missing' })
+      : appFailure('TEMP_STORAGE_UNAVAILABLE', context, { systemCode: code, classifier: 'temporary-unavailable' });
+  }
+  return purpose === 'output'
+    ? appFailure('OUTPUT_WRITE_FAILED', context, { systemCode: code, classifier: 'write-failed' })
+    : appFailure('TEMP_STORAGE_UNAVAILABLE', context, { systemCode: code, classifier: 'temporary-unavailable' });
+}
+
+function inputFileFailure(
+  error: unknown,
+  input: 'source-video' | 'segment-audio' | 'background-audio',
+  context?: AppErrorContext,
+): AppFailure {
+  const systemCode = normalizedSystemCode(error);
+  const diagnostics = { systemCode, classifier: 'input-access' };
+  const permissionDenied = systemCode === 'EACCES' || systemCode === 'EPERM';
+  const unavailable = systemCode === 'ENOENT' || systemCode === 'ENOTDIR';
+
+  if (input === 'source-video') {
+    if (permissionDenied) return appFailure('VIDEO_SOURCE_PERMISSION_DENIED', context, diagnostics);
+    if (unavailable) return appFailure('VIDEO_SOURCE_UNAVAILABLE', context, diagnostics);
+    return appFailure('VIDEO_SOURCE_UNREADABLE', context, diagnostics);
+  }
+  if (input === 'segment-audio') {
+    if (permissionDenied) return appFailure('VIDEO_SEGMENT_AUDIO_PERMISSION_DENIED', context, diagnostics);
+    if (unavailable) return appFailure('VIDEO_SEGMENT_AUDIO_UNAVAILABLE', context, diagnostics);
+    return appFailure('VIDEO_SEGMENT_AUDIO_UNREADABLE', context, diagnostics);
+  }
+  if (permissionDenied) return appFailure('BACKGROUND_AUDIO_PERMISSION_DENIED', context, diagnostics);
+  if (unavailable) return appFailure('BACKGROUND_AUDIO_UNAVAILABLE', context, diagnostics);
+  return appFailure('BACKGROUND_AUDIO_UNREADABLE', context, diagnostics);
+}
+
+async function ensureFileReadable(filePath: string): Promise<void> {
+  const handle = await fs.open(filePath, 'r');
+  await handle.close();
+}
+
+async function preparedSegmentInputFailure(
+  segments: PreparedRedubSegment[],
+): Promise<AppFailure | null> {
+  const failures = await mapWithConcurrency(segments, REDUB_PROBE_CONCURRENCY, async (segment) => {
+    const context = { segmentNumber: segment.segmentNumber, segmentCount: segment.segmentCount };
+    try {
+      await probeAudioDuration(segment.audioPath);
+      return null;
+    } catch (error) {
+      const probeFailure = probeInfrastructureFailure(error, 'VIDEO_SEGMENT_AUDIO_VALIDATION_TIMEOUT', context);
+      if (probeFailure) return probeFailure;
+      try {
+        await ensureFileReadable(segment.audioPath);
+      } catch (error) {
+        return inputFileFailure(error, 'segment-audio', context);
+      }
+      return appFailure('VIDEO_SEGMENT_AUDIO_UNREADABLE', context);
+    }
+  });
+  return failures.find((failure): failure is AppFailure => failure !== null) ?? null;
+}
+
+async function speechTrackInputFailure(tracks: RedubSpeechTrack[]): Promise<AppFailure | null> {
+  const failures = await mapWithConcurrency(tracks, REDUB_PROBE_CONCURRENCY, async (track, index) => {
+    try {
+      await probeAudioDuration(track.audioPath);
+      return null;
+    } catch (error) {
+      const context = {
+        groupNumber: track.groupNumber ?? index + 1,
+        groupCount: track.groupCount ?? tracks.length,
+      };
+      return probeInfrastructureFailure(error, 'VIDEO_AUDIO_PREPARATION_TIMEOUT', context)
+        ?? appFailure('VIDEO_AUDIO_PREPARATION_FAILED', context);
+    }
+  });
+  return failures.find((failure): failure is AppFailure => failure !== null) ?? null;
+}
+
+async function createRedubBatchTrack(options: {
+  binary: string;
+  directory: string;
+  batch: RedubAudioBatch;
+  groupNumber: number;
+  groupCount: number;
+}): Promise<RedubSpeechTrack> {
+  const { binary, directory, batch, groupNumber, groupCount } = options;
+  const context = { groupNumber, groupCount };
+  const label = String(groupNumber - 1).padStart(3, '0');
+  const filterPath = path.join(directory, `voice-group-${label}.filter`);
+  const outputPath = path.join(directory, `voice-group-${label}.flac`);
+  const inputs: string[] = [];
+  const filters: string[] = [
+    `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${batch.durationSec.toFixed(6)},asetpts=PTS-STARTPTS[base]`,
+  ];
+
+  batch.segments.forEach((segment, index) => {
+    inputs.push('-i', segment.audioPath);
+    const delayMs = Math.max(0, Math.round((segment.sourceStart - batch.startSec) * 1000));
+    const chain = [
+      'aresample=48000',
+      'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+      ...atempoChain(segment.factor),
+      `adelay=${delayMs}|${delayMs}`,
+    ].join(',');
+    filters.push(`[${index}:a]${chain}[voice${index}]`);
+  });
+  const mixInputs = ['[base]', ...batch.segments.map((_, index) => `[voice${index}]`)].join('');
+  // Keep the longest actual voice instead of trimming to cached/rounded
+  // duration estimates. The final full-video base still caps total output.
+  filters.push(`${mixInputs}amix=inputs=${batch.segments.length + 1}:duration=longest:normalize=0[group]`);
+
+  try {
+    await fs.writeFile(filterPath, filters.join(';'), 'utf8');
+  } catch (error) {
+    throw fileFailure(error, 'temporary', context);
+  }
+
+  try {
+    await runMediaProcess({
+      binary,
+      args: [
+        '-y', ...inputs,
+        '-filter_complex_script', filterPath,
+        '-map', '[group]', '-c:a', 'flac', '-ar', '48000', '-ac', '2',
+        '-progress', 'pipe:2', '-nostats', outputPath,
+      ],
+    });
+  } catch (error) {
+    const classified = processFailure(
+      error,
+      appFailure('VIDEO_AUDIO_PREPARATION_FAILED', context),
+      context,
+      'temporary',
+      false,
+    );
+    if (classified.code === 'VIDEO_AUDIO_PREPARATION_FAILED' && error instanceof MediaProcessFailure && error.kind === 'exit') {
+      const inputFailure = await preparedSegmentInputFailure(batch.segments);
+      if (inputFailure) {
+        throw appFailure(inputFailure.code, inputFailure.context, {
+          ...classified.internalDiagnostics,
+          ...inputFailure.internalDiagnostics,
+        });
+      }
+      throw processFailure(
+        error,
+        appFailure('VIDEO_AUDIO_PREPARATION_FAILED', context),
+        context,
+        'temporary',
+        true,
+      );
+    }
+    throw classified;
+  }
+  return { audioPath: outputPath, startSec: batch.startSec, groupNumber, groupCount };
+}
+
 export function registerFfmpegIpc(): void {
   ipcMain.handle('ffmpeg:export', async (e, args: ExportArgs): Promise<string | null> => {
     const { projectId, scenes, ratio } = args;
@@ -530,7 +1085,7 @@ export function registerFfmpegIpc(): void {
       throw new Error('Không thể xuất video vì một số tệp media hoặc audio không khả dụng.');
     }
 
-    win?.webContents.send('ffmpeg:progress', { projectId, timeSec: 0, phase: 'preparing' });
+    emitFfmpegProgress(win, { projectId, timeSec: 0, phase: 'preparing' });
     const preparedScenes = await Promise.all(scenes.map(async (scene) => ({
       ...scene,
       durationSec: scene.durationSec > 0 ? scene.durationSec : await probeDuration(scene.audioPath),
@@ -547,7 +1102,7 @@ export function registerFfmpegIpc(): void {
     });
     if (saveRes.canceled || !saveRes.filePath) return null;
     const outPath = saveRes.filePath;
-    win?.webContents.send('ffmpeg:progress', {
+    emitFfmpegProgress(win, {
       projectId,
       timeSec: 0,
       totalSec: totalDurationSec,
@@ -670,7 +1225,7 @@ export function registerFfmpegIpc(): void {
           const secs = (+match[1]) * 3600 + (+match[2]) * 60 + parseFloat(match[3]);
           if (secs > lastProgressSec) {
             lastProgressSec = secs;
-            win?.webContents.send('ffmpeg:progress', {
+            emitFfmpegProgress(win, {
               projectId,
               timeSec: Math.min(secs, totalDurationSec),
               totalSec: totalDurationSec,
@@ -687,7 +1242,7 @@ export function registerFfmpegIpc(): void {
       child.on('close', (code) => {
         cleanupSubs();
         if (code === 0) {
-          win?.webContents.send('ffmpeg:progress', {
+          emitFfmpegProgress(win, {
             projectId,
             timeSec: totalDurationSec,
             totalSec: totalDurationSec,
@@ -702,229 +1257,557 @@ export function registerFfmpegIpc(): void {
     });
   });
 
-  // Re-dub: keep the source picture, retain a configurable amount of its audio,
-  // and lay translated speech over it. Long lines are compressed into their source window.
-  ipcMain.handle('ffmpeg:redub', async (e, args: RedubArgs): Promise<string | null> => {
-    const { projectId, sourceVideoPath, segments } = args;
-    if (!sourceVideoPath) throw new Error('Cần chọn video nguồn trước khi lồng tiếng.');
-    if (!segments?.length) throw new Error('Không có đoạn lời thoại nào để lồng tiếng.');
+  // Re-dub: long projects first produce a small number of timeline-aligned voice
+  // groups. The final pass therefore receives only a few short temporary paths
+  // instead of hundreds of user paths at once.
+  ipcMain.handle('ffmpeg:redub', async (e, args: RedubArgs): Promise<IpcResult<string | null>> => {
+    const projectId = String(args?.projectId ?? '').trim();
+    const sourceVideoPath = String(args?.sourceVideoPath ?? '').trim();
+    const segments = Array.isArray(args?.segments) ? args.segments : [];
+    const segmentCount = segments.length;
     const win = BrowserWindow.fromWebContents(e.sender);
+    let activeStage = 'validation';
+    let groupCount = 0;
+    let tempDirectory: string | null = null;
+    let partialOutputPath: string | null = null;
+    let backupOutputPath: string | null = null;
+    let outPath: string | null = null;
+    let outputCommitted = false;
 
-    const binary = ffmpegBinary();
-    const probe = ffprobeBinary();
     try {
-      await Promise.all([
-        fs.access(binary),
-        fs.access(probe),
-        fs.access(sourceVideoPath),
-        ...segments.map((seg) => fs.access(seg.audioPath)),
-      ]);
-    } catch {
-      throw new Error('Không thể lồng tiếng vì video nguồn hoặc một số tệp audio không khả dụng.');
-    }
-
-    win?.webContents.send('ffmpeg:progress', { projectId, timeSec: 0, phase: 'preparing' });
-
-    const videoDur = await probeDuration(sourceVideoPath).catch(() => 0);
-    const [vw, vh] = await probeVideoDimensions(sourceVideoPath);
-    const originalAudioVolume = Math.max(0, Math.min(100, Number(args.originalAudioVolume ?? 8)));
-    const keepOriginalAudio = originalAudioVolume > 0 && await probeHasAudio(sourceVideoPath);
-
-    // Measure each line's real TTS duration to decide how hard to compress it.
-    const prepared = await Promise.all(segments.map(async (seg) => {
-      const ttsDur = await probeDuration(seg.audioPath).catch(() => 0);
-      const windowLen = Math.max(0, seg.sourceEnd - seg.sourceStart);
-      const requestedFactor = windowLen > 0 && ttsDur > windowLen ? ttsDur / windowLen : 1;
-      const maxTempoFactor = Number(args.maxTempoFactor);
-      const factor = Number.isFinite(maxTempoFactor) && maxTempoFactor >= 1
-        ? Math.min(requestedFactor, maxTempoFactor)
-        : requestedFactor;
-      return { ...seg, ttsDur, factor };
-    }));
-
-    let outPath: string;
-    if (args.automaticOutputName || (args.outputDirectory && path.isAbsolute(args.outputDirectory))) {
-      const outputDir = args.outputDirectory && path.isAbsolute(args.outputDirectory)
-        ? args.outputDirectory
-        : path.join(projectDir(projectId), 'output');
-      await fs.mkdir(outputDir, { recursive: true });
-      const requestedName = args.automaticOutputName || `gensuite-dub-${Date.now()}`;
-      const safeBase = path.basename(requestedName, path.extname(requestedName))
-        .replace(/[^\p{L}\p{N}._-]+/gu, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 100) || 'video-long-tieng';
-      let candidate = path.join(outputDir, `${safeBase}.mp4`);
-      let suffix = 2;
-      while (await fs.access(candidate).then(() => true).catch(() => false)) {
-        candidate = path.join(outputDir, `${safeBase}-${suffix}.mp4`);
-        suffix += 1;
+      if (!sourceVideoPath) {
+        throw appFailure('VIDEO_SOURCE_REQUIRED');
       }
-      outPath = candidate;
-    } else {
-      const saveRes = await dialog.showSaveDialog(win!, {
-        title: 'Lưu video đã lồng tiếng',
-        defaultPath: path.join(app.getPath('videos'), `gensuite-dub-${Date.now()}.mp4`),
-        filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
+      if (!segments.length) {
+        throw appFailure('VIDEO_SEGMENTS_EMPTY');
+      }
+
+      const binary = ffmpegBinary();
+      const probe = ffprobeBinary();
+      try {
+        await Promise.all([fs.access(binary), fs.access(probe)]);
+      } catch {
+        throw appFailure('VIDEO_COMPONENT_UNAVAILABLE');
+      }
+      try {
+        await ensureFileReadable(sourceVideoPath);
+      } catch (error) {
+        throw inputFileFailure(error, 'source-video');
+      }
+      for (let index = 0; index < segments.length; index += 1) {
+        try {
+          await ensureFileReadable(segments[index].audioPath);
+        } catch (error) {
+          throw inputFileFailure(error, 'segment-audio', { segmentNumber: index + 1, segmentCount });
+        }
+      }
+      const musicPath = args.musicPath?.trim() || '';
+      if (musicPath) {
+        try {
+          await ensureFileReadable(musicPath);
+        } catch (error) {
+          throw inputFileFailure(error, 'background-audio');
+        }
+        try {
+          await probeAudioDuration(musicPath);
+        } catch (error) {
+          const probeFailure = probeInfrastructureFailure(error, 'BACKGROUND_AUDIO_VALIDATION_TIMEOUT');
+          if (probeFailure) throw probeFailure;
+          try {
+            await ensureFileReadable(musicPath);
+          } catch (accessError) {
+            throw inputFileFailure(accessError, 'background-audio');
+          }
+          throw appFailure('BACKGROUND_AUDIO_UNREADABLE');
+        }
+      }
+
+      activeStage = 'probing-source';
+      emitFfmpegProgress(win, { projectId, timeSec: 0, percent: 0, phase: 'preparing' });
+      let videoDur: number;
+      let vw: number;
+      let vh: number;
+      try {
+        videoDur = await probeVideoDuration(sourceVideoPath);
+        [vw, vh] = await probeVideoDimensions(sourceVideoPath);
+      } catch (error) {
+        const probeFailure = probeInfrastructureFailure(error, 'VIDEO_SOURCE_VALIDATION_TIMEOUT');
+        if (probeFailure) throw probeFailure;
+        try {
+          await ensureFileReadable(sourceVideoPath);
+        } catch (accessError) {
+          throw inputFileFailure(accessError, 'source-video');
+        }
+        throw appFailure('VIDEO_SOURCE_UNREADABLE');
+      }
+      const originalAudioVolume = Math.max(0, Math.min(100, Number(args.originalAudioVolume ?? 8)));
+      let keepOriginalAudio = false;
+      if (originalAudioVolume > 0) {
+        try {
+          keepOriginalAudio = await probeHasAudio(sourceVideoPath);
+        } catch (error) {
+          const probeFailure = probeInfrastructureFailure(error, 'VIDEO_SOURCE_VALIDATION_TIMEOUT');
+          if (probeFailure) throw probeFailure;
+          try {
+            await ensureFileReadable(sourceVideoPath);
+          } catch (accessError) {
+            throw inputFileFailure(accessError, 'source-video');
+          }
+          throw appFailure('VIDEO_SOURCE_UNREADABLE');
+        }
+      }
+
+      activeStage = 'probing-voice';
+      let validatedSegmentCount = 0;
+      const prepared = await mapWithConcurrency(segments, REDUB_PROBE_CONCURRENCY, async (segment, index): Promise<PreparedRedubSegment> => {
+        let ttsDur: number;
+        const knownDuration = Number(segment.audioDuration);
+        if (Number.isFinite(knownDuration) && knownDuration > 0) {
+          try {
+            const stat = await fs.stat(segment.audioPath);
+            if (!stat.isFile() || stat.size <= 0) throw new Error('empty-audio');
+            ttsDur = knownDuration;
+          } catch (error) {
+            throw inputFileFailure(error, 'segment-audio', { segmentNumber: index + 1, segmentCount });
+          }
+        } else {
+          try {
+            ttsDur = await probeAudioDuration(segment.audioPath);
+          } catch (error) {
+            const context = { segmentNumber: index + 1, segmentCount };
+            const probeFailure = probeInfrastructureFailure(error, 'VIDEO_SEGMENT_AUDIO_VALIDATION_TIMEOUT', context);
+            if (probeFailure) throw probeFailure;
+            try {
+              await ensureFileReadable(segment.audioPath);
+            } catch (accessError) {
+              throw inputFileFailure(accessError, 'segment-audio', context);
+            }
+            throw appFailure('VIDEO_SEGMENT_AUDIO_UNREADABLE', context);
+          }
+        }
+        const parsedSourceStart = Number(segment.sourceStart);
+        const parsedSourceEnd = Number(segment.sourceEnd);
+        if (
+          !Number.isFinite(parsedSourceStart)
+          || !Number.isFinite(parsedSourceEnd)
+          || parsedSourceStart < 0
+          || parsedSourceEnd < parsedSourceStart
+          || parsedSourceStart > videoDur + REDUB_TIMING_TOLERANCE_SEC
+          || parsedSourceEnd > videoDur + REDUB_TIMING_TOLERANCE_SEC
+        ) {
+          throw appFailure('VIDEO_SEGMENT_TIMING_INVALID', { segmentNumber: index + 1, segmentCount });
+        }
+        const sourceStart = Math.min(videoDur, parsedSourceStart);
+        const sourceEnd = Math.min(videoDur, parsedSourceEnd);
+        const windowLen = Math.max(0, sourceEnd - sourceStart);
+        const requestedFactor = windowLen > 0 && ttsDur > windowLen ? ttsDur / windowLen : 1;
+        const maxTempoFactor = Number(args.maxTempoFactor);
+        const factor = Number.isFinite(maxTempoFactor) && maxTempoFactor >= 1
+          ? Math.min(requestedFactor, maxTempoFactor)
+          : requestedFactor;
+        validatedSegmentCount += 1;
+        emitFfmpegProgress(win, {
+          projectId,
+          timeSec: 0,
+          totalSec: videoDur,
+          percent: Math.round((validatedSegmentCount / segmentCount) * REDUB_INPUT_VALIDATION_PERCENT),
+          phase: 'preparing',
+        });
+        return {
+          ...segment,
+          segmentNumber: index + 1,
+          segmentCount,
+          sourceStart,
+          sourceEnd,
+          ttsDur,
+          factor,
+          effectiveDuration: ttsDur / Math.max(1, factor),
+        };
       });
-      if (saveRes.canceled || !saveRes.filePath) return null;
-      outPath = saveRes.filePath;
-    }
 
-    const totalDurationSec = videoDur > 0
-      ? videoDur
-      : prepared.reduce((max, s) => Math.max(max, s.sourceStart + s.ttsDur), 0);
-
-    win?.webContents.send('ffmpeg:progress', { projectId, timeSec: 0, totalSec: totalDurationSec, phase: 'encoding' });
-
-    // Inputs: [0] = source video, [1..N] = each line's audio.
-    const inputs: string[] = ['-i', sourceVideoPath];
-    prepared.forEach((s) => inputs.push('-i', s.audioPath));
-    const musicPath = args.musicPath;
-    const wantMusic = Boolean(musicPath) && await fs.access(musicPath!).then(() => true).catch(() => false);
-    if (wantMusic) inputs.push('-stream_loop', '-1', '-i', musicPath!);
-
-    // A silent bed spanning the whole video guarantees the dubbed track is as
-    // long as the picture even when the last line ends early.
-    const filters: string[] = [];
-    filters.push(
-      `anullsrc=channel_layout=stereo:sample_rate=48000,` +
-      `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS[base]`,
-    );
-    if (keepOriginalAudio) {
-      filters.push(
-        `[0:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
-        `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS,volume=${(originalAudioVolume / 100).toFixed(3)}[aorig]`,
-      );
-    }
-    prepared.forEach((s, i) => {
-      const delayMs = Math.max(0, Math.round(s.sourceStart * 1000));
-      const tempo = atempoChain(s.factor);
-      const chain = [
-        'aresample=48000',
-        'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
-        ...tempo,
-        `adelay=${delayMs}|${delayMs}`,
-      ].join(',');
-      filters.push(`[${i + 1}:a]${chain}[a${i}]`);
-    });
-    if (wantMusic) {
-      const musicInputIndex = prepared.length + 1;
-      const musicVolume = Math.max(0, Math.min(100, Number(args.musicVolume ?? 18))) / 100;
-      const fade = Math.min(3, totalDurationSec / 2);
-      const fadeStart = Math.max(0, totalDurationSec - fade);
-      filters.push(
-        `[${musicInputIndex}:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
-        `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS,volume=${musicVolume.toFixed(3)},` +
-        `afade=t=out:st=${fadeStart.toFixed(3)}:d=${fade.toFixed(3)}[amus]`,
-      );
-    }
-    const mixInputs = ['[base]', ...(keepOriginalAudio ? ['[aorig]'] : []), ...prepared.map((_, i) => `[a${i}]`), ...(wantMusic ? ['[amus]'] : [])].join('');
-    const mixCount = prepared.length + 1 + (keepOriginalAudio ? 1 : 0) + (wantMusic ? 1 : 0);
-    filters.push(`${mixInputs}amix=inputs=${mixCount}:duration=first:normalize=0[adub]`);
-
-    // Visual caption work requires a video re-encode; otherwise preserve the source stream.
-    const wantSubtitles = args.subtitles === true && prepared.some((s) => (s.text ?? '').trim());
-    const subtitleConfig: SubtitleConfig = { ...DEFAULT_SUBTITLE_CONFIG, ...(args.subtitleConfig ?? {}) };
-    const outputAspectRatio = args.outputAspectRatio ?? 'original';
-    const [outputW, outputH] = localizeFrameDimensions(vw, vh, outputAspectRatio);
-    const hasFrameTransform = outputAspectRatio !== 'original' || outputW !== vw || outputH !== vh;
-    let assPath: string | null = null;
-    const videoArgs: string[] = [];
-    let videoOutput = '0:v';
-    if (hasFrameTransform) {
-      filters.push(`[0:v]scale=${outputW}:${outputH}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,pad=${outputW}:${outputH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vframe]`);
-      videoOutput = 'vframe';
-    }
-    const coverGraph = sourceSubtitleCoverFilters(subtitleConfig, outputW, outputH, videoOutput);
-    videoOutput = coverGraph?.output ?? videoOutput;
-    if (coverGraph) filters.push(...coverGraph.filters);
-    if (wantSubtitles) {
-      assPath = path.join(os.tmpdir(), `gensuite-dub-${projectId}-${Date.now()}.ass`);
-      await fs.writeFile(assPath, buildRedubAssFile(prepared, outputW, outputH, subtitleConfig), 'utf8');
-      const assArgs = [`f='${escapeAssPath(assPath)}'`];
-      if (process.platform === 'win32' && process.env.WINDIR) {
-        assArgs.push(`fontsdir='${escapeAssPath(path.join(process.env.WINDIR, 'Fonts'))}'`);
+      activeStage = 'selecting-output';
+      if (args.automaticOutputName || (args.outputDirectory && path.isAbsolute(args.outputDirectory))) {
+        const outputDir = args.outputDirectory && path.isAbsolute(args.outputDirectory)
+          ? args.outputDirectory
+          : path.join(projectDir(projectId), 'output');
+        try {
+          await fs.mkdir(outputDir, { recursive: true });
+        } catch (error) {
+          throw fileFailure(error, 'output');
+        }
+        const requestedName = args.automaticOutputName || `gensuite-dub-${Date.now()}`;
+        const safeBase = path.basename(requestedName, path.extname(requestedName))
+          .replace(/[^\p{L}\p{N}._-]+/gu, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 100) || 'video-long-tieng';
+        let candidate = path.join(outputDir, `${safeBase}.mp4`);
+        let suffix = 2;
+        while (await fs.access(candidate).then(() => true).catch(() => false)) {
+          candidate = path.join(outputDir, `${safeBase}-${suffix}.mp4`);
+          suffix += 1;
+        }
+        outPath = candidate;
+      } else {
+        const saveOptions = {
+          title: 'Lưu video đã lồng tiếng',
+          defaultPath: path.join(app.getPath('videos'), `gensuite-dub-${Date.now()}.mp4`),
+          filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
+        };
+        const saveResult = win
+          ? await dialog.showSaveDialog(win, saveOptions)
+          : await dialog.showSaveDialog(saveOptions);
+        if (saveResult.canceled || !saveResult.filePath) return appSuccess(null);
+        outPath = saveResult.filePath;
       }
-      filters.push(`[${videoOutput}]ass=${assArgs.join(':')}[vsub]`);
-      videoOutput = 'vsub';
-    }
-    if (wantSubtitles || coverGraph || hasFrameTransform) {
-      videoArgs.push('-map', `[${videoOutput}]`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p');
-    } else {
-      videoArgs.push('-map', '0:v', '-c:v', 'copy');
-    }
 
-    // A long video yields a huge filter graph (one chain per line + amix), which
-    // overflows Windows' ~32k command-line limit and fails with ENAMETOOLONG.
-    // Write the graph to a temp file and pass it via -filter_complex_script.
-    const filterScriptPath = path.join(os.tmpdir(), `gensuite-dub-${projectId}-${Date.now()}.filter`);
-    await fs.writeFile(filterScriptPath, filters.join(';'), 'utf8');
+      activeStage = 'creating-temporary-storage';
+      try {
+        tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'gensuite-redub-'));
+      } catch (error) {
+        throw fileFailure(error, 'temporary');
+      }
 
-    const ffArgs = [
-      '-y',
-      ...inputs,
-      '-filter_complex_script', filterScriptPath,
-      ...videoArgs,
-      '-map', '[adub]',
-      '-c:a', 'aac',
-      '-movflags', '+faststart',
-      '-shortest',
-      '-progress', 'pipe:2',
-      '-nostats',
-      outPath,
-    ];
+      const totalDurationSec = videoDur;
+      const useBatches = needsRedubAudioBatches(prepared);
+      let speechTracks: RedubSpeechTrack[];
+      if (useBatches) {
+        activeStage = 'mixing-voice-groups';
+        const batches = partitionRedubAudioBatches(prepared);
+        groupCount = batches.length;
+        speechTracks = [];
+        emitFfmpegProgress(win, {
+          projectId,
+          timeSec: 0,
+          totalSec: totalDurationSec,
+          percent: REDUB_INPUT_VALIDATION_PERCENT,
+          phase: 'mixing-audio',
+          groupNumber: 0,
+          groupCount,
+        });
+        for (let index = 0; index < batches.length; index += 1) {
+          speechTracks.push(await createRedubBatchTrack({
+            binary,
+            directory: tempDirectory,
+            batch: batches[index],
+            groupNumber: index + 1,
+            groupCount,
+          }));
+          emitFfmpegProgress(win, {
+            projectId,
+            timeSec: 0,
+            totalSec: totalDurationSec,
+            percent: Math.round(
+              REDUB_INPUT_VALIDATION_PERCENT
+              + ((index + 1) / groupCount) * (REDUB_AUDIO_PREP_PERCENT - REDUB_INPUT_VALIDATION_PERCENT),
+            ),
+            phase: 'mixing-audio',
+            groupNumber: index + 1,
+            groupCount,
+          });
+        }
+      } else {
+        speechTracks = prepared.map((segment) => ({
+          audioPath: segment.audioPath,
+          startSec: segment.sourceStart,
+          factor: segment.factor,
+        }));
+      }
 
-    const child = spawn(binary, ffArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
-    const cleanupSubs = () => {
-      if (assPath) fs.unlink(assPath).catch(() => {});
-      fs.unlink(filterScriptPath).catch(() => {});
-    };
+      activeStage = 'building-final-video';
+      const inputs: string[] = ['-i', sourceVideoPath];
+      speechTracks.forEach((track) => inputs.push('-i', track.audioPath));
+      const wantMusic = Boolean(musicPath);
+      if (wantMusic) inputs.push('-stream_loop', '-1', '-i', musicPath);
 
-    return await new Promise<string>((resolve, reject) => {
-      let stderr = '';
-      let progressBuffer = '';
-      let lastProgressSec = -1;
-      child.stderr?.on('data', (d) => {
-        const line = String(d);
-        stderr += line;
-        progressBuffer += line;
-        const matches = [...progressBuffer.matchAll(/out_time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
-        const match = matches.at(-1);
-        if (match) {
-          const secs = (+match[1]) * 3600 + (+match[2]) * 60 + parseFloat(match[3]);
-          if (secs > lastProgressSec) {
-            lastProgressSec = secs;
-            win?.webContents.send('ffmpeg:progress', {
+      const filters: string[] = [
+        `anullsrc=channel_layout=stereo:sample_rate=48000,` +
+        `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS[base]`,
+      ];
+      if (keepOriginalAudio) {
+        filters.push(
+          `[0:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
+          `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS,volume=${(originalAudioVolume / 100).toFixed(3)}[aorig]`,
+        );
+      }
+      speechTracks.forEach((track, index) => {
+        const delayMs = Math.max(0, Math.round(track.startSec * 1000));
+        const chain = [
+          'aresample=48000',
+          'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo',
+          ...(track.factor ? atempoChain(track.factor) : []),
+          `adelay=${delayMs}|${delayMs}`,
+        ].join(',');
+        filters.push(`[${index + 1}:a]${chain}[a${index}]`);
+      });
+      if (wantMusic) {
+        const musicInputIndex = speechTracks.length + 1;
+        const musicVolume = Math.max(0, Math.min(100, Number(args.musicVolume ?? 18))) / 100;
+        const fade = Math.min(3, totalDurationSec / 2);
+        const fadeStart = Math.max(0, totalDurationSec - fade);
+        filters.push(
+          `[${musicInputIndex}:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
+          `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS,volume=${musicVolume.toFixed(3)},` +
+          `afade=t=out:st=${fadeStart.toFixed(3)}:d=${fade.toFixed(3)}[amus]`,
+        );
+      }
+      const mixInputs = [
+        '[base]',
+        ...(keepOriginalAudio ? ['[aorig]'] : []),
+        ...speechTracks.map((_, index) => `[a${index}]`),
+        ...(wantMusic ? ['[amus]'] : []),
+      ].join('');
+      const mixCount = speechTracks.length + 1 + (keepOriginalAudio ? 1 : 0) + (wantMusic ? 1 : 0);
+      filters.push(`${mixInputs}amix=inputs=${mixCount}:duration=first:normalize=0[adub]`);
+
+      const wantSubtitles = args.subtitles === true && prepared.some((segment) => (segment.text ?? '').trim());
+      const subtitleConfig: SubtitleConfig = { ...DEFAULT_SUBTITLE_CONFIG, ...(args.subtitleConfig ?? {}) };
+      const outputAspectRatio = args.outputAspectRatio ?? 'original';
+      const [outputW, outputH] = localizeFrameDimensions(vw, vh, outputAspectRatio);
+      const hasFrameTransform = outputAspectRatio !== 'original' || outputW !== vw || outputH !== vh;
+      const videoArgs: string[] = [];
+      let videoOutput = '0:v';
+      if (hasFrameTransform) {
+        filters.push(`[0:v]scale=${outputW}:${outputH}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,pad=${outputW}:${outputH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vframe]`);
+        videoOutput = 'vframe';
+      }
+      const coverGraph = sourceSubtitleCoverFilters(subtitleConfig, outputW, outputH, videoOutput);
+      videoOutput = coverGraph?.output ?? videoOutput;
+      if (coverGraph) filters.push(...coverGraph.filters);
+      if (wantSubtitles) {
+        const assPath = path.join(tempDirectory, 'subtitles.ass');
+        try {
+          await fs.writeFile(assPath, buildRedubAssFile(prepared, outputW, outputH, subtitleConfig), 'utf8');
+        } catch (error) {
+          throw fileFailure(error, 'temporary');
+        }
+        const assArgs = [`f='${escapeAssPath(assPath)}'`];
+        if (process.platform === 'win32' && process.env.WINDIR) {
+          assArgs.push(`fontsdir='${escapeAssPath(path.join(process.env.WINDIR, 'Fonts'))}'`);
+        }
+        filters.push(`[${videoOutput}]ass=${assArgs.join(':')}[vsub]`);
+        videoOutput = 'vsub';
+      }
+      if (wantSubtitles || coverGraph || hasFrameTransform) {
+        videoArgs.push('-map', `[${videoOutput}]`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p');
+      } else {
+        videoArgs.push('-map', '0:v', '-c:v', 'copy');
+      }
+
+      const filterScriptPath = path.join(tempDirectory, 'final.filter');
+      try {
+        await fs.writeFile(filterScriptPath, filters.join(';'), 'utf8');
+      } catch (error) {
+        throw fileFailure(error, 'temporary');
+      }
+
+      const extension = path.extname(outPath) || '.mp4';
+      const baseName = path.basename(outPath, extension).replace(/[^\p{L}\p{N}._-]+/gu, '-') || 'video';
+      partialOutputPath = path.join(path.dirname(outPath), `.${baseName}.gensuite-${Date.now()}.part${extension}`);
+      const startPercent = useBatches ? REDUB_AUDIO_PREP_PERCENT : REDUB_INPUT_VALIDATION_PERCENT;
+      emitFfmpegProgress(win, {
+        projectId,
+        timeSec: 0,
+        totalSec: totalDurationSec,
+        percent: startPercent,
+        phase: 'encoding',
+      });
+
+      activeStage = 'completing-video';
+      try {
+        await runMediaProcess({
+          binary,
+          args: [
+            '-y', ...inputs,
+            '-filter_complex_script', filterScriptPath,
+            ...videoArgs,
+            '-map', '[adub]', '-c:a', 'aac', '-movflags', '+faststart', '-shortest',
+            '-progress', 'pipe:2', '-nostats', partialOutputPath,
+          ],
+          onProgress: (seconds) => {
+            const ratio = Math.min(1, seconds / totalDurationSec);
+            const percent = Math.round(startPercent + ratio * (100 - startPercent));
+            emitFfmpegProgress(win, {
               projectId,
-              timeSec: Math.min(secs, totalDurationSec),
+              timeSec: Math.min(seconds, totalDurationSec),
               totalSec: totalDurationSec,
+              percent,
               phase: 'encoding',
+            });
+          },
+        });
+      } catch (error) {
+        const classified = processFailure(
+          error,
+          appFailure('VIDEO_PROCESS_FAILED'),
+          undefined,
+          'output',
+          false,
+        );
+        if (classified.code === 'VIDEO_PROCESS_FAILED' && error instanceof MediaProcessFailure && error.kind === 'exit') {
+          try {
+            await ensureFileReadable(sourceVideoPath);
+          } catch (accessError) {
+            const failure = inputFileFailure(accessError, 'source-video');
+            throw appFailure(failure.code, failure.context, {
+              ...classified.internalDiagnostics,
+              ...failure.internalDiagnostics,
+            });
+          }
+          try {
+            await probeVideoDuration(sourceVideoPath);
+            await probeVideoDimensions(sourceVideoPath);
+          } catch (probeError) {
+            const probeFailure = probeInfrastructureFailure(probeError, 'VIDEO_SOURCE_VALIDATION_TIMEOUT');
+            if (probeFailure) {
+              throw appFailure(probeFailure.code, probeFailure.context, {
+                ...classified.internalDiagnostics,
+                ...probeFailure.internalDiagnostics,
+              });
+            }
+            throw appFailure('VIDEO_SOURCE_UNREADABLE', undefined, classified.internalDiagnostics);
+          }
+          const voiceInputFailure = useBatches
+            ? await speechTrackInputFailure(speechTracks)
+            : await preparedSegmentInputFailure(prepared);
+          if (voiceInputFailure) {
+            throw appFailure(voiceInputFailure.code, voiceInputFailure.context, {
+              ...classified.internalDiagnostics,
+              ...voiceInputFailure.internalDiagnostics,
+            });
+          }
+          if (musicPath) {
+            try {
+              await ensureFileReadable(musicPath);
+            } catch (accessError) {
+              const failure = inputFileFailure(accessError, 'background-audio');
+              throw appFailure(failure.code, failure.context, {
+                ...classified.internalDiagnostics,
+                ...failure.internalDiagnostics,
+              });
+            }
+            try {
+              await probeAudioDuration(musicPath);
+            } catch (probeError) {
+              const probeFailure = probeInfrastructureFailure(probeError, 'BACKGROUND_AUDIO_VALIDATION_TIMEOUT');
+              if (probeFailure) {
+                throw appFailure(probeFailure.code, probeFailure.context, {
+                  ...classified.internalDiagnostics,
+                  ...probeFailure.internalDiagnostics,
+                });
+              }
+              throw appFailure('BACKGROUND_AUDIO_UNREADABLE', undefined, classified.internalDiagnostics);
+            }
+          }
+          try {
+            await fs.access(path.dirname(partialOutputPath), fsConstants.W_OK);
+          } catch (outputError) {
+            throw fileFailure(outputError, 'output');
+          }
+          throw processFailure(error, appFailure('VIDEO_PROCESS_FAILED'), undefined, 'output', true);
+        }
+        throw classified;
+      }
+
+      let outputStat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        outputStat = await fs.stat(partialOutputPath);
+      } catch (error) {
+        throw fileFailure(error, 'output');
+      }
+      if (!outputStat.isFile() || outputStat.size === 0) {
+        throw appFailure('VIDEO_OUTPUT_INVALID');
+      }
+      const outputProbeResults = await Promise.allSettled([
+        probeVideoDuration(partialOutputPath),
+        probeVideoDimensions(partialOutputPath),
+        probeAudioDuration(partialOutputPath),
+      ] as const);
+      const [durationProbe, dimensionsProbe, audioProbe] = outputProbeResults;
+      if (durationProbe.status === 'rejected' || dimensionsProbe.status === 'rejected' || audioProbe.status === 'rejected') {
+        const infrastructureFailure = outputProbeResults
+          .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+          .map((result) => probeInfrastructureFailure(result.reason, 'VIDEO_OUTPUT_VALIDATION_TIMEOUT'))
+          .find((failure): failure is AppFailure => failure !== null);
+        if (infrastructureFailure) throw infrastructureFailure;
+        throw appFailure('VIDEO_OUTPUT_INVALID');
+      }
+      const outputDuration = durationProbe.value;
+      const durationTolerance = Math.max(1, Math.min(5, totalDurationSec * 0.001));
+      if (outputDuration < totalDurationSec - durationTolerance) {
+        throw appFailure('VIDEO_OUTPUT_INVALID');
+      }
+
+      activeStage = 'committing-output';
+      const targetExists = await fs.access(outPath).then(() => true).catch(() => false);
+      if (targetExists) {
+        backupOutputPath = `${outPath}.gensuite-backup-${Date.now()}`;
+        try {
+          await fs.rename(outPath, backupOutputPath);
+        } catch (error) {
+          throw fileFailure(error, 'output');
+        }
+      }
+      try {
+        await fs.rename(partialOutputPath, outPath);
+        partialOutputPath = null;
+        outputCommitted = true;
+      } catch (error) {
+        if (backupOutputPath) {
+          try {
+            await fs.rename(backupOutputPath, outPath);
+            backupOutputPath = null;
+          } catch (restoreError) {
+            const recoveryFailure = fileFailure(restoreError, 'output');
+            throw appFailure('OUTPUT_RECOVERY_FAILED', recoveryFailure.context, {
+              ...recoveryFailure.internalDiagnostics,
+              classifier: 'output-rollback-failed',
             });
           }
         }
-        if (progressBuffer.length > 8192) progressBuffer = progressBuffer.slice(-4096);
-      });
-      child.on('error', (err) => {
-        cleanupSubs();
-        log.error('video completion spawn failed', { code: (err as NodeJS.ErrnoException).code });
-        reject(new Error('Không thể khởi động quá trình hoàn thiện video.'));
-      });
-      child.on('close', (code) => {
-        cleanupSubs();
-        if (code === 0) {
-          win?.webContents.send('ffmpeg:progress', {
-            projectId,
-            timeSec: totalDurationSec,
-            totalSec: totalDurationSec,
-            phase: 'complete',
-          });
-          if (args.revealOutput !== false) shell.showItemInFolder(outPath);
-          resolve(outPath);
-        } else {
-          log.error('video completion failed', { code, detail: stderr.slice(-1600) });
-          reject(new Error('Không thể hoàn thiện video. Hãy kiểm tra các tệp đầu vào và thử lại.'));
+        throw fileFailure(error, 'output');
+      }
+      if (backupOutputPath && outputCommitted) {
+        const committedTargetExists = await fs.access(outPath).then(() => true).catch(() => false);
+        if (committedTargetExists) {
+          const removed = await fs.rm(backupOutputPath, { force: true }).then(() => true).catch(() => false);
+          if (removed) backupOutputPath = null;
         }
+      }
+
+      emitFfmpegProgress(win, {
+        projectId,
+        timeSec: totalDurationSec,
+        totalSec: totalDurationSec,
+        percent: 100,
+        phase: 'complete',
       });
-    });
+      if (args.revealOutput !== false) shell.showItemInFolder(outPath);
+      return appSuccess(outPath);
+    } catch (error) {
+      return appFailureResult<string | null>(error, 'UNEXPECTED', {
+        operation: 'video-completion',
+        activeStage,
+        segmentCount,
+        groupCount,
+        usedBatches: groupCount > 0,
+      });
+    } finally {
+      if (partialOutputPath) await fs.rm(partialOutputPath, { force: true }).catch(() => {});
+      if (backupOutputPath && outPath && !outputCommitted) {
+        const targetExists = await fs.access(outPath).then(() => true).catch(() => false);
+        if (!targetExists) {
+          await fs.rename(backupOutputPath, outPath).then(() => { backupOutputPath = null; }).catch(() => {});
+        }
+      }
+      // Delete the backup only after this operation itself committed the new
+      // output. If restore failed or another process raced us, preserve it.
+      if (backupOutputPath && outPath && outputCommitted) {
+        const committedTargetExists = await fs.access(outPath).then(() => true).catch(() => false);
+        if (committedTargetExists) {
+          await fs.rm(backupOutputPath, { force: true }).then(() => { backupOutputPath = null; }).catch(() => {});
+        }
+      }
+      if (tempDirectory) await fs.rm(tempDirectory, { recursive: true, force: true }).catch(() => {});
+    }
   });
 }

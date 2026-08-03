@@ -5,7 +5,7 @@ import { useSettingsStore } from '../store/settingsStore';
 import { getVoiceProvider, RESCUE_ENGINE } from '../providers/voice';
 import { getScriptProvider } from '../providers/script';
 import type { IVoiceProvider } from '../providers/voice';
-import { missingKeyService, serviceLabel, errorMessage } from '../providers/errors';
+import { missingKeyService, serviceLabel, errorMessage, isCancellationError } from '../providers/errors';
 import { localFileUrl } from '../shared/localFile';
 import type { Scene, VoiceEngine } from '../shared/types';
 import { AudioPlayer } from '../components/AudioPlayer';
@@ -68,7 +68,7 @@ export function SoundStage({ onOpenSettings }: Props) {
         subtitleTimingAudioPath: result.wordTimings?.length ? result.audioPath : undefined,
       });
     } catch (err) {
-      if (errorMessage(err) === 'edgetts:killed' || errorMessage(err).includes('voice:cancelled')) return;
+      if (isCancellationError(err)) return;
       const service = missingKeyService(err);
       if (service) setMissingKey(service);
       else setErrors((old) => ({ ...old, [sceneId]: errorMessage(err) }));

@@ -1,4 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import { randomUUID } from 'node:crypto';
+import { appErrorDefinition, isIpcResult } from '../src/shared/appErrors';
+import type { IpcResult, PublicAppError } from '../src/shared/appErrors';
 import type {
   GensuiteBridge,
   ProjectState,
@@ -8,7 +11,9 @@ import type {
   AudioDownloadArgs,
   EdgeTtsSynthesizeArgs,
   CapCutTtsSynthesizeArgs,
+  CapCutTtsSynthesizeResult,
   CapCutTtsPreviewArgs,
+  CapCutTtsPreviewResult,
   ExportArgs,
   RedubArgs,
   FfmpegProgress,
@@ -27,6 +32,83 @@ import type {
   NarrationProgress,
   NarrationRewriteArgs,
 } from '../src/shared/types';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function copyPublicError(error: PublicAppError): PublicAppError {
+  return {
+    kind: 'app-error-v1',
+    code: error.code,
+    stage: error.stage,
+    cause: error.cause,
+    retryable: error.retryable,
+    diagnosticId: error.diagnosticId,
+    context: error.context ? { ...error.context } : undefined,
+  };
+}
+
+function bridgeFailure<T>(): IpcResult<T> {
+  const code = 'DESKTOP_BRIDGE_UNAVAILABLE' as const;
+  const definition = appErrorDefinition(code);
+  const diagnosticId = `GS-${randomUUID().slice(0, 8).toUpperCase()}`;
+  try {
+    ipcRenderer.send('diagnostics:preload-failure', { diagnosticId, code });
+  } catch {
+    // The bridge itself may be unavailable; returning the safe payload is the
+    // final fallback and must not depend on another IPC send succeeding.
+  }
+  return {
+    ok: false,
+    error: {
+      kind: 'app-error-v1',
+      code,
+      stage: definition.stage,
+      cause: definition.cause,
+      retryable: definition.retryable,
+      diagnosticId,
+    },
+  };
+}
+
+async function invokeStructured<T>(
+  channel: string,
+  args: unknown,
+  isValue: (value: unknown) => value is T,
+): Promise<IpcResult<T>> {
+  try {
+    const result: unknown = await ipcRenderer.invoke(channel, args);
+    if (isIpcResult(result, isValue)) {
+      return result.ok
+        ? { ok: true, value: result.value }
+        : { ok: false, error: copyPublicError(result.error) };
+    }
+  } catch {
+    // Raw IPC exceptions never cross into the renderer.
+  }
+  return bridgeFailure<T>();
+}
+
+function isCapCutTtsResult(value: unknown): value is CapCutTtsSynthesizeResult {
+  return isRecord(value)
+    && Object.keys(value).length === 2
+    && typeof value.audioPath === 'string'
+    && value.audioPath.trim().length > 0
+    && typeof value.durationSec === 'number'
+    && Number.isFinite(value.durationSec)
+    && value.durationSec > 0;
+}
+
+function isCapCutTtsPreviewResult(value: unknown): value is CapCutTtsPreviewResult {
+  return isRecord(value)
+    && Object.keys(value).length === 1
+    && typeof value.audioBase64 === 'string'
+    && value.audioBase64.length > 0
+    && value.audioBase64.length <= 70 * 1024 * 1024
+    && value.audioBase64.length % 4 === 0
+    && /^[A-Za-z0-9+/]+={0,2}$/.test(value.audioBase64);
+}
 
 const bridge: GensuiteBridge = {
   window: {
@@ -74,8 +156,8 @@ const bridge: GensuiteBridge = {
     kill: (jobId: string) => ipcRenderer.invoke('edgetts:kill', jobId),
   },
   capcuttts: {
-    synthesize: (args: CapCutTtsSynthesizeArgs) => ipcRenderer.invoke('capcuttts:synthesize', args),
-    preview: (args: CapCutTtsPreviewArgs) => ipcRenderer.invoke('capcuttts:preview', args),
+    synthesize: (args: CapCutTtsSynthesizeArgs) => invokeStructured('capcuttts:synthesize', args, isCapCutTtsResult),
+    preview: (args: CapCutTtsPreviewArgs) => invokeStructured('capcuttts:preview', args, isCapCutTtsPreviewResult),
     kill: (jobId: string) => ipcRenderer.invoke('capcuttts:kill', jobId),
   },
   music: {
@@ -86,7 +168,11 @@ const bridge: GensuiteBridge = {
   },
   ffmpeg: {
     export: (args: ExportArgs) => ipcRenderer.invoke('ffmpeg:export', args),
-    redub: (args: RedubArgs) => ipcRenderer.invoke('ffmpeg:redub', args),
+    redub: (args: RedubArgs): Promise<IpcResult<string | null>> => invokeStructured(
+      'ffmpeg:redub',
+      args,
+      (value): value is string | null => value === null || typeof value === 'string',
+    ),
     onProgress: (cb: (p: FfmpegProgress) => void) => {
       const listener = (_e: unknown, p: FfmpegProgress) => cb(p);
       ipcRenderer.on('ffmpeg:progress', listener);

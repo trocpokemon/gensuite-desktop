@@ -4,6 +4,7 @@ import type { LocalizeAspectRatio, OriginalSubtitleCoverMode, SubtitleBackground
 import { BUILTIN_SUBTITLE_PRESETS, subtitleStyleFromConfig } from '../shared/subtitlePresets';
 import { useSettingsStore } from '../store/settingsStore';
 import { SubtitleStylePreview, type SubtitleEditMode } from './SubtitleStylePreview';
+import { AppSelect, type AppSelectOption } from './AppSelect';
 
 interface Caption { start: number; end: number; text: string; }
 
@@ -22,6 +23,14 @@ interface Props {
 const FONTS = ['Arial', 'Segoe UI', 'Arial Black', 'Tahoma', 'Verdana', 'Georgia', 'Times New Roman', 'Microsoft YaHei', 'Malgun Gothic', 'Yu Gothic'];
 const POSITIONS: Array<[SubtitlePosition, string]> = [['top', 'Trên'], ['middle', 'Giữa'], ['bottom', 'Dưới']];
 const BACKGROUNDS: Array<[SubtitleBackgroundStyle, string]> = [['rounded', 'Hộp bo mềm'], ['bar', 'Dải ngang'], ['none', 'Không nền']];
+const FONT_OPTIONS = FONTS.map((font) => ({ value: font, label: font }));
+const POSITION_OPTIONS = POSITIONS.map(([value, label]) => ({ value, label }));
+const BACKGROUND_OPTIONS = BACKGROUNDS.map(([value, label]) => ({ value, label }));
+const RATIO_OPTIONS: AppSelectOption<LocalizeAspectRatio>[] = [
+  { value: 'original', label: 'Theo video gốc' },
+  { value: '16:9', label: '16:9 · Ngang' },
+  { value: '9:16', label: '9:16 · Dọc' },
+];
 
 function clamp(value: number, min: number, max: number) { return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min)); }
 
@@ -34,8 +43,8 @@ function InspectorSection({ title, children }: { title: string; children: React.
   return <section className="border-b border-white/[0.07] px-4 py-4"><h3 className="mb-3 text-[10px] font-black uppercase tracking-[0.14em] text-white/35">{title}</h3><div className="space-y-3">{children}</div></section>;
 }
 
-function SelectField({ label, value, onChange, children }: { label: string; value: string; onChange: (value: string) => void; children: React.ReactNode }) {
-  return <label className="block"><span className="mb-1.5 block text-[10px] font-semibold text-white/40">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="field-surface w-full rounded-lg px-3 py-2 text-xs text-white/75 outline-none">{children}</select></label>;
+function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: AppSelectOption[] }) {
+  return <label className="block"><span className="mb-1.5 block text-[10px] font-semibold text-white/40">{label}</span><AppSelect value={value} onChange={onChange} options={options} ariaLabel={label} className="rounded-lg px-3 py-2 text-xs" /></label>;
 }
 
 function NumberField({ label, value, min, max, step = 1, suffix = '', onChange }: { label: string; value: number; min: number; max: number; step?: number; suffix?: string; onChange: (value: number) => void }) {
@@ -122,7 +131,7 @@ export function SubtitleDesigner({ config, onChange, ratio, onRatioChange, backg
     <header className="col-span-3 flex min-w-0 items-center justify-between gap-3 border-b border-white/[0.08] bg-[#181819] px-3">
       <div className="flex min-w-0 items-center gap-2">
         <div className="mr-2 min-w-0"><p className="truncate text-xs font-bold text-white/85">Trình chỉnh sửa phụ đề</p></div>
-        <select value={ratio} onChange={(event) => onRatioChange?.(event.target.value as LocalizeAspectRatio)} className="rounded-lg border border-white/[0.08] bg-black/20 px-2.5 py-2 text-[10px] font-semibold text-white/65 outline-none"><option value="original" className="bg-[#181819]">Theo video gốc</option><option value="16:9" className="bg-[#181819]">16:9 · Ngang</option><option value="9:16" className="bg-[#181819]">9:16 · Dọc</option></select>
+        <AppSelect value={ratio} onChange={(value) => onRatioChange?.(value)} options={RATIO_OPTIONS} ariaLabel="Tỷ lệ video" className="w-auto min-w-36 rounded-lg px-2.5 py-2 text-[10px] font-semibold" />
       </div>
       <div className="flex items-center gap-1 rounded-lg border border-white/[0.07] bg-black/20 p-1">
         <button type="button" onClick={() => setZoom((value) => clamp(value - 0.25, 0.5, 2))} className="grid size-7 place-items-center rounded text-white/45 hover:bg-white/[0.08] hover:text-white"><Minus size={13} /></button>
@@ -148,20 +157,20 @@ export function SubtitleDesigner({ config, onChange, ratio, onRatioChange, backg
 
       {editMode === 'subtitle' ? <>
         <InspectorSection title="Thiết kế">
-          <SelectField label="Preset" value={config.presetId} onChange={applyPreset}><option value="" disabled className="bg-[#181819]">Thiết kế hiện tại</option>{presets.map((preset) => <option key={preset.id} value={preset.id} className="bg-[#181819]">{preset.name}{dirty && preset.id === config.presetId ? ' · Đã sửa' : ''}</option>)}</SelectField>
+          <SelectField label="Preset" value={config.presetId} onChange={applyPreset} options={[{ value: '', label: 'Thiết kế hiện tại', disabled: true }, ...presets.map((preset) => ({ value: preset.id, label: `${preset.name}${dirty && preset.id === config.presetId ? ' · Đã sửa' : ''}` }))]} />
           <div className="flex flex-wrap gap-1.5"><button type="button" onClick={() => void setDefault()} className="inline-flex items-center gap-1 rounded-lg border border-white/[0.08] px-2 py-1.5 text-[9px] font-semibold text-white/45 hover:text-white"><BookmarkCheck size={11} /> Mặc định</button>{selectedCustom && <><button type="button" onClick={() => void updatePreset()} className="inline-flex items-center gap-1 rounded-lg border border-white/[0.08] px-2 py-1.5 text-[9px] font-semibold text-white/45 hover:text-white"><Save size={11} /> Cập nhật</button><button type="button" onClick={() => void deletePreset()} className="grid size-7 place-items-center rounded-lg border border-red-400/15 text-red-300/60"><Trash2 size={11} /></button></>}<button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-1 rounded-lg bg-emerald-400/10 px-2 py-1.5 text-[9px] font-semibold text-emerald-300"><Plus size={11} /> Preset mới</button></div>
           {creating && <div className="flex gap-1.5"><input autoFocus value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder="Tên preset" className="field-surface min-w-0 flex-1 rounded-lg px-2 py-1.5 text-[10px] outline-none" /><button type="button" onClick={() => void createPreset()} className="rounded-lg bg-emerald-400 px-2 text-[9px] font-bold text-black">Lưu</button></div>}
           {message && <p className="text-[9px] text-emerald-300/75">{message}</p>}
         </InspectorSection>
         <InspectorSection title="Chữ và bố cục">
-          <SelectField label="Phông chữ" value={config.fontFamily} onChange={(fontFamily) => update({ fontFamily })}>{FONTS.map((font) => <option key={font} value={font} className="bg-[#181819]">{font}</option>)}</SelectField>
+          <SelectField label="Phông chữ" value={config.fontFamily} onChange={(fontFamily) => update({ fontFamily })} options={FONT_OPTIONS} />
           <div className="grid grid-cols-2 gap-2"><NumberField label="Cỡ chữ" value={config.fontSizePct} min={0.5} max={15} step={0.1} suffix="%" onChange={(fontSizePct) => update({ fontSizePct })} /><NumberField label="Độ rộng" value={config.widthPct} min={15} max={96} suffix="%" onChange={(widthPct) => update({ widthPct })} /><NumberField label="Vị trí X" value={config.xPct} min={0} max={100} step={0.1} suffix="%" onChange={(xPct) => update({ xPct })} /><NumberField label="Vị trí Y" value={config.yPct} min={0} max={100} step={0.1} suffix="%" onChange={(yPct) => update({ yPct })} /></div>
-          <div className="grid grid-cols-2 gap-2"><SelectField label="Vị trí nhanh" value={config.position} onChange={(value) => { const position = value as SubtitlePosition; update({ position, yPct: position === 'top' ? config.marginPct : position === 'middle' ? 50 : 100 - config.marginPct }); }}>{POSITIONS.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}</SelectField><NumberField label="Từ mỗi cụm" value={config.wordsPerPage} min={2} max={10} onChange={(wordsPerPage) => update({ wordsPerPage })} /></div>
+          <div className="grid grid-cols-2 gap-2"><SelectField label="Vị trí nhanh" value={config.position} onChange={(value) => { const position = value as SubtitlePosition; update({ position, yPct: position === 'top' ? config.marginPct : position === 'middle' ? 50 : 100 - config.marginPct }); }} options={POSITION_OPTIONS} /><NumberField label="Từ mỗi cụm" value={config.wordsPerPage} min={2} max={10} onChange={(wordsPerPage) => update({ wordsPerPage })} /></div>
           <div className="flex flex-wrap gap-3 text-[10px] font-semibold text-white/50">{([['bold', 'Đậm'], ['italic', 'Nghiêng'], ['uppercase', 'Viết hoa']] as const).map(([key, label]) => <label key={key} className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={config[key]} onChange={(event) => update({ [key]: event.target.checked })} className="size-3.5 accent-emerald-400" />{label}</label>)}</div>
         </InspectorSection>
         <InspectorSection title="Màu sắc"><div className="grid grid-cols-2 gap-2"><ColorField label="Chữ" value={config.textColor} onChange={(textColor) => update({ textColor })} /><ColorField label="Highlight" value={config.highlightColor} onChange={(highlightColor) => update({ highlightColor })} /><ColorField label="Nền" value={config.backgroundColor} onChange={(backgroundColor) => update({ backgroundColor })} /><ColorField label="Viền" value={config.outlineColor} onChange={(outlineColor) => update({ outlineColor })} /></div></InspectorSection>
         <InspectorSection title="Nền và hiệu ứng">
-          <SelectField label="Kiểu nền" value={config.backgroundStyle} onChange={(value) => update({ backgroundStyle: value as SubtitleBackgroundStyle })}>{BACKGROUNDS.map(([value, label]) => <option key={value} value={value} className="bg-[#181819]">{label}</option>)}</SelectField>
+          <SelectField label="Kiểu nền" value={config.backgroundStyle} onChange={(value) => update({ backgroundStyle: value as SubtitleBackgroundStyle })} options={BACKGROUND_OPTIONS} />
           <SliderField label="Độ mờ nền" value={config.backgroundOpacity} min={0} max={100} suffix="%" onChange={(backgroundOpacity) => update({ backgroundOpacity })} /><SliderField label="Độ bo nền" value={config.backgroundRadius} min={0} max={30} onChange={(backgroundRadius) => update({ backgroundRadius })} /><SliderField label="Độ dày viền" value={config.outlineWidth} min={0} max={6} step={0.2} onChange={(outlineWidth) => update({ outlineWidth })} /><SliderField label="Đổ bóng" value={config.shadowDepth} min={0} max={8} onChange={(shadowDepth) => update({ shadowDepth })} />
         </InspectorSection>
       </> : <>

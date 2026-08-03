@@ -12,6 +12,10 @@ body,
   margin: 0;
 }
 
+html {
+  color-scheme: dark;
+}
+
 body {
   background: var(--color-background);
   color: var(--color-text);
