@@ -1,12 +1,12 @@
 import { useRef, useState } from 'react';
-import { Copy, Download, FileText, Film, FolderOpen, HardDrive, Languages, Mic, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
+import { AudioLines, Copy, Download, FileText, Film, FolderOpen, HardDrive, Languages, Mic, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { localFileUrl } from '../shared/localFile';
 import type { ProjectSummary } from '../shared/types';
 import { QuickToolWorkspace, type QuickToolId } from './QuickToolWorkspace';
 
 const STEP_LABEL: Record<string, string> = {
-  topic: 'Chọn chủ đề', content: 'Viết nội dung', storyboard: 'Storyboard', voice: 'Giọng đọc', timeline: 'Xuất video', localize: 'Dịch & lồng tiếng',
+  topic: 'Chọn chủ đề', content: 'Viết nội dung', storyboard: 'Storyboard', voice: 'Giọng đọc', timeline: 'Xuất video', localize: 'Dịch & lồng tiếng', narrate: 'Thuyết minh video',
 };
 
 interface Props { onOpenSettings: () => void; }
@@ -44,6 +44,7 @@ export function ProjectHome({ onOpenSettings }: Props) {
   const projects = useProjectStore((state) => state.projects);
   const createProject = useProjectStore((state) => state.createProject);
   const createLocalizeProject = useProjectStore((state) => state.createLocalizeProject);
+  const createNarrationProject = useProjectStore((state) => state.createNarrationProject);
   const openProject = useProjectStore((state) => state.openProject);
   const deleteProject = useProjectStore((state) => state.deleteProject);
   const duplicateProject = useProjectStore((state) => state.duplicateProject);
@@ -69,11 +70,21 @@ export function ProjectHome({ onOpenSettings }: Props) {
           <div>
             <div className="mb-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-400">GenSuite Studio</div>
             <h1 className="text-4xl font-bold tracking-[-0.05em]">Bạn muốn làm gì hôm nay?</h1>
-            <p className="mt-3 text-sm text-text/50">Chọn một trong hai luồng để bắt đầu, hoặc mở lại một dự án bên dưới.</p>
+            <p className="mt-3 text-sm text-text/50">Chọn một quy trình để bắt đầu, hoặc mở lại một dự án bên dưới.</p>
           </div>
         </header>
 
-        <div className="mb-7 grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="mb-7 grid grid-cols-1 gap-4 md:grid-cols-3">
+          <button onClick={() => void createNarrationProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-amber-300/20 bg-gradient-to-br from-amber-300/[0.13] via-orange-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-amber-300/45">
+            <span className="absolute right-4 top-4 rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-[10px] font-bold text-amber-100">Mới</span>
+            <div className="mb-4 inline-flex rounded-xl bg-amber-300/15 p-3 text-amber-200"><AudioLines size={24} /></div>
+            <h2 className="text-lg font-bold text-white">Thuyết minh video</h2>
+            <p className="mt-1.5 text-sm leading-5 text-white/50">Đưa video có sẵn vào, tự hiểu diễn biến, viết lời và tạo giọng khớp với từng cảnh.</p>
+            <span className="mt-4 inline-flex items-center gap-1.5 text-xs font-bold text-amber-200">
+              <Film size={14} /> Chọn video cần thuyết minh
+            </span>
+          </button>
+
           <button onClick={() => void createLocalizeProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-400/[0.12] via-indigo-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-sky-400/40">
             <span className="absolute right-4 top-4 rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-bold text-emerald-200">Có chế độ miễn phí</span>
             <div className="mb-4 inline-flex rounded-xl bg-sky-400/15 p-3 text-sky-300"><Languages size={24} /></div>

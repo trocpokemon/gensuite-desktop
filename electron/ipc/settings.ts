@@ -18,7 +18,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultSubtitlePresetId: DEFAULT_SUBTITLE_PRESET_ID,
 };
 
-async function readSettings(): Promise<AppSettings> {
+export async function readSettings(): Promise<AppSettings> {
   try {
     const raw = await fs.readFile(settingsPath(), 'utf-8');
     const parsed = JSON.parse(raw) as Partial<AppSettings> & { gensuiteApiKey?: unknown };

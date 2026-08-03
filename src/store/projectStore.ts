@@ -16,6 +16,7 @@ import type {
   TranscriptionEngine,
   WhisperModelName,
   TranscriptSegment,
+  NarrationWorkflowState,
 } from '../shared/types';
 import { DEFAULT_EDGE_VOICE } from '../providers/voice/edgeTtsCatalog';
 import { DEFAULT_CAPCUT_VOICE } from '../providers/voice/capcutTtsCatalog';
@@ -43,6 +44,9 @@ const DEFAULT_SETTINGS: ProjectSettings = {
   freeVoicePriorityVersion: 1,
   aspectRatio: '16:9',
   localizeAspectRatio: 'original',
+  narrationLanguage: 'vi-VN',
+  narrationAudience: 'VN',
+  narrationDensity: 'dense',
   localizeSourceLanguageConfirmed: false,
   localizeTargetLanguageConfirmed: false,
   localizeAccuracyConfirmed: false,
@@ -95,11 +99,19 @@ function newProject(name = 'Dự án chưa đặt tên', usePreferredSubtitle = 
   };
 }
 
+function newNarrationWorkflow(stage: NarrationWorkflowState['stage'] = 'idle'): NarrationWorkflowState {
+  return {
+    schemaVersion: 1,
+    stage,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 function normalizeProject(raw: ProjectState): ProjectState {
   const legacyStep = raw.currentStep as string;
   const currentStep: StepId =
     legacyStep === 'script' ? 'content' : legacyStep === 'media' ? 'storyboard' :
-      (['topic', 'content', 'storyboard', 'voice', 'timeline', 'localize'].includes(legacyStep) ? legacyStep as StepId : 'topic');
+      (['topic', 'content', 'storyboard', 'voice', 'timeline', 'localize', 'narrate'].includes(legacyStep) ? legacyStep as StepId : 'topic');
   const legacyContent = raw.script?.content || raw.scenes?.map((scene) => scene.narration).join('\n\n') || '';
   const storedVoiceEngine = raw.settings?.voiceEngine as VoiceEngine | 'piper' | 'kokoro' | undefined;
   const preferredVoiceEngine: VoiceEngine = !storedVoiceEngine || ['piper', 'kokoro'].includes(storedVoiceEngine)
@@ -125,6 +137,9 @@ function normalizeProject(raw: ProjectState): ProjectState {
     },
     scenes: raw.scenes ?? [],
     characterRefs: raw.characterRefs ?? [],
+    narrationWorkflow: (raw.kind === 'narrate')
+      ? { ...newNarrationWorkflow(raw.sourceVideoPath ? 'source-ready' : 'idle'), ...(raw.narrationWorkflow ?? {}) }
+      : raw.narrationWorkflow,
     settings: {
       ...DEFAULT_SETTINGS,
       ...raw.settings,
@@ -145,6 +160,9 @@ function normalizeProject(raw: ProjectState): ProjectState {
       originalAudioVolume: raw.settings?.originalAudioVolume ?? DEFAULT_SETTINGS.originalAudioVolume,
       localizeOutputDirectory: raw.settings?.localizeOutputDirectory ?? DEFAULT_SETTINGS.localizeOutputDirectory,
       localizeAspectRatio: raw.settings?.localizeAspectRatio ?? DEFAULT_SETTINGS.localizeAspectRatio,
+      narrationLanguage: raw.settings?.narrationLanguage ?? DEFAULT_SETTINGS.narrationLanguage,
+      narrationAudience: raw.settings?.narrationAudience ?? DEFAULT_SETTINGS.narrationAudience,
+      narrationDensity: raw.settings?.narrationDensity ?? DEFAULT_SETTINGS.narrationDensity,
       // Cached localize projects created before these markers already contain
       // intentional selections. Explicit `false` is reserved for new projects.
       localizeSourceLanguageConfirmed: raw.settings?.localizeSourceLanguageConfirmed ?? raw.kind === 'localize',
@@ -183,7 +201,11 @@ function summary(project: ProjectState): ProjectSummary {
     updatedAt: project.updatedAt,
     currentStep: project.currentStep,
     status: project.status,
-    topicName: project.topic?.name ?? 'Chưa chọn chủ đề',
+    topicName: project.kind === 'narrate'
+      ? 'Thuyết minh video'
+      : project.kind === 'localize'
+        ? 'Dịch & lồng tiếng'
+        : project.topic?.name ?? 'Chưa chọn chủ đề',
     wordCount: project.script.content.trim().split(/\s+/).filter(Boolean).length,
     sceneCount: project.scenes.length,
     thumbnailPath,
@@ -207,6 +229,7 @@ interface ProjectStore {
   refreshProjects: () => Promise<void>;
   createProject: (name?: string) => Promise<void>;
   createLocalizeProject: (name?: string) => Promise<void>;
+  createNarrationProject: (name?: string) => Promise<void>;
   openProject: (id: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   duplicateProject: (id: string) => Promise<void>;
@@ -237,6 +260,7 @@ interface ProjectStore {
   setLanguages: (patch: { sourceLanguage?: string; targetLanguage?: string }) => void;
   buildScenesFromTranscript: (segments: TranscriptSegment[]) => void;
   setDubbedVideo: (path: string) => void;
+  patchNarrationWorkflow: (patch: Partial<NarrationWorkflowState>) => void;
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -288,6 +312,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
           localizeAccuracyConfirmed: false,
           localizeVoiceProviderConfirmed: false,
         },
+      };
+      await window.gensuite.project.save(project);
+      set({ project, home: false });
+      await get().refreshProjects();
+    },
+    createNarrationProject: async (name) => {
+      const project: ProjectState = {
+        ...newProject(name?.trim() || 'Thuyết minh video', true),
+        kind: 'narrate',
+        currentStep: 'narrate',
+        narrationWorkflow: newNarrationWorkflow(),
       };
       await window.gensuite.project.save(project);
       set({ project, home: false });
@@ -423,11 +458,26 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
         ...current,
         sourceVideoPath,
         ...(changed ? { transcript: undefined, scenes: [], dubbedVideoPath: undefined } : {}),
+        narrationWorkflow: current.kind === 'narrate'
+          ? newNarrationWorkflow('source-ready')
+          : current.narrationWorkflow,
       });
     },
     setTranscript: (segments) => commit({ ...get().project, transcript: segments }),
     setLanguages: (patch) => commit({ ...get().project, ...patch }),
     setDubbedVideo: (dubbedVideoPath) => commit({ ...get().project, dubbedVideoPath }),
+    patchNarrationWorkflow: (patch) => {
+      const project = get().project;
+      commit({
+        ...project,
+        narrationWorkflow: {
+          ...(project.narrationWorkflow ?? newNarrationWorkflow()),
+          ...patch,
+          schemaVersion: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    },
     // Re-dub bridge: each translated segment becomes one Scene, keeping its source
     // timing. The scene flows through the existing voice → storyboard → timeline
     // pipeline exactly like a topic project.

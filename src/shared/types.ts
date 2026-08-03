@@ -10,14 +10,141 @@ export type MediaEngine = 'pexels' | 'pixabay' | 'unsplash';
 export type VoiceEngine = 'edgetts' | 'capcuttts' | 'genvoice' | 'elevenlabs' | 'minimax';
 export type TranscriptionEngine = 'local' | 'cloud';
 
-export type StepId = 'topic' | 'content' | 'storyboard' | 'voice' | 'timeline' | 'localize';
+export type StepId = 'topic' | 'content' | 'storyboard' | 'voice' | 'timeline' | 'localize' | 'narrate';
 
 export type ProjectStatus = 'draft' | 'content-approved' | 'storyboard-ready' | 'ready-to-export';
 export type TopicSource = 'system' | 'user';
 export type VisualType = 'stock-image' | 'stock-video' | 'ai-image' | 'ai-video' | 'upload';
 
-/** Kind of project: a topic-driven production, or an imported-video localization. */
-export type ProjectKind = 'topic' | 'localize';
+/** Kind of project: topic production, imported-video localization, or visual narration. */
+export type ProjectKind = 'topic' | 'localize' | 'narrate';
+export type NarrationLanguage = 'vi-VN' | 'en-US' | 'zh-CN' | 'ja-JP' | 'ko-KR' | 'th-TH' | 'id-ID';
+export type NarrationAudience = 'VN' | 'US' | 'CN' | 'JP' | 'KR' | 'TH' | 'ID';
+
+/** Durable stages for the silent-video narration workflow. */
+export type NarrationWorkflowStage =
+  | 'idle'
+  | 'source-ready'
+  | 'ingesting'
+  | 'segmenting'
+  | 'analyzing'
+  | 'planning'
+  | 'synthesizing'
+  | 'fitting'
+  | 'review-ready'
+  | 'voice-ready'
+  | 'preview-ready'
+  | 'rendering'
+  | 'quality-checking'
+  | 'complete'
+  | 'failed'
+  | 'cancelled';
+
+/** Exact local boundary. Semantic analysis may annotate it but never replace its timing. */
+export interface ShotBoundary {
+  id: string;
+  startMs: number;
+  endMs: number;
+}
+
+export interface ShotManifest {
+  schemaVersion: 1;
+  sourceFingerprint: string;
+  durationMs: number;
+  shots: ShotBoundary[];
+}
+
+/** A meaningful story beat composed from one or more technical shots. */
+export interface SemanticBeat {
+  id: string;
+  shotIds: string[];
+  startMs: number;
+  endMs: number;
+  description: string;
+  importance: number;
+  confidence: number;
+}
+
+export type NarrationFitStatus = 'pending' | 'fits' | 'needs-rewrite' | 'needs-review';
+export type NarrationDensity = 'sparse' | 'balanced' | 'dense';
+
+/** One editable narration cue placed inside an allowed visual window. */
+export interface NarrationCue {
+  id: string;
+  beatIds: string[];
+  windowStartMs: number;
+  windowEndMs: number;
+  preferredStartMs: number;
+  text: string;
+  maxDurationMs: number;
+  priority: number;
+  revision: number;
+  fitStatus: NarrationFitStatus;
+  audioPath?: string;
+  audioDurationMs?: number;
+  wordTimings?: SubtitleWordTiming[];
+}
+
+/** Small reference stored in project.json; larger manifests live beside project assets. */
+export interface NarrationWorkflowState {
+  schemaVersion: 1;
+  stage: NarrationWorkflowStage;
+  runId?: string;
+  sourceFingerprint?: string;
+  shotManifestPath?: string;
+  semanticManifestPath?: string;
+  narrationPlanPath?: string;
+  qualityReportPath?: string;
+  previewPath?: string;
+  /** Short user-facing synopsis kept with the project for fast resume. */
+  summary?: string;
+  shotCount?: number;
+  targetLanguage?: NarrationLanguage;
+  targetAudience?: NarrationAudience;
+  density?: NarrationDensity;
+  updatedAt?: string;
+}
+
+export type NarrationProgressPhase = 'preparing' | 'detecting-scenes' | 'understanding' | 'writing' | 'complete';
+
+export interface NarrationAnalyzeArgs {
+  projectId: string;
+  sourceVideoPath: string;
+  targetLanguage: NarrationLanguage;
+  targetAudience: NarrationAudience;
+  density: NarrationDensity;
+}
+
+export interface NarrationProgress {
+  projectId: string;
+  phase: NarrationProgressPhase;
+  percent: number;
+}
+
+export interface NarrationAnalyzeResult {
+  sourceFingerprint: string;
+  summary: string;
+  shots: ShotBoundary[];
+  beats: SemanticBeat[];
+  cues: NarrationCue[];
+  shotManifestPath: string;
+  semanticManifestPath: string;
+  narrationPlanPath: string;
+}
+
+export interface NarrationRewriteArgs {
+  text: string;
+  context: string;
+  targetDurationMs: number;
+  actualDurationMs: number;
+  targetLanguage: NarrationLanguage;
+  targetAudience: NarrationAudience;
+  mode?: 'shorten' | 'expand';
+}
+
+export interface NarrationRewriteResult {
+  text: string;
+}
 
 /** GGML model sizes for local whisper.cpp. Larger = more accurate, slower, bigger download. */
 export type WhisperModelName = 'tiny' | 'base' | 'small' | 'medium';
@@ -89,6 +216,9 @@ export interface Scene {
   /** Cache identity so timing is invalidated when text or audio changes. */
   subtitleTimingText?: string;
   subtitleTimingAudioPath?: string;
+  /** Narration-only production metadata used by the duration fitting loop. */
+  narrationFitStatus?: NarrationFitStatus;
+  narrationRevision?: number;
 }
 
 export interface MediaResult {
@@ -203,6 +333,10 @@ export interface ProjectSettings {
   aspectRatio: AspectRatio;
   /** Frame used by localized-video review and export. */
   localizeAspectRatio: LocalizeAspectRatio;
+  /** Language and market used when writing visual narration. */
+  narrationLanguage: NarrationLanguage;
+  narrationAudience: NarrationAudience;
+  narrationDensity: NarrationDensity;
   /** Explicit choices required before a newly-created localize project can advance. */
   localizeSourceLanguageConfirmed?: boolean;
   localizeTargetLanguageConfirmed?: boolean;
@@ -276,6 +410,8 @@ export interface ProjectState {
   transcript?: TranscriptSegment[];
   /** Localize projects: absolute path of the finished re-dubbed video. */
   dubbedVideoPath?: string;
+  /** Silent-video narration workflow checkpoint and manifest references. */
+  narrationWorkflow?: NarrationWorkflowState;
   /** Project-level character references reused across AI image scenes. */
   characterRefs: CharacterRef[];
   settings: ProjectSettings;
@@ -452,6 +588,8 @@ export interface RedubArgs {
   sourceVideoPath: string;
   /** Translated audio lines with their source-video time windows. */
   segments: RedubSegment[];
+  /** Optional safety ceiling for speech speed adjustment. */
+  maxTempoFactor?: number;
   /** Burn the translated text into the video as a hard subtitle. */
   subtitles?: boolean;
   subtitleConfig?: SubtitleConfig;
@@ -459,6 +597,9 @@ export interface RedubArgs {
   outputAspectRatio?: LocalizeAspectRatio;
   /** Percentage of the source audio retained under the translated voice. Defaults to 8. */
   originalAudioVolume?: number;
+  /** Optional background track mixed under the timed narration. */
+  musicPath?: string;
+  musicVolume?: number;
   /** Optional absolute folder selected before processing starts. */
   outputDirectory?: string;
   /** When provided, save directly inside the project's output folder instead of asking for a location. */
@@ -626,6 +767,12 @@ export interface GensuiteBridge {
     /** Re-dub: keep the source video's visuals, replace its audio with the translated lines. Returns the output path or null if cancelled. */
     redub(args: RedubArgs): Promise<string | null>;
     onProgress(cb: (p: FfmpegProgress) => void): () => void;
+  };
+  narration: {
+    /** Analyze an imported video and produce an editable, time-bounded narration draft. */
+    analyze(args: NarrationAnalyzeArgs): Promise<NarrationAnalyzeResult>;
+    rewrite(args: NarrationRewriteArgs): Promise<NarrationRewriteResult>;
+    onProgress(cb: (p: NarrationProgress) => void): () => void;
   };
   ytdlp: {
     /** Download a video by URL into <project>/source/. Returns the absolute file path. */

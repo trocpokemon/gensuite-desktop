@@ -44,10 +44,13 @@ type RedubArgs = {
   projectId: string;
   sourceVideoPath: string;
   segments: RedubSegment[];
+  maxTempoFactor?: number;
   subtitles?: boolean;
   subtitleConfig?: SubtitleConfig;
   outputAspectRatio?: LocalizeAspectRatio;
   originalAudioVolume?: number;
+  musicPath?: string;
+  musicVolume?: number;
   outputDirectory?: string;
   automaticOutputName?: string;
   revealOutput?: boolean;
@@ -731,7 +734,11 @@ export function registerFfmpegIpc(): void {
     const prepared = await Promise.all(segments.map(async (seg) => {
       const ttsDur = await probeDuration(seg.audioPath).catch(() => 0);
       const windowLen = Math.max(0, seg.sourceEnd - seg.sourceStart);
-      const factor = windowLen > 0 && ttsDur > windowLen ? ttsDur / windowLen : 1;
+      const requestedFactor = windowLen > 0 && ttsDur > windowLen ? ttsDur / windowLen : 1;
+      const maxTempoFactor = Number(args.maxTempoFactor);
+      const factor = Number.isFinite(maxTempoFactor) && maxTempoFactor >= 1
+        ? Math.min(requestedFactor, maxTempoFactor)
+        : requestedFactor;
       return { ...seg, ttsDur, factor };
     }));
 
@@ -772,6 +779,9 @@ export function registerFfmpegIpc(): void {
     // Inputs: [0] = source video, [1..N] = each line's audio.
     const inputs: string[] = ['-i', sourceVideoPath];
     prepared.forEach((s) => inputs.push('-i', s.audioPath));
+    const musicPath = args.musicPath;
+    const wantMusic = Boolean(musicPath) && await fs.access(musicPath!).then(() => true).catch(() => false);
+    if (wantMusic) inputs.push('-stream_loop', '-1', '-i', musicPath!);
 
     // A silent bed spanning the whole video guarantees the dubbed track is as
     // long as the picture even when the last line ends early.
@@ -797,8 +807,19 @@ export function registerFfmpegIpc(): void {
       ].join(',');
       filters.push(`[${i + 1}:a]${chain}[a${i}]`);
     });
-    const mixInputs = ['[base]', ...(keepOriginalAudio ? ['[aorig]'] : []), ...prepared.map((_, i) => `[a${i}]`)].join('');
-    const mixCount = prepared.length + 1 + (keepOriginalAudio ? 1 : 0);
+    if (wantMusic) {
+      const musicInputIndex = prepared.length + 1;
+      const musicVolume = Math.max(0, Math.min(100, Number(args.musicVolume ?? 18))) / 100;
+      const fade = Math.min(3, totalDurationSec / 2);
+      const fadeStart = Math.max(0, totalDurationSec - fade);
+      filters.push(
+        `[${musicInputIndex}:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
+        `atrim=duration=${totalDurationSec.toFixed(6)},asetpts=PTS-STARTPTS,volume=${musicVolume.toFixed(3)},` +
+        `afade=t=out:st=${fadeStart.toFixed(3)}:d=${fade.toFixed(3)}[amus]`,
+      );
+    }
+    const mixInputs = ['[base]', ...(keepOriginalAudio ? ['[aorig]'] : []), ...prepared.map((_, i) => `[a${i}]`), ...(wantMusic ? ['[amus]'] : [])].join('');
+    const mixCount = prepared.length + 1 + (keepOriginalAudio ? 1 : 0) + (wantMusic ? 1 : 0);
     filters.push(`${mixInputs}amix=inputs=${mixCount}:duration=first:normalize=0[adub]`);
 
     // Visual caption work requires a video re-encode; otherwise preserve the source stream.

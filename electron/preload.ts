@@ -23,6 +23,9 @@ import type {
   WhisperProgress,
   AuthCallbackPayload,
   UpdaterStatus,
+  NarrationAnalyzeArgs,
+  NarrationProgress,
+  NarrationRewriteArgs,
 } from '../src/shared/types';
 
 const bridge: GensuiteBridge = {
@@ -88,6 +91,15 @@ const bridge: GensuiteBridge = {
       const listener = (_e: unknown, p: FfmpegProgress) => cb(p);
       ipcRenderer.on('ffmpeg:progress', listener);
       return () => ipcRenderer.removeListener('ffmpeg:progress', listener);
+    },
+  },
+  narration: {
+    analyze: (args: NarrationAnalyzeArgs) => ipcRenderer.invoke('narration:analyze', args),
+    rewrite: (args: NarrationRewriteArgs) => ipcRenderer.invoke('narration:rewrite', args),
+    onProgress: (cb: (p: NarrationProgress) => void) => {
+      const listener = (_e: unknown, p: NarrationProgress) => cb(p);
+      ipcRenderer.on('narration:progress', listener);
+      return () => ipcRenderer.removeListener('narration:progress', listener);
     },
   },
   ytdlp: {

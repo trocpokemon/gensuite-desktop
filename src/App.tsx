@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BookOpenText, Check, Clapperboard, FileVideo, Film, Home, Languages, LayoutTemplate, LogOut, Mic, Play, Subtitles, Wand2 } from 'lucide-react';
+import { AudioLines, BookOpenText, Check, Clapperboard, FileVideo, Film, Home, Languages, LayoutTemplate, LogOut, Mic, Play, Subtitles, Wand2 } from 'lucide-react';
 import { TitleBar } from './components/TitleBar';
 import { UpdateBanner } from './components/UpdateBanner';
 import { ProjectHome } from './components/ProjectHome';
@@ -11,6 +11,7 @@ import { ArtDepartment } from './steps/ArtDepartment';
 import { SoundStage } from './steps/SoundStage';
 import { Timeline } from './steps/Timeline';
 import { LocalizeStudio, type LocalizeSetupStep } from './steps/LocalizeStudio';
+import { NarrationStudio, type NarrationSetupStep } from './steps/NarrationStudio';
 import { useProjectStore } from './store/projectStore';
 import { useSettingsStore } from './store/settingsStore';
 import { useTopicStore } from './store/topicStore';
@@ -33,6 +34,13 @@ const LOCALIZE_STEPS: Array<{ id: LocalizeSetupStep; label: string; description:
   { id: 'export', label: 'Kiểm tra & tạo', description: 'Âm thanh và tổng quan', icon: Play },
 ];
 
+const NARRATION_STEPS: Array<{ id: NarrationSetupStep; label: string; description: string; icon: typeof Film }> = [
+  { id: 'source', label: 'Video & thiết lập', description: 'Chọn nguồn và kiểu lời', icon: FileVideo },
+  { id: 'script', label: 'Nội dung', description: 'Review và chỉnh lời', icon: BookOpenText },
+  { id: 'voice', label: 'Giọng đọc', description: 'Chọn giọng và tự căn', icon: Mic },
+  { id: 'export', label: 'Kiểm tra & tạo', description: 'Âm thanh và xuất video', icon: Play },
+];
+
 export default function App() {
   const hydrated = useProjectStore((state) => state.hydrated);
   const hydrate = useProjectStore((state) => state.hydrate);
@@ -53,6 +61,8 @@ export default function App() {
   const [localizeSetupStep, setLocalizeSetupStep] = useState<LocalizeSetupStep>('source');
   const [localizeNavigationLocked, setLocalizeNavigationLocked] = useState(false);
   const [localizeSourceReady, setLocalizeSourceReady] = useState(Boolean(project.sourceVideoPath));
+  const [narrationSetupStep, setNarrationSetupStep] = useState<NarrationSetupStep>('source');
+  const [narrationNavigationLocked, setNarrationNavigationLocked] = useState(false);
   const localizeSourceChoicesConfirmed = Boolean(
     project.settings.localizeSourceLanguageConfirmed
     && project.settings.localizeTargetLanguageConfirmed
@@ -60,6 +70,14 @@ export default function App() {
   );
   const activeVoiceConfig = project.settings.voiceConfigs[project.settings.voiceEngine];
   const localizeVoiceReady = Boolean(project.settings.localizeVoiceProviderConfirmed && activeVoiceConfig.voiceId);
+  const narrationSourceReady = Boolean(project.sourceVideoPath);
+  const narrationScriptReady = Boolean(project.narrationWorkflow?.summary && project.scenes.length);
+  const narrationVoiceReady = narrationScriptReady && project.scenes.every((scene) => Boolean(scene.audioPath));
+  const projectTypeLabel = project.kind === 'narrate'
+    ? 'Thuyết minh video'
+    : project.kind === 'localize'
+      ? 'Dịch & lồng tiếng'
+      : project.topic?.name ?? 'Chưa chọn chủ đề';
 
   useEffect(() => { initAuth(); }, [initAuth]);
   useEffect(() => { hydrate(); loadSettings(); loadTopics(); }, [hydrate, loadSettings, loadTopics]);
@@ -70,6 +88,7 @@ export default function App() {
   useEffect(() => {
     setLocalizeSetupStep('source');
     setLocalizeSourceReady(Boolean(project.sourceVideoPath));
+    setNarrationSetupStep('source');
   }, [project.id]);
 
   return (
@@ -96,7 +115,7 @@ export default function App() {
                     aria-label="Tên dự án"
                     className="-mx-2 w-[calc(100%+16px)] rounded-lg border-0 bg-transparent px-2 py-1.5 text-base font-bold tracking-[-0.02em] text-white/90 outline-none transition-colors duration-200 hover:bg-white/[0.025] focus:bg-white/[0.045] focus:text-white focus-visible:outline-none"
                   />
-                  <p className="mt-1.5 truncate text-[11px] font-medium text-emerald-300/70">{project.kind === 'localize' ? 'Quy trình bản địa hóa' : project.topic?.name ?? 'Chưa chọn chủ đề'}</p>
+                  <p className="mt-1.5 truncate text-[11px] font-medium text-emerald-300/70">{projectTypeLabel}</p>
                 </div>
                 <div className="mb-2 px-3 text-[11px] font-semibold text-white/30">Quy trình sản xuất</div>
                 {project.kind === 'localize' ? <div className="flex flex-1 flex-col">
@@ -107,6 +126,16 @@ export default function App() {
                       const completed = index < LOCALIZE_STEPS.findIndex((item) => item.id === localizeSetupStep);
                       const prerequisiteMissing = (index > 0 && (!localizeSourceReady || !localizeSourceChoicesConfirmed)) || (index > 1 && !localizeVoiceReady);
                       return <li key={id} className="relative"><button type="button" disabled={localizeNavigationLocked || prerequisiteMissing} onClick={() => setLocalizeSetupStep(id)} className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${active ? 'bg-emerald-400/10 text-white ring-1 ring-emerald-400/20' : 'text-white/45 hover:bg-white/[0.04] hover:text-white/75'}`}><span className={`relative z-10 grid size-8 shrink-0 place-items-center rounded-lg ${active ? 'bg-emerald-400 text-black' : completed ? 'bg-emerald-400/15 text-emerald-300' : 'bg-[#222223] text-white/30'}`}>{completed ? <Check size={14} /> : <Icon size={14} />}</span><span className="min-w-0"><span className="block text-[12px] font-bold">{index + 1}. {label}</span><span className="mt-0.5 block truncate text-[9px] text-white/25">{description}</span></span></button></li>;
+                    })}
+                  </ul>
+                </div> : project.kind === 'narrate' ? <div className="flex flex-1 flex-col">
+                  <div className="mb-2 flex items-center gap-2 px-3 text-[12px] font-bold text-white/65"><AudioLines size={15} className="text-emerald-400" /> Thuyết minh</div>
+                  <ul className="relative flex flex-col gap-1 before:absolute before:bottom-5 before:left-[27px] before:top-5 before:w-px before:bg-white/[0.08]">
+                    {NARRATION_STEPS.map(({ id, label, description, icon: Icon }, index) => {
+                      const active = narrationSetupStep === id;
+                      const completed = index < NARRATION_STEPS.findIndex((item) => item.id === narrationSetupStep);
+                      const prerequisiteMissing = (index > 0 && !narrationSourceReady) || (index > 1 && !narrationScriptReady) || (index > 2 && !narrationVoiceReady);
+                      return <li key={id} className="relative"><button type="button" disabled={narrationNavigationLocked || prerequisiteMissing} onClick={() => setNarrationSetupStep(id)} className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition disabled:cursor-not-allowed disabled:opacity-40 ${active ? 'bg-emerald-400/10 text-white ring-1 ring-emerald-400/20' : 'text-white/45 hover:bg-white/[0.04] hover:text-white/75'}`}><span className={`relative z-10 grid size-8 shrink-0 place-items-center rounded-lg ${active ? 'bg-emerald-400 text-black' : completed ? 'bg-emerald-400/15 text-emerald-300' : 'bg-[#222223] text-white/30'}`}>{completed ? <Check size={14} /> : <Icon size={14} />}</span><span className="min-w-0"><span className="block text-[12px] font-bold">{index + 1}. {label}</span><span className="mt-0.5 block truncate text-[9px] text-white/25">{description}</span></span></button></li>;
                     })}
                   </ul>
                 </div> : <ul className="flex flex-1 flex-col gap-1">
@@ -124,6 +153,7 @@ export default function App() {
               </nav>
               <main className="min-w-0 flex-1 overflow-y-auto bg-black/5">
                 {project.currentStep === 'localize' && <LocalizeStudio onOpenSettings={() => setSettingsOpen(true)} setupStep={localizeSetupStep} onSetupStepChange={setLocalizeSetupStep} onNavigationLockChange={setLocalizeNavigationLocked} onSourceReadyChange={setLocalizeSourceReady} />}
+                {project.currentStep === 'narrate' && <NarrationStudio onOpenSettings={() => setSettingsOpen(true)} setupStep={narrationSetupStep} onSetupStepChange={setNarrationSetupStep} onNavigationLockChange={setNarrationNavigationLocked} />}
                 {project.currentStep === 'topic' && <TopicStudio />}
                 {project.currentStep === 'content' && <DirectorRoom onOpenSettings={() => setSettingsOpen(true)} />}
                 {project.currentStep === 'storyboard' && <ArtDepartment onOpenSettings={() => setSettingsOpen(true)} />}

@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
-import { promises as fs } from 'node:fs';
+import { createReadStream, promises as fs } from 'node:fs';
+import { Readable } from 'node:stream';
 import path from 'node:path';
 import { registerHardwareIpc } from './ipc/hardware';
 import { registerProjectIpc } from './ipc/project';
@@ -14,6 +15,7 @@ import { registerCharacterIpc } from './ipc/character';
 import { registerYtdlpIpc } from './ipc/ytdlp';
 import { registerWhisperIpc } from './ipc/whisper';
 import { registerFilesIpc } from './ipc/files';
+import { registerNarrationIpc } from './ipc/narration';
 import { registerUpdater, startUpdateChecks } from './updater';
 
 // Vite injects these in dev; undefined in a packaged build.
@@ -126,6 +128,7 @@ function registerIpc(): void {
   registerYtdlpIpc();
   registerWhisperIpc();
   registerFilesIpc();
+  registerNarrationIpc();
 }
 
 function registerProjectFileProtocol(): void {
@@ -139,7 +142,9 @@ function registerProjectFileProtocol(): void {
       return new Response('Forbidden', { status: 403 });
     }
     try {
-      const bytes = await fs.readFile(file);
+      const stat = await fs.stat(file);
+      if (!stat.isFile()) return new Response('Not found', { status: 404 });
+      const size = stat.size;
       const range = request.headers.get('range');
       const baseHeaders = {
         'Content-Type': contentType(file),
@@ -147,26 +152,34 @@ function registerProjectFileProtocol(): void {
         'Accept-Ranges': 'bytes',
       };
       if (range) {
-        const match = range.match(/bytes=(\d*)-(\d*)/);
+        const match = range.match(/^bytes=(\d*)-(\d*)$/);
         if (match) {
-          const start = match[1] ? Number(match[1]) : 0;
-          const requestedEnd = match[2] ? Number(match[2]) : bytes.length - 1;
-          const end = Math.min(requestedEnd, bytes.length - 1);
-          if (start >= 0 && start <= end) {
-            const chunk = bytes.subarray(start, end + 1);
-            return new Response(new Uint8Array(chunk), {
+          const suffixLength = !match[1] && match[2] ? Number(match[2]) : 0;
+          const start = suffixLength > 0
+            ? Math.max(0, size - suffixLength)
+            : match[1] ? Number(match[1]) : 0;
+          const requestedEnd = match[1] && match[2] ? Number(match[2]) : size - 1;
+          const end = Math.min(requestedEnd, size - 1);
+          if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && start <= end) {
+            const stream = Readable.toWeb(createReadStream(file, { start, end }));
+            return new Response(stream as never, {
               status: 206,
               headers: {
                 ...baseHeaders,
-                'Content-Length': String(chunk.length),
-                'Content-Range': `bytes ${start}-${end}/${bytes.length}`,
+                'Content-Length': String(end - start + 1),
+                'Content-Range': `bytes ${start}-${end}/${size}`,
               },
             });
           }
         }
+        return new Response(null, {
+          status: 416,
+          headers: { ...baseHeaders, 'Content-Range': `bytes */${size}` },
+        });
       }
-      return new Response(new Uint8Array(bytes), {
-        headers: { ...baseHeaders, 'Content-Length': String(bytes.length) },
+      const stream = Readable.toWeb(createReadStream(file));
+      return new Response(stream as never, {
+        headers: { ...baseHeaders, 'Content-Length': String(size) },
       });
     } catch {
       return new Response('Not found', { status: 404 });

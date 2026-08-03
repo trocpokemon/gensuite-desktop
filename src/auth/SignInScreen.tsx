@@ -59,7 +59,7 @@ export function SignInScreen() {
 
         {!configured && (
           <div className="mb-4 rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-            App chưa được cấu hình Supabase. Thiếu VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY.
+            Ứng dụng chưa sẵn sàng để đăng nhập. Hãy cài lại phiên bản mới nhất hoặc liên hệ hỗ trợ.
           </div>
         )}
 

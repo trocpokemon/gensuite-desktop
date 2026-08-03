@@ -61,6 +61,12 @@ export function errorMessage(err: unknown): string {
   if (isNetworkError(msg)) {
     return 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng (hoặc tường lửa/VPN) rồi thử lại.';
   }
+  if (msg.includes('NARRATION_SOURCE_INVALID')) {
+    return 'Video nguồn không còn khả dụng. Hãy chọn lại video rồi thử lại.';
+  }
+  if (msg.includes('NARRATION_ANALYSIS_FAILED')) {
+    return 'Chưa thể phân tích video này. Hãy kiểm tra kết nối và thử lại.';
+  }
   // Dependency errors can cross the IPC boundary. Never expose implementation
   // names, internal paths, raw command output, or stack-like diagnostics in UI.
   if (/yt-?dlp|resources[\\/]ytdlp|source-%\(id\)/i.test(msg)) {

@@ -14,13 +14,19 @@ const friendlyAuthError = (error: unknown): string => {
   );
   const lower = message.toLowerCase();
   if (lower.includes('unsupported provider') || lower.includes('provider not enabled')) {
-    return 'Đăng nhập Google chưa được bật. Hãy bật Google provider trong Supabase.';
+    return 'Đăng nhập bằng Google chưa sẵn sàng. Vui lòng chọn cách khác hoặc liên hệ hỗ trợ.';
   }
   if (lower.includes('invalid login credentials')) return 'Email hoặc mật khẩu không đúng.';
   if (lower.includes('email not confirmed')) return 'Vui lòng xác nhận email trước (kiểm tra hộp thư).';
   if (lower.includes('user already registered')) return 'Tài khoản đã tồn tại.';
-  if (lower.includes('supabase')) return 'App chưa được cấu hình Supabase (thiếu URL/anon key).';
-  return message;
+  if (lower.includes('supabase')) return 'Ứng dụng chưa sẵn sàng để đăng nhập. Hãy cài lại phiên bản mới nhất hoặc liên hệ hỗ trợ.';
+  if (/failed to fetch|network ?error|networkerror|load failed|fetch failed/i.test(lower)) {
+    return 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng rồi thử lại.';
+  }
+  if (/too many requests|rate limit/i.test(lower)) {
+    return 'Bạn đã thử quá nhiều lần. Vui lòng chờ một lúc rồi thử lại.';
+  }
+  return 'Không thể đăng nhập lúc này. Vui lòng thử lại sau.';
 };
 
 interface AuthStore {
