@@ -1,5 +1,6 @@
 import { isPublicAppError } from '../shared/appErrors';
 import type { AppErrorCode, PublicAppError } from '../shared/appErrors';
+import { notifyIfInsufficientCredits } from '../store/creditPromptStore';
 
 const PREFIX = 'MISSING_KEY:';
 const AUTH_REQUIRED = 'AUTH_REQUIRED:gensuite';
@@ -232,6 +233,7 @@ function isSafeLegacyUserMessage(message: string): boolean {
 }
 
 export function errorMessage(err: unknown): string {
+  if (notifyIfInsufficientCredits(err)) return 'Tài khoản không đủ credits để thực hiện thao tác này.';
   if (isPublicAppError(err)) return structuredErrorMessage(err);
   const msg = unwrapIpcMessage(rawErrorMessage(err));
   if (msg.includes(AUTH_REQUIRED)) {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AudioLines, BookOpenText, Check, Clapperboard, FileVideo, Film, Home, Languages, LayoutTemplate, LogOut, Mic, Play, Subtitles, Wand2 } from 'lucide-react';
 import { TitleBar } from './components/TitleBar';
-import { UpdateBanner } from './components/UpdateBanner';
+import { GlobalDialogs } from './components/GlobalDialogs';
 import { ProjectHome } from './components/ProjectHome';
 import { SignInScreen } from './auth/SignInScreen';
 import { SettingsPanel } from './settings/SettingsPanel';
@@ -18,6 +18,7 @@ import { useTopicStore } from './store/topicStore';
 import { useAuthStore } from './store/authStore';
 import { useEntitlementStore } from './store/entitlementStore';
 import type { StepId } from './shared/types';
+import { useUpdateStore } from './store/updateStore';
 
 const TOPIC_STEPS: Array<{ id: StepId; label: string; icon: typeof Film }> = [
   { id: 'topic', label: '1. Chủ đề', icon: LayoutTemplate },
@@ -57,6 +58,7 @@ export default function App() {
   const signOut = useAuthStore((state) => state.signOut);
   const loadEntitlements = useEntitlementStore((state) => state.load);
   const resetEntitlements = useEntitlementStore((state) => state.reset);
+  const initializeUpdater = useUpdateStore((state) => state.initialize);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [localizeSetupStep, setLocalizeSetupStep] = useState<LocalizeSetupStep>('source');
   const [localizeNavigationLocked, setLocalizeNavigationLocked] = useState(false);
@@ -80,11 +82,18 @@ export default function App() {
       : project.topic?.name ?? 'Chưa chọn chủ đề';
 
   useEffect(() => { initAuth(); }, [initAuth]);
+  useEffect(() => { initializeUpdater(); }, [initializeUpdater]);
   useEffect(() => { hydrate(); loadSettings(); loadTopics(); }, [hydrate, loadSettings, loadTopics]);
   useEffect(() => {
     if (authStatus === 'signedIn') void loadEntitlements();
     else if (authStatus === 'signedOut') resetEntitlements();
   }, [authStatus, loadEntitlements, resetEntitlements]);
+  useEffect(() => {
+    if (authStatus !== 'signedIn') return undefined;
+    const refreshCredits = () => { void loadEntitlements(); };
+    window.addEventListener('focus', refreshCredits);
+    return () => window.removeEventListener('focus', refreshCredits);
+  }, [authStatus, loadEntitlements]);
   useEffect(() => {
     setLocalizeSetupStep('source');
     setLocalizeSourceReady(Boolean(project.sourceVideoPath));
@@ -94,6 +103,7 @@ export default function App() {
   return (
     <div className="app-background flex h-full flex-col bg-background text-text">
       <TitleBar onOpenSettings={authStatus === 'signedIn' ? () => setSettingsOpen(true) : undefined} />
+      <GlobalDialogs />
       {authStatus !== 'signedIn' ? (
         authStatus === 'loading' ? (
           <div className="flex flex-1 items-center justify-center text-text/50">Đang kiểm tra đăng nhập…</div>
@@ -102,7 +112,6 @@ export default function App() {
         )
       ) : (
         <>
-          <UpdateBanner />
           {!hydrated ? <div className="flex flex-1 items-center justify-center text-text/50">Đang tải thư viện dự án…</div> : home ? <ProjectHome onOpenSettings={() => setSettingsOpen(true)} /> : (
             <div className="flex min-h-0 flex-1">
               <nav className="flex w-64 shrink-0 flex-col border-r border-white/10 bg-[#1c1c1d] px-3 pb-4 pt-5 shadow-[8px_0_32px_rgba(0,0,0,0.08)]">

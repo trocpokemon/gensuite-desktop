@@ -1,6 +1,7 @@
-import { LogOut, Minus, Settings as SettingsIcon, Square, X } from 'lucide-react';
+import { Loader2, LogOut, Minus, RefreshCw, Settings as SettingsIcon, Square, X } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import { useEntitlementStore, type AccountTier } from '../store/entitlementStore';
+import { useUpdateStore } from '../store/updateStore';
 
 const TIER_LABELS: Record<AccountTier, string> = {
   free: 'Free', starter: 'Starter', basic: 'Basic', standard: 'Standard', pro: 'Pro',
@@ -15,6 +16,8 @@ export function TitleBar({ onOpenSettings }: { onOpenSettings?: () => void }) {
   const entitlementStatus = useEntitlementStore((state) => state.status);
   const tier = useEntitlementStore((state) => state.tier);
   const credits = useEntitlementStore((state) => state.credits);
+  const updateStatus = useUpdateStore((state) => state.status);
+  const openUpdateChecker = useUpdateStore((state) => state.openChecker);
 
   return (
     <div className="titlebar drag flex h-10 shrink-0 items-center justify-between border-b border-white/[0.07] bg-[#171718]/95 px-4 backdrop-blur-xl">
@@ -38,6 +41,16 @@ export function TitleBar({ onOpenSettings }: { onOpenSettings?: () => void }) {
             </button>
           </div>
         )}
+        <button
+          type="button"
+          onClick={openUpdateChecker}
+          disabled={updateStatus.kind === 'checking'}
+          className="grid h-7 w-9 place-items-center rounded-md text-white/45 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 disabled:cursor-wait disabled:opacity-60"
+          aria-label={updateStatus.kind === 'checking' ? 'Đang kiểm tra cập nhật' : 'Kiểm tra cập nhật'}
+          title={updateStatus.kind === 'checking' ? 'Đang kiểm tra cập nhật…' : 'Kiểm tra cập nhật'}
+        >
+          {updateStatus.kind === 'checking' ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+        </button>
         {onOpenSettings && (
           <button
             onClick={onOpenSettings}

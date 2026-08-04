@@ -26,6 +26,22 @@ async function visit(directory) {
 
 await visit(sourceRoot);
 
+const appSource = await readFile(path.join(sourceRoot, 'App.tsx'), 'utf8');
+const titleBarSource = await readFile(path.join(sourceRoot, 'components', 'TitleBar.tsx'), 'utf8');
+const dialogsSource = await readFile(path.join(sourceRoot, 'components', 'GlobalDialogs.tsx'), 'utf8');
+if (!appSource.includes('<GlobalDialogs />')) {
+  violations.push('App.tsx phải gắn lớp popup dùng chung ở cấp ứng dụng.');
+}
+if (!titleBarSource.includes('Kiểm tra cập nhật')) {
+  violations.push('Thanh tiêu đề phải có hành động kiểm tra cập nhật cạnh cài đặt.');
+}
+if (!dialogsSource.includes('https://gensuite.site/app/pricing')) {
+  violations.push('Thông báo thiếu credits phải dẫn tới trang chọn gói chính thức.');
+}
+if (!dialogsSource.includes('role=') && !(await readFile(path.join(sourceRoot, 'components', 'AppModal.tsx'), 'utf8')).includes('role="dialog"')) {
+  violations.push('Popup dùng chung phải khai báo vai trò dialog hỗ trợ trợ năng.');
+}
+
 if (violations.length) {
   console.error(`Kiểm tra tính đồng bộ giao diện thất bại:\n${violations.map((item) => `- ${item}`).join('\n')}`);
   process.exit(1);

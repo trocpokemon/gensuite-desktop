@@ -75,8 +75,8 @@ function probeAudioDuration(audioPath: string): Promise<number> {
   });
 }
 
-function narrationCoverage(scenes: Scene[], density: NarrationDensity) {
-  const timelineEnd = Math.max(0, ...scenes.map((scene) => scene.sourceEnd ?? 0));
+function narrationCoverage(scenes: Scene[], density: NarrationDensity, sourceDurationSec: number) {
+  const timelineEnd = Math.max(0, sourceDurationSec, ...scenes.map((scene) => scene.sourceEnd ?? 0));
   const intervals = scenes.flatMap((scene) => {
     if (!scene.audioPath || !scene.audioDuration || scene.sourceStart == null) return [];
     return [{ start: scene.sourceStart, end: Math.min(scene.sourceEnd ?? timelineEnd, scene.sourceStart + scene.audioDuration) }];
@@ -90,12 +90,17 @@ function narrationCoverage(scenes: Scene[], density: NarrationDensity) {
   const spoken = merged.reduce((total, item) => total + item.end - item.start, 0);
   let cursor = 0;
   let longGaps = 0;
+  let largestGap = 0;
   for (const item of merged) {
-    if (item.start - cursor > MAX_GAP_SECONDS[density]) longGaps += 1;
+    const gap = Math.max(0, item.start - cursor);
+    if (gap > MAX_GAP_SECONDS[density]) longGaps += 1;
+    largestGap = Math.max(largestGap, gap);
     cursor = Math.max(cursor, item.end);
   }
-  if (timelineEnd - cursor > MAX_GAP_SECONDS[density]) longGaps += 1;
-  return { percent: timelineEnd ? Math.round((spoken / timelineEnd) * 100) : 0, longGaps, timelineEnd, intervals: merged };
+  const tailGap = Math.max(0, timelineEnd - cursor);
+  if (tailGap > MAX_GAP_SECONDS[density]) longGaps += 1;
+  largestGap = Math.max(largestGap, tailGap);
+  return { percent: timelineEnd ? Math.round((spoken / timelineEnd) * 100) : 0, longGaps, largestGap, tailGap, timelineEnd, intervals: merged };
 }
 
 interface NarrationStudioProps {
@@ -139,7 +144,10 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
   const narrationLanguage = project.settings.narrationLanguage;
   const narrationAudience = project.settings.narrationAudience;
   const narrationDensity = project.settings.narrationDensity;
-  const coverage = useMemo(() => narrationCoverage(project.scenes, narrationDensity), [project.scenes, narrationDensity]);
+  const coverage = useMemo(
+    () => narrationCoverage(project.scenes, narrationDensity, (project.narrationWorkflow?.sourceDurationMs ?? 0) / 1000),
+    [narrationDensity, project.narrationWorkflow?.sourceDurationMs, project.scenes],
+  );
   const outputChoiceChanged = hasAnalysis && (
     project.narrationWorkflow?.targetLanguage !== narrationLanguage
     || project.narrationWorkflow?.targetAudience !== narrationAudience
@@ -252,6 +260,7 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
         shotManifestPath: result.shotManifestPath,
         semanticManifestPath: result.semanticManifestPath,
         narrationPlanPath: result.narrationPlanPath,
+        sourceDurationMs: result.durationMs,
         summary: result.summary,
         shotCount: result.shots.length,
         targetLanguage: narrationLanguage,
@@ -410,6 +419,23 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
 
   const renderVideo = async (kind: 'preview' | 'final') => {
     if (renderKind || voiceBusy || !project.sourceVideoPath || !allVoiced) return;
+    const currentProject = useProjectStore.getState().project;
+    const sourceDurationSec = (currentProject.narrationWorkflow?.sourceDurationMs ?? 0) / 1000;
+    if (!(sourceDurationSec > 0)) {
+      setError('Dự án này chưa có dữ liệu đầy đủ để kiểm tra phần cuối video. Hãy phân tích lại video trước khi tạo.');
+      return;
+    }
+    const currentCoverage = narrationCoverage(currentProject.scenes, currentProject.settings.narrationDensity, sourceDurationSec);
+    const largeGapLimit = Math.max(15, MAX_GAP_SECONDS[currentProject.settings.narrationDensity] * 3);
+    const tailGapLimit = Math.max(12, MAX_GAP_SECONDS[currentProject.settings.narrationDensity] * 2);
+    if (currentCoverage.tailGap > tailGapLimit) {
+      setError('Nội dung thuyết minh đang thiếu một đoạn dài ở cuối video. Hãy phân tích lại video trước khi tạo.');
+      return;
+    }
+    if (currentCoverage.largestGap > largeGapLimit) {
+      setError('Nội dung thuyết minh còn bỏ trống một phần dài của video. Hãy phân tích lại video trước khi tạo.');
+      return;
+    }
     const ordered = [...project.scenes].sort((a, b) => (a.sourceStart ?? 0) - (b.sourceStart ?? 0));
     const unsafe = ordered.filter((scene, index) => {
       const start = scene.sourceStart ?? 0;

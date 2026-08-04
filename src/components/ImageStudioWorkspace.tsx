@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { useEntitlementStore } from '../store/entitlementStore';
 import { useProjectStore, uid } from '../store/projectStore';
+import { errorMessage } from '../providers/errors';
 import {
   createImageCharacter, createImageProject, deleteImageCharacter, deleteImageGeneration,
   deleteImageProject, getImageJob, listImageCharacters, listImageProjects, listProjectImages,
@@ -40,9 +41,8 @@ const listeners = new Set<() => void>();
 const notify = () => listeners.forEach((listener) => listener());
 
 const errorText = (error: unknown, fallback: string) => {
-  const message = error instanceof Error ? error.message : '';
-  if (message.startsWith('AUTH_REQUIRED:')) return 'Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại.';
-  return message || fallback;
+  const message = errorMessage(error);
+  return message === 'Đã xảy ra lỗi khi xử lý. Vui lòng thử lại.' ? fallback : message;
 };
 
 const fileToReference = (file: File): Promise<ReferenceImage> => new Promise((resolve, reject) => {

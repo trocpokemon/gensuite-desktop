@@ -24,6 +24,7 @@ import { readSettings } from './settings';
 
 const MODEL = 'gemini-3.1-flash-lite';
 const MAX_SHOTS = 240;
+const MAX_GAPS_PER_REQUEST = 16;
 
 const DENSITY_RULES: Record<NarrationDensity, { maxShotMs: number; maxGapMs: number; targetCoverage: number }> = {
   sparse: { maxShotMs: 14_000, maxGapMs: 10_000, targetCoverage: 0.45 },
@@ -448,30 +449,53 @@ function findNarrationGaps(cues: NarrationCue[], shots: ShotBoundary[], duration
     cursor = Math.max(cursor, interval.endMs);
   }
   if (durationMs - cursor > maxGapMs) raw.push({ startMs: cursor, endMs: durationMs });
-  return raw.slice(0, 24).map((gap) => ({
+  const maximumWindowMs = Math.max(2_000, maxGapMs * 2);
+  const windows = raw.flatMap((gap) => {
+    const count = Math.max(1, Math.ceil((gap.endMs - gap.startMs) / maximumWindowMs));
+    return Array.from({ length: count }, (_unused, index) => ({
+      startMs: Math.round(gap.startMs + ((gap.endMs - gap.startMs) * index) / count),
+      endMs: Math.round(gap.startMs + ((gap.endMs - gap.startMs) * (index + 1)) / count),
+    }));
+  });
+  return windows.map((gap) => ({
     ...gap,
     shotNumbers: shots.flatMap((shot, index) => shot.endMs > gap.startMs && shot.startMs < gap.endMs ? [index + 1] : []),
   })).filter((gap) => gap.shotNumbers.length > 0);
 }
 
-async function fillNarrationGaps(
+interface NarrationGapFill {
+  gapIndex: number;
+  description: string;
+  narration: string;
+}
+
+interface IndexedNarrationGap extends NarrationGap {
+  gapIndex: number;
+}
+
+async function requestNarrationGapFills(
   apiKey: string,
   file: FileRecord,
   mime: string,
-  gaps: NarrationGap[],
+  gaps: IndexedNarrationGap[],
   existingCues: NarrationCue[],
   language: NarrationLanguage,
   audience: NarrationAudience,
-): Promise<Array<{ gapIndex: number; description: string; narration: string }>> {
+): Promise<NarrationGapFill[]> {
   if (!file.uri || !gaps.length) return [];
-  const context = existingCues.map((cue) => ({ startMs: cue.preferredStartMs, endMs: cue.windowEndMs, text: cue.text }));
+  const rangeStart = Math.min(...gaps.map((gap) => gap.startMs));
+  const rangeEnd = Math.max(...gaps.map((gap) => gap.endMs));
+  const nearbyContext = existingCues
+    .filter((cue) => cue.windowEndMs >= rangeStart - 15_000 && cue.preferredStartMs <= rangeEnd + 15_000)
+    .slice(0, 40)
+    .map((cue) => ({ startMs: cue.preferredStartMs, endMs: cue.windowEndMs, text: cue.text }));
   const prompt = [
     `Bổ sung lời bình bằng ${LANGUAGE_LABELS[language]} tự nhiên cho khán giả tại ${AUDIENCE_LABELS[audience]}.`,
     'Hãy xem chính xác từng khoảng thời gian được liệt kê, tìm hành động hoặc chi tiết hình ảnh đang bị bỏ lỡ và viết một câu nối tiếp mạch review.',
-    'Mỗi khoảng phải có một kết quả. Không lặp lại lời đã có, không bịa thông tin ngoài hình ảnh, không dùng ngôn ngữ xuất hiện trong video.',
+    'Mỗi khoảng phải có đúng một kết quả với nguyên gapIndex. Không lặp lại lời đã có, không bịa thông tin ngoài hình ảnh, không dùng ngôn ngữ xuất hiện trong video.',
     'Câu phải vừa khoảng thời gian với tốc độ tối đa 2.7 từ mỗi giây và chừa khoảng nghỉ ngắn.',
-    `Các khoảng cần bổ sung: ${JSON.stringify(gaps.map((gap, gapIndex) => ({ gapIndex, ...gap, availableMs: gap.endMs - gap.startMs })))}`,
-    `Lời đã có để tránh lặp: ${JSON.stringify(context)}`,
+    `Các khoảng cần bổ sung: ${JSON.stringify(gaps.map((gap) => ({ ...gap, availableMs: gap.endMs - gap.startMs })))}`,
+    `Lời lân cận để tránh lặp: ${JSON.stringify(nearbyContext)}`,
   ].join('\n');
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
     method: 'POST',
@@ -502,14 +526,46 @@ async function fillNarrationGaps(
   try {
     const fills = (JSON.parse(raw) as { fills?: unknown }).fills;
     if (!Array.isArray(fills)) return [];
+    const expectedIndexes = new Set(gaps.map((gap) => gap.gapIndex));
     return fills.flatMap((item) => {
       const row = item as { gapIndex?: unknown; description?: unknown; narration?: unknown };
       const gapIndex = Number(row.gapIndex);
       const narration = String(row.narration ?? '').replace(/\s+/g, ' ').trim();
-      if (!Number.isInteger(gapIndex) || !gaps[gapIndex] || !narration) return [];
+      if (!Number.isInteger(gapIndex) || !expectedIndexes.has(gapIndex) || !narration) return [];
       return [{ gapIndex, description: String(row.description ?? '').trim() || 'Chi tiết bổ sung', narration }];
     });
-  } catch { return []; }
+  } catch {
+    return [];
+  }
+}
+
+async function fillNarrationGaps(
+  apiKey: string,
+  file: FileRecord,
+  mime: string,
+  gaps: NarrationGap[],
+  existingCues: NarrationCue[],
+  language: NarrationLanguage,
+  audience: NarrationAudience,
+): Promise<NarrationGapFill[]> {
+  if (!file.uri || !gaps.length) return [];
+  const completed = new Map<number, NarrationGapFill>();
+  for (let offset = 0; offset < gaps.length; offset += MAX_GAPS_PER_REQUEST) {
+    const batch = gaps.slice(offset, offset + MAX_GAPS_PER_REQUEST)
+      .map((gap, index) => ({ ...gap, gapIndex: offset + index }));
+    const firstAttempt = await requestNarrationGapFills(apiKey, file, mime, batch, existingCues, language, audience);
+    firstAttempt.forEach((fill) => completed.set(fill.gapIndex, fill));
+
+    const missing = batch.filter((gap) => !completed.has(gap.gapIndex));
+    if (missing.length) {
+      const retry = await requestNarrationGapFills(apiKey, file, mime, missing, existingCues, language, audience);
+      retry.forEach((fill) => completed.set(fill.gapIndex, fill));
+    }
+    if (batch.some((gap) => !completed.has(gap.gapIndex))) {
+      throw new Error('NARRATION_ANALYSIS_FAILED');
+    }
+  }
+  return [...completed.values()].sort((left, right) => left.gapIndex - right.gapIndex);
 }
 
 function appendGapFills(
@@ -669,7 +725,7 @@ export function registerNarrationIpc(): void {
         writeJsonAtomic(narrationPlanPath, { schemaVersion: 1, sourceFingerprint, density, cues }),
       ]);
       emit(win, projectId, 'complete', 100);
-      return { sourceFingerprint, summary, shots, beats, cues, shotManifestPath, semanticManifestPath, narrationPlanPath };
+      return { durationMs, sourceFingerprint, summary, shots, beats, cues, shotManifestPath, semanticManifestPath, narrationPlanPath };
     } catch (error) {
       if (error instanceof Error && (error.message.startsWith('MISSING_KEY:') || error.message.startsWith('NARRATION_'))) throw error;
       throw new Error('NARRATION_ANALYSIS_FAILED');

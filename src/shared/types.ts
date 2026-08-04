@@ -98,6 +98,8 @@ export interface NarrationWorkflowState {
   narrationPlanPath?: string;
   qualityReportPath?: string;
   previewPath?: string;
+  /** Probed source length used to detect missing narration at the end after resume. */
+  sourceDurationMs?: number;
   /** Short user-facing synopsis kept with the project for fast resume. */
   summary?: string;
   shotCount?: number;
@@ -124,6 +126,7 @@ export interface NarrationProgress {
 }
 
 export interface NarrationAnalyzeResult {
+  durationMs: number;
   sourceFingerprint: string;
   summary: string;
   shots: ShotBoundary[];
@@ -703,7 +706,7 @@ export interface AuthCallbackPayload {
 /** Auto-update lifecycle forwarded from electron-updater to the renderer. */
 export type UpdaterStatus =
   | { kind: 'checking' }
-  | { kind: 'available'; version: string }
+  | { kind: 'available'; version: string; manualDownload?: boolean }
   | { kind: 'not-available' }
   | { kind: 'downloading'; percent: number }
   | { kind: 'downloaded'; version: string }

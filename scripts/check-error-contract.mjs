@@ -23,11 +23,26 @@ function evaluateCommonJs(source, requireModule) {
 
 const sharedPath = path.resolve('src/shared/appErrors.ts');
 const errorsPath = path.resolve('src/providers/errors.ts');
+const creditPromptPath = path.resolve('src/store/creditPromptStore.ts');
 const shared = evaluateCommonJs(await compile(sharedPath), (name) => {
   throw new Error(`Unexpected dependency in shared error contract: ${name}`);
 });
+const createStore = (factory) => {
+  let state;
+  const set = (next) => { state = { ...state, ...(typeof next === 'function' ? next(state) : next) }; };
+  const get = () => state;
+  state = factory(set, get);
+  const hook = () => state;
+  hook.getState = get;
+  return hook;
+};
+const creditPrompt = evaluateCommonJs(await compile(creditPromptPath), (name) => {
+  if (name === 'zustand') return { create: createStore };
+  throw new Error(`Unexpected dependency in credit prompt: ${name}`);
+});
 const errors = evaluateCommonJs(await compile(errorsPath), (name) => {
   if (name === '../shared/appErrors') return shared;
+  if (name === '../store/creditPromptStore') return creditPrompt;
   throw new Error(`Unexpected dependency in error presentation: ${name}`);
 });
 
@@ -110,6 +125,10 @@ const cancellationRecognized = errors.isCancellationError(new Error('voice:cance
 const cancellationDisplayed = errors.errorMessage(new Error('voice:cancelled'));
 const unknownMissingKeyAccepted = errors.missingKeyService(new Error('MISSING_KEY:C:\\private\\secret'));
 const unknownServiceLabel = errors.serviceLabel('C:\\private\\secret');
+const creditsMessage = errors.errorMessage(new Error('INSUFFICIENT_CREDITS'));
+const creditsPromptOpened = creditPrompt.useCreditPromptStore.getState().open;
+creditPrompt.useCreditPromptStore.getState().close();
+const unrelatedOpenedCreditsPrompt = creditPrompt.notifyIfInsufficientCredits(new Error('network unavailable'));
 
 const missingStructuredPresenters = Object.entries(shared.APP_ERROR_DEFINITIONS).filter(([code, definition]) => {
   const message = errors.errorMessage({
@@ -160,6 +179,9 @@ if (!cancellationRecognized || /voice:cancelled|edgetts:killed|gensuite:cancelle
 }
 if (unknownMissingKeyAccepted || /C:\\private/i.test(unknownServiceLabel)) {
   violations.push('Tên dịch vụ ngoài allowlist có thể làm lộ dữ liệu qua thông báo thiếu khóa.');
+}
+if (!creditsPromptOpened || !creditsMessage.includes('không đủ credits') || unrelatedOpenedCreditsPrompt) {
+  violations.push('Lỗi thiếu credits chưa mở đúng thông báo bổ sung credits hoặc nhận nhầm lỗi khác.');
 }
 if (missingStructuredPresenters.length) {
   violations.push(`Thiếu nội dung hiển thị cho ${missingStructuredPresenters.length} mã lỗi có cấu trúc.`);
