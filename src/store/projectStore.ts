@@ -457,13 +457,13 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
       commit({
         ...current,
         sourceVideoPath,
-        ...(changed ? { transcript: undefined, scenes: [], dubbedVideoPath: undefined } : {}),
+        ...(changed ? { transcript: undefined, transcriptionVersion: undefined, scenes: [], dubbedVideoPath: undefined } : {}),
         narrationWorkflow: current.kind === 'narrate'
           ? newNarrationWorkflow('source-ready')
           : current.narrationWorkflow,
       });
     },
-    setTranscript: (segments) => commit({ ...get().project, transcript: segments }),
+    setTranscript: (segments) => commit({ ...get().project, transcript: segments, transcriptionVersion: 2 }),
     setLanguages: (patch) => commit({ ...get().project, ...patch }),
     setDubbedVideo: (dubbedVideoPath) => commit({ ...get().project, dubbedVideoPath }),
     patchNarrationWorkflow: (patch) => {

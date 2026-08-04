@@ -34,12 +34,13 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
   constructor(private feature?: GenSuiteFeature) {}
 
   async transcribe(req: TranscribeRequest): Promise<TranscriptSegment[]> {
-    const wavPath = await window.gensuite.whisper.extract({
+    const extracted = await window.gensuite.whisper.extract({
       projectId: req.projectId,
       sourcePath: req.sourcePath,
     });
+    if (!extracted.ok) throw extracted.error;
 
-    const url = localFileUrl(wavPath);
+    const url = localFileUrl(extracted.value);
     if (!url) throw new Error('Không đọc được file WAV đã trích.');
     const wavResp = await fetch(url);
     if (!wavResp.ok) throw new Error('Không đọc được file WAV đã trích.');

@@ -26,6 +26,7 @@ import type {
   WhisperModelStatusArgs,
   WhisperModelDownloadArgs,
   WhisperProgress,
+  TranscriptSegment,
   AuthCallbackPayload,
   UpdaterStatus,
   NarrationAnalyzeArgs,
@@ -108,6 +109,19 @@ function isCapCutTtsPreviewResult(value: unknown): value is CapCutTtsPreviewResu
     && value.audioBase64.length <= 70 * 1024 * 1024
     && value.audioBase64.length % 4 === 0
     && /^[A-Za-z0-9+/]+={0,2}$/.test(value.audioBase64);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isTranscriptSegments(value: unknown): value is TranscriptSegment[] {
+  return Array.isArray(value) && value.every((item) => isRecord(item)
+    && Object.keys(item).every((key) => ['id', 'start', 'end', 'text'].includes(key))
+    && typeof item.id === 'string' && item.id.length > 0
+    && typeof item.start === 'number' && Number.isFinite(item.start) && item.start >= 0
+    && typeof item.end === 'number' && Number.isFinite(item.end) && item.end > item.start
+    && typeof item.text === 'string' && item.text.trim().length > 0);
 }
 
 const bridge: GensuiteBridge = {
@@ -208,8 +222,8 @@ const bridge: GensuiteBridge = {
     saveCopy: (args) => ipcRenderer.invoke('files:saveCopy', args),
   },
   whisper: {
-    extract: (args: WhisperExtractArgs) => ipcRenderer.invoke('whisper:extract', args),
-    transcribe: (args: WhisperTranscribeArgs) => ipcRenderer.invoke('whisper:transcribe', args),
+    extract: (args: WhisperExtractArgs) => invokeStructured('whisper:extract', args, isNonEmptyString),
+    transcribe: (args: WhisperTranscribeArgs) => invokeStructured('whisper:transcribe', args, isTranscriptSegments),
     align: (args: WhisperAlignArgs) => ipcRenderer.invoke('whisper:align', args),
     modelStatus: (args: WhisperModelStatusArgs) => ipcRenderer.invoke('whisper:modelStatus', args),
     downloadModel: (args: WhisperModelDownloadArgs) => ipcRenderer.invoke('whisper:downloadModel', args),

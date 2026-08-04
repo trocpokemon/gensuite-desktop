@@ -1,7 +1,7 @@
 {
   "name": "gensuite-desktop",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "GenSuite Desktop - topic-driven YouTube production studio (Content, Storyboard, Voice, Video)",
   "author": "GenSuite",
   "main": "dist-electron/main.js",
@@ -12,10 +12,11 @@
     "voice:check": "node scripts/check-voice-batching.mjs",
     "video:check": "node scripts/check-video-watchdog.mjs",
     "narration:check": "node scripts/check-narration-tail-coverage.mjs",
+    "transcription:check": "node scripts/check-transcription-chunking.mjs",
     "update:check": "node scripts/check-update-watchdog.mjs",
-    "build": "npm run ui:check && npm run errors:check && npm run voice:check && npm run video:check && npm run narration:check && npm run update:check && tsc -p tsconfig.node.json --noEmit && tsc --noEmit && vite build",
+    "build": "npm run ui:check && npm run errors:check && npm run voice:check && npm run video:check && npm run narration:check && npm run transcription:check && npm run update:check && tsc -p tsconfig.node.json --noEmit && tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "npm run ui:check && npm run errors:check && npm run voice:check && npm run video:check && npm run narration:check && npm run update:check && tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "npm run ui:check && npm run errors:check && npm run voice:check && npm run video:check && npm run narration:check && npm run transcription:check && npm run update:check && tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "dist": "vite build && electron-builder",
     "release": "vite build && electron-builder --publish always"
   },

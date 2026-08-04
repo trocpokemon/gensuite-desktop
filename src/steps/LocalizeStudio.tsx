@@ -282,6 +282,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       && store.project.sourceVideoPath === input.sourcePath
       && store.project.sourceLanguage === selectedSourceLanguage
       && store.project.targetLanguage === targetLanguage
+      && store.project.transcriptionVersion === 2
       && store.project.scenes.some((scene) => typeof scene.sourceStart === 'number' && typeof scene.sourceEnd === 'number');
     if (alreadyPrepared) {
       srcRef.current = input.sourcePath!;
@@ -296,7 +297,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     if (input.url) setUrl('');
 
     setStage('transcribe');
-    const transcriber = getTranscriptionProvider('local', keys, 'localize-cloud');
+    const transcriber = getTranscriptionProvider(settings.transcriptionEngine, keys, 'localize-cloud');
     const segments = await transcriber.transcribe({
       projectId, sourcePath: src, model: settings.whisperModel, language: selectedSourceLanguage,
     });

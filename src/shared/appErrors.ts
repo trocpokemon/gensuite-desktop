@@ -1,6 +1,7 @@
 export type AppErrorStage =
   | 'desktop'
   | 'source'
+  | 'speech-recognition'
   | 'voice'
   | 'video-preparation'
   | 'video-completion'
@@ -32,6 +33,26 @@ export interface AppErrorDefinition {
  * cannot cross the desktop boundary.
  */
 export const APP_ERROR_DEFINITIONS = {
+  TRANSCRIPTION_INPUT_REQUIRED: { stage: 'speech-recognition', cause: 'missing-input', retryable: false },
+  TRANSCRIPTION_SOURCE_UNAVAILABLE: { stage: 'speech-recognition', cause: 'file-not-found', retryable: false },
+  TRANSCRIPTION_SOURCE_PERMISSION_DENIED: { stage: 'speech-recognition', cause: 'permission', retryable: false },
+  TRANSCRIPTION_SOURCE_UNREADABLE: { stage: 'speech-recognition', cause: 'invalid-media', retryable: false },
+  TRANSCRIPTION_AUDIO_PREPARATION_FAILED: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
+  TRANSCRIPTION_AUDIO_PREPARATION_TIMEOUT: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
+  TRANSCRIPTION_AUDIO_RECOVERY_FAILED: { stage: 'speech-recognition', cause: 'processing-failed', retryable: false },
+  TRANSCRIPTION_COMPONENT_UNAVAILABLE: { stage: 'speech-recognition', cause: 'component-unavailable', retryable: false },
+  TRANSCRIPTION_MODEL_UNAVAILABLE: { stage: 'speech-recognition', cause: 'component-unavailable', retryable: true },
+  TRANSCRIPTION_PROCESS_START_DENIED: { stage: 'speech-recognition', cause: 'permission', retryable: true },
+  TRANSCRIPTION_PROCESS_START_FAILED: { stage: 'speech-recognition', cause: 'start-failed', retryable: true },
+  TRANSCRIPTION_MEMORY_LIMIT: { stage: 'speech-recognition', cause: 'input-limit', retryable: true },
+  TRANSCRIPTION_CHUNK_FAILED: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
+  TRANSCRIPTION_CHUNK_TIMEOUT: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
+  TRANSCRIPTION_RESULT_INVALID: { stage: 'speech-recognition', cause: 'invalid-media', retryable: true },
+  TRANSCRIPTION_NO_SPEECH: { stage: 'speech-recognition', cause: 'invalid-media', retryable: false },
+  TRANSCRIPTION_TEMP_PERMISSION_DENIED: { stage: 'speech-recognition', cause: 'permission', retryable: true },
+  TRANSCRIPTION_TEMP_STORAGE_FULL: { stage: 'speech-recognition', cause: 'storage-full', retryable: true },
+  TRANSCRIPTION_TEMP_UNAVAILABLE: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
+  TRANSCRIPTION_UNEXPECTED: { stage: 'speech-recognition', cause: 'unexpected', retryable: true },
   VIDEO_SOURCE_REQUIRED: { stage: 'source', cause: 'missing-input', retryable: false },
   VIDEO_SEGMENTS_EMPTY: { stage: 'voice', cause: 'missing-input', retryable: false },
   VIDEO_SOURCE_UNAVAILABLE: { stage: 'source', cause: 'file-not-found', retryable: false },

@@ -413,6 +413,8 @@ export interface ProjectState {
   targetLanguage?: string;
   /** Localize projects: raw timed transcription before translation. */
   transcript?: TranscriptSegment[];
+  /** Recognition pipeline revision used to invalidate incomplete legacy results. */
+  transcriptionVersion?: number;
   /** Localize projects: absolute path of the finished re-dubbed video. */
   dubbedVideoPath?: string;
   /** Silent-video narration workflow checkpoint and manifest references. */
@@ -695,6 +697,8 @@ export interface WhisperProgress {
   /** 0–100 where measurable (data download or recognized audio); omitted for indeterminate work. */
   percent?: number;
   model?: WhisperModelName;
+  chunkNumber?: number;
+  chunkCount?: number;
 }
 
 /** Tokens parsed from the `gensuite://auth-callback` deep-link after OAuth. */
@@ -813,9 +817,9 @@ export interface GensuiteBridge {
   };
   whisper: {
     /** Extract a 16kHz mono WAV for transcription. Returns the absolute WAV path. */
-    extract(args: WhisperExtractArgs): Promise<string>;
+    extract(args: WhisperExtractArgs): Promise<IpcResult<string>>;
     /** Run local whisper.cpp on the WAV. Returns timed segments. */
-    transcribe(args: WhisperTranscribeArgs): Promise<TranscriptSegment[]>;
+    transcribe(args: WhisperTranscribeArgs): Promise<IpcResult<TranscriptSegment[]>>;
     /** Measure word timing from synthesized voice audio for caption highlighting. */
     align(args: WhisperAlignArgs): Promise<SubtitleWordTiming[]>;
     modelStatus(args: WhisperModelStatusArgs): Promise<WhisperModelStatus>;

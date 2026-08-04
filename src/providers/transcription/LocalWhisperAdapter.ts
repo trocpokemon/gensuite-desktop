@@ -9,15 +9,18 @@ export class LocalWhisperAdapter implements ITranscriptionProvider {
   readonly isLocal = true;
 
   async transcribe(req: TranscribeRequest): Promise<TranscriptSegment[]> {
-    const wavPath = await window.gensuite.whisper.extract({
+    const extracted = await window.gensuite.whisper.extract({
       projectId: req.projectId,
       sourcePath: req.sourcePath,
     });
-    return window.gensuite.whisper.transcribe({
+    if (!extracted.ok) throw extracted.error;
+    const result = await window.gensuite.whisper.transcribe({
       projectId: req.projectId,
-      wavPath,
+      wavPath: extracted.value,
       model: req.model,
       language: req.language,
     });
+    if (!result.ok) throw result.error;
+    return result.value;
   }
 }

@@ -4,7 +4,6 @@ import { promises as fs } from 'node:fs';
 import { createWriteStream } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import log from 'electron-log';
 import { projectDir } from './project';
 import { ffmpegBinary } from './ffmpeg';
 import type {
@@ -19,6 +18,8 @@ import type {
   WhisperAlignArgs,
   SubtitleWordTiming,
 } from '../../src/shared/types';
+import type { IpcResult } from '../../src/shared/appErrors';
+import { AppFailure, appFailure, appFailureResult, appSuccess } from './appErrors';
 
 // Local speech recognition via the bundled whisper.cpp binary. GGML models are
 // NOT bundled (they are large); they are downloaded on demand into userData and
@@ -252,7 +253,90 @@ function languageCode(language?: string): string | undefined {
   return names[value] ?? value.split('-')[0];
 }
 
-const TRANSCRIPTION_STALL_TIMEOUT_MS = 10 * 60 * 1000;
+const TRANSCRIPTION_CORE_SECONDS = 60;
+const TRANSCRIPTION_OVERLAP_SECONDS = 2;
+const TRANSCRIPTION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
+const EXTRACTION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+export interface TranscriptionChunk {
+  coreStart: number;
+  coreEnd: number;
+  windowStart: number;
+  windowEnd: number;
+}
+
+export function buildTranscriptionChunks(duration: number): TranscriptionChunk[] {
+  if (!(duration > 0) || !Number.isFinite(duration)) return [];
+  const chunks: TranscriptionChunk[] = [];
+  for (let coreStart = 0; coreStart < duration; coreStart += TRANSCRIPTION_CORE_SECONDS) {
+    const coreEnd = Math.min(duration, coreStart + TRANSCRIPTION_CORE_SECONDS);
+    chunks.push({
+      coreStart,
+      coreEnd,
+      windowStart: Math.max(0, coreStart - TRANSCRIPTION_OVERLAP_SECONDS),
+      windowEnd: Math.min(duration, coreEnd + TRANSCRIPTION_OVERLAP_SECONDS),
+    });
+  }
+  return chunks;
+}
+
+export function mergeTranscriptionChunks(
+  rows: Array<{ chunk: TranscriptionChunk; segments: TranscriptSegment[] }>,
+  duration: number,
+): TranscriptSegment[] {
+  const owned: TranscriptSegment[] = [];
+  rows.forEach(({ chunk, segments }, chunkIndex) => {
+    // The recognizer's offset option returns absolute source timestamps. Keep
+    // them unchanged; guessing relative timestamps can shift an early segment
+    // in the second window by another full minute.
+    segments.forEach((segment) => {
+      const start = Math.max(0, Math.min(duration, segment.start));
+      const end = Math.max(start, Math.min(duration, segment.end));
+      const midpoint = (start + end) / 2;
+      const belongsToCore = midpoint >= chunk.coreStart
+        && (midpoint < chunk.coreEnd || (chunkIndex === rows.length - 1 && midpoint <= chunk.coreEnd));
+      if (belongsToCore && end > start && segment.text.trim()) owned.push({ ...segment, start, end, text: segment.text.trim() });
+    });
+  });
+  owned.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: TranscriptSegment[] = [];
+  for (const segment of owned) {
+    const previous = merged.at(-1);
+    const sameText = previous?.text.replace(/\s+/g, ' ').toLocaleLowerCase()
+      === segment.text.replace(/\s+/g, ' ').toLocaleLowerCase();
+    if (previous && sameText && Math.abs(previous.start - segment.start) < 1.5) {
+      previous.end = Math.max(previous.end, segment.end);
+      continue;
+    }
+    merged.push({ ...segment, id: `seg_${merged.length}` });
+  }
+  return merged;
+}
+
+function processErrorCode(error: unknown): string | undefined {
+  const code = error && typeof error === 'object' ? (error as NodeJS.ErrnoException).code : undefined;
+  return typeof code === 'string' ? code.toUpperCase() : undefined;
+}
+
+function tempFailure(error: unknown): AppFailure {
+  const code = processErrorCode(error);
+  if (code === 'EACCES' || code === 'EPERM') return appFailure('TRANSCRIPTION_TEMP_PERMISSION_DENIED', undefined, { systemCode: code });
+  if (code === 'ENOSPC') return appFailure('TRANSCRIPTION_TEMP_STORAGE_FULL', undefined, { systemCode: code });
+  return appFailure('TRANSCRIPTION_TEMP_UNAVAILABLE', undefined, { systemCode: code });
+}
+
+function sourceFailure(error: unknown): AppFailure {
+  const code = processErrorCode(error);
+  if (code === 'ENOENT') return appFailure('TRANSCRIPTION_SOURCE_UNAVAILABLE', undefined, { systemCode: code });
+  if (code === 'EACCES' || code === 'EPERM') return appFailure('TRANSCRIPTION_SOURCE_PERMISSION_DENIED', undefined, { systemCode: code });
+  return appFailure('TRANSCRIPTION_SOURCE_UNREADABLE', undefined, { systemCode: code });
+}
+
+function isMemoryFailure(exitCode: number | null, output: string): boolean {
+  const unsignedCode = exitCode === null ? 0 : exitCode >>> 0;
+  return unsignedCode === 0xc0000017
+    || /failed to allocate|out of memory|bad_alloc|not enough memory|memory allocation/i.test(output);
+}
 
 function recognitionTimestampSeconds(value: string): number {
   const match = value.match(/(\d+):(\d+):(\d+(?:\.\d+)?)/);
@@ -283,30 +367,102 @@ async function mediaDuration(sourcePath: string): Promise<number> {
 }
 
 export function registerWhisperIpc(): void {
-  ipcMain.handle('whisper:extract', async (e, args: WhisperExtractArgs): Promise<string> => {
-    const { projectId, sourcePath } = args;
-    if (!projectId || !sourcePath) throw new Error('Thiếu thông tin tệp nguồn để nhận dạng.');
-    if (!(await fileExists(sourcePath))) throw new Error('Không tìm thấy file nguồn để trích audio.');
+  ipcMain.handle('whisper:extract', async (e, args: WhisperExtractArgs): Promise<IpcResult<string>> => {
+    try {
+      const { projectId, sourcePath } = args ?? {};
+      if (!projectId || !sourcePath) throw appFailure('TRANSCRIPTION_INPUT_REQUIRED');
+      try {
+        const stat = await fs.stat(sourcePath);
+        if (!stat.isFile()) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
+        await fs.access(sourcePath);
+      } catch (error) {
+        if (error instanceof AppFailure) throw error;
+        throw sourceFailure(error);
+      }
 
-    const win = BrowserWindow.fromWebContents(e.sender);
-    const workDir = path.join(projectDir(projectId), 'work');
-    await fs.mkdir(workDir, { recursive: true });
-    const wavPath = path.join(workDir, 'source-16k.wav');
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const workDir = path.join(projectDir(projectId), 'work');
+      try {
+        await fs.mkdir(workDir, { recursive: true });
+      } catch (error) {
+        throw tempFailure(error);
+      }
+      const wavPath = path.join(workDir, 'source-16k.wav');
+      const partialPath = `${wavPath}.partial.wav`;
+      await fs.unlink(partialPath).catch(() => undefined);
 
-    const binary = ffmpegBinary();
-    emit(win, { phase: 'extracting' });
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(binary, [
-        '-y', '-i', sourcePath,
-        '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le',
-        wavPath,
-      ], { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
-      let stderr = '';
-      child.stderr?.on('data', (d) => { stderr += String(d); });
-      child.on('error', () => reject(new Error('Không thể chuẩn bị âm thanh từ tệp nguồn.')));
-      child.on('close', (code) => code === 0 ? resolve() : reject(new Error('Không thể chuẩn bị âm thanh từ tệp nguồn.')));
-    });
-    return wavPath;
+      const binary = ffmpegBinary();
+      if (!(await fileExists(binary))) throw appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE');
+      emit(win, { phase: 'extracting' });
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(binary, [
+          '-y', '-i', sourcePath,
+          '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le',
+          partialPath,
+        ], { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
+        let timedOut = false;
+        let settled = false;
+        let timer: NodeJS.Timeout;
+        const finish = (error?: AppFailure) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          error ? reject(error) : resolve();
+        };
+        const armTimer = () => {
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            timedOut = true;
+            child.kill();
+          }, EXTRACTION_STALL_TIMEOUT_MS);
+        };
+        armTimer();
+        child.stderr?.on('data', armTimer);
+        child.on('error', (error) => {
+          const code = processErrorCode(error);
+          finish(appFailure(
+            code === 'EACCES' || code === 'EPERM' ? 'TRANSCRIPTION_PROCESS_START_DENIED' : 'TRANSCRIPTION_PROCESS_START_FAILED',
+            undefined,
+            { systemCode: code },
+          ));
+        });
+        child.on('close', (code) => {
+          if (timedOut) finish(appFailure('TRANSCRIPTION_AUDIO_PREPARATION_TIMEOUT'));
+          else if (code === 0) finish();
+          else finish(appFailure('TRANSCRIPTION_AUDIO_PREPARATION_FAILED', undefined, { exitCode: code ?? undefined }));
+        });
+      });
+      try {
+        const stat = await fs.stat(partialPath);
+        if (!stat.isFile() || stat.size <= 44) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
+        const backupPath = `${wavPath}.backup`;
+        await fs.unlink(backupPath).catch(() => undefined);
+        const hadPrevious = await fileExists(wavPath);
+        if (hadPrevious) await fs.rename(wavPath, backupPath);
+        try {
+          await fs.rename(partialPath, wavPath);
+          await fs.unlink(backupPath).catch(() => undefined);
+        } catch (replaceError) {
+          if (hadPrevious) {
+            try {
+              await fs.rename(backupPath, wavPath);
+            } catch (recoveryError) {
+              throw appFailure('TRANSCRIPTION_AUDIO_RECOVERY_FAILED', undefined, {
+                systemCode: processErrorCode(recoveryError),
+              });
+            }
+          }
+          throw replaceError;
+        }
+      } catch (error) {
+        await fs.unlink(partialPath).catch(() => undefined);
+        if (error instanceof AppFailure) throw error;
+        throw tempFailure(error);
+      }
+      return appSuccess(wavPath);
+    } catch (error) {
+      return appFailureResult(error, 'TRANSCRIPTION_UNEXPECTED', { operation: 'extract' });
+    }
   });
 
   ipcMain.handle('whisper:modelStatus', async (_e, args: WhisperModelStatusArgs): Promise<WhisperModelStatus> => {
@@ -321,96 +477,121 @@ export function registerWhisperIpc(): void {
     return dest;
   });
 
-  ipcMain.handle('whisper:transcribe', async (e, args: WhisperTranscribeArgs): Promise<TranscriptSegment[]> => {
-    const { projectId, wavPath, model, language } = args;
-    if (!projectId || !wavPath) throw new Error('Thiếu thông tin âm thanh để nhận dạng.');
-    if (!(await fileExists(wavPath))) throw new Error('Không tìm thấy file WAV đã trích.');
+  ipcMain.handle('whisper:transcribe', async (e, args: WhisperTranscribeArgs): Promise<IpcResult<TranscriptSegment[]>> => {
+    try {
+      const { projectId, wavPath, model, language } = args ?? {};
+      if (!projectId || !wavPath || !model) throw appFailure('TRANSCRIPTION_INPUT_REQUIRED');
+      try {
+        const stat = await fs.stat(wavPath);
+        if (!stat.isFile() || stat.size <= 44) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
+      } catch (error) {
+        if (error instanceof AppFailure) throw error;
+        throw sourceFailure(error);
+      }
 
-    const win = BrowserWindow.fromWebContents(e.sender);
-    const binary = whisperBinary();
-    if (!(await fileExists(binary))) throw new Error('Không thể khởi tạo bộ nhận dạng. Vui lòng cài lại ứng dụng.');
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const binary = whisperBinary();
+      if (!(await fileExists(binary))) throw appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE');
+      let modelFile: string;
+      try {
+        modelFile = await ensureModel(model, win);
+      } catch (error) {
+        throw appFailure('TRANSCRIPTION_MODEL_UNAVAILABLE', undefined, { systemCode: processErrorCode(error) });
+      }
+      const audioDuration = await mediaDuration(wavPath);
+      if (!(audioDuration > 0)) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
+      const chunks = buildTranscriptionChunks(audioDuration);
+      if (!chunks.length) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
+      emit(win, { phase: 'transcribing', percent: 1, model, chunkNumber: 1, chunkCount: chunks.length });
 
-    const modelFile = await ensureModel(model, win);
-    const audioDuration = await mediaDuration(wavPath);
-    emit(win, { phase: 'transcribing', percent: audioDuration > 0 ? 1 : undefined, model });
+      const workDir = path.join(projectDir(projectId), 'work', 'transcription-chunks');
+      try {
+        await fs.mkdir(workDir, { recursive: true });
+      } catch (error) {
+        throw tempFailure(error);
+      }
+      const chunkResults: Array<{ chunk: TranscriptionChunk; segments: TranscriptSegment[] }> = [];
 
-    const workDir = path.join(projectDir(projectId), 'work');
-    const outBase = path.join(workDir, 'transcript');
-    const jsonPath = `${outBase}.json`;
-    await fs.unlink(jsonPath).catch(() => undefined);
-    const whisperArgs = [
-      '-m', modelFile,
-      '-f', wavPath,
-      '-t', String(Math.max(1, Math.min(4, os.availableParallelism()))),
-      '-oj',
-      '-of', outBase,
-    ];
-    // Omitting this option does not mean automatic detection; the recognizer
-    // falls back to English. Always pass the user's actual choice explicitly.
-    whisperArgs.push('-l', language && language !== 'auto' ? language : 'auto');
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index];
+        const context = { chunkNumber: index + 1, chunkCount: chunks.length };
+        const outBase = path.join(workDir, `transcript-${index + 1}`);
+        const jsonPath = `${outBase}.json`;
+        await fs.unlink(jsonPath).catch(() => undefined);
+        const windowDuration = chunk.windowEnd - chunk.windowStart;
+        const whisperArgs = [
+          '-m', modelFile,
+          '-f', wavPath,
+          '-t', String(Math.max(1, Math.min(4, os.availableParallelism()))),
+          '-ot', String(Math.round(chunk.windowStart * 1000)),
+          '-d', String(Math.round(windowDuration * 1000)),
+          '-oj',
+          '-of', outBase,
+          '-l', language && language !== 'auto' ? language : 'auto',
+        ];
 
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(binary, whisperArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'pipe', 'pipe'] });
-      let stderr = '';
-      let outputBuffer = '';
-      let lastPercent = audioDuration > 0 ? 1 : 0;
-      let stalled = false;
-      let stallTimer: NodeJS.Timeout;
-      const armStallTimer = () => {
-        clearTimeout(stallTimer);
-        stallTimer = setTimeout(() => {
-          stalled = true;
-          log.error('speech recognition stalled', { model, duration: audioDuration, lastPercent });
-          child.kill();
-        }, TRANSCRIPTION_STALL_TIMEOUT_MS);
-      };
-      const consumeOutput = (data: unknown) => {
-        armStallTimer();
-        outputBuffer += String(data);
-        const lines = outputBuffer.split(/\r?\n/);
-        outputBuffer = lines.pop() ?? '';
-        for (const line of lines) {
-          const percent = recognitionProgressFromLine(line, audioDuration);
-          if (percent !== null && percent > lastPercent) {
-            lastPercent = percent;
-            emit(win, { phase: 'transcribing', percent, model });
-          }
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn(binary, whisperArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'pipe', 'pipe'] });
+          let diagnosticOutput = '';
+          let stalled = false;
+          let settled = false;
+          let timer: NodeJS.Timeout;
+          const finish = (error?: AppFailure) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            error ? reject(error) : resolve();
+          };
+          const armTimer = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+              stalled = true;
+              child.kill();
+            }, TRANSCRIPTION_STALL_TIMEOUT_MS);
+          };
+          const consume = (data: unknown) => {
+            armTimer();
+            diagnosticOutput = `${diagnosticOutput}${String(data)}`.slice(-8192);
+          };
+          armTimer();
+          child.stdout?.on('data', consume);
+          child.stderr?.on('data', consume);
+          child.on('error', (error) => {
+            const code = processErrorCode(error);
+            finish(appFailure(
+              code === 'EACCES' || code === 'EPERM' ? 'TRANSCRIPTION_PROCESS_START_DENIED' : 'TRANSCRIPTION_PROCESS_START_FAILED',
+              context,
+              { systemCode: code, chunkNumber: index + 1, chunkCount: chunks.length },
+            ));
+          });
+          child.on('close', (code) => {
+            if (stalled) finish(appFailure('TRANSCRIPTION_CHUNK_TIMEOUT', context, { exitCode: code ?? undefined }));
+            else if (code === 0) finish();
+            else if (isMemoryFailure(code, diagnosticOutput)) finish(appFailure('TRANSCRIPTION_MEMORY_LIMIT', context, { exitCode: code ?? undefined }));
+            else finish(appFailure('TRANSCRIPTION_CHUNK_FAILED', context, { exitCode: code ?? undefined }));
+          });
+        });
+
+        try {
+          const raw = await fs.readFile(jsonPath, 'utf-8');
+          const parsed = parseWhisperJson(raw);
+          chunkResults.push({ chunk, segments: parsed });
+        } catch (error) {
+          throw appFailure('TRANSCRIPTION_RESULT_INVALID', context, { systemCode: processErrorCode(error) });
+        } finally {
+          await fs.unlink(jsonPath).catch(() => undefined);
         }
-        if (outputBuffer.length > 2048) outputBuffer = outputBuffer.slice(-1024);
-      };
-      armStallTimer();
-      child.stdout?.on('data', consumeOutput);
-      child.stderr?.on('data', (data) => {
-        const text = String(data);
-        stderr += text;
-        consumeOutput(text);
-        if (stderr.length > 8192) stderr = stderr.slice(-4096);
-      });
-      child.on('error', (error) => {
-        clearTimeout(stallTimer);
-        log.error('speech recognition spawn failed', { code: (error as NodeJS.ErrnoException).code });
-        reject(new Error('Không thể khởi động bộ nhận dạng. Vui lòng thử lại.'));
-      });
-      child.on('close', (code) => {
-        clearTimeout(stallTimer);
-        if (stalled) {
-          reject(new Error('Quá trình nhận dạng không phản hồi. Hãy thử lại hoặc chọn mức độ chính xác thấp hơn.'));
-          return;
-        }
-        if (code === 0) resolve();
-        else {
-          log.error('speech recognition failed', { code, model, detail: stderr.slice(-1200) });
-          reject(new Error('Không thể nhận dạng lời thoại từ tệp này. Hãy thử mức độ chính xác thấp hơn.'));
-        }
-      });
-    });
+        const percent = Math.max(1, Math.min(99, Math.round(((index + 1) / chunks.length) * 99)));
+        emit(win, { phase: 'transcribing', percent, model, chunkNumber: index + 1, chunkCount: chunks.length });
+      }
 
-    const raw = await fs.readFile(jsonPath, 'utf-8').catch(() => '');
-    if (!raw) throw new Error('Không thể đọc kết quả nhận dạng. Vui lòng thử lại.');
-    const segments = parseWhisperJson(raw);
-    if (!segments.length) throw new Error('Không nhận dạng được lời thoại nào trong tệp nguồn.');
-    emit(win, { phase: 'complete', model });
-    return segments;
+      const segments = mergeTranscriptionChunks(chunkResults, audioDuration);
+      if (!segments.length) throw appFailure('TRANSCRIPTION_NO_SPEECH');
+      emit(win, { phase: 'complete', percent: 100, model, chunkNumber: chunks.length, chunkCount: chunks.length });
+      return appSuccess(segments);
+    } catch (error) {
+      return appFailureResult(error, 'TRANSCRIPTION_UNEXPECTED', { operation: 'transcribe' });
+    }
   });
 
   ipcMain.handle('whisper:align', async (e, args: WhisperAlignArgs): Promise<SubtitleWordTiming[]> => {
