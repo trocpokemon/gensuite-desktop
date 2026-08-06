@@ -3,6 +3,8 @@ import type { TranscriptSegment } from '../../shared/types';
 import { localFileUrl } from '../../shared/localFile';
 import { gensuiteFetch } from '../../lib/gensuiteAuth';
 import type { GenSuiteFeature } from '../../lib/gensuiteAuth';
+import { isPublicAppError } from '../../shared/appErrors';
+import { clientAppError } from '../clientAppError';
 
 // GenSuite paid speech-to-text. Audio is extracted to a 16kHz mono WAV in the
 // main process (shared with the local engine — this matches /v1/stt's required
@@ -12,6 +14,9 @@ import type { GenSuiteFeature } from '../../lib/gensuiteAuth';
 const BASE_URL = 'https://api.gensuite.site/v1';
 const POLL_INTERVAL_MS = 2500;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 45_000;
+const UPLOAD_TIMEOUT_MS = 3 * 60 * 1000;
+const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Grouping heuristics for turning word timestamps into subtitle-sized segments.
 const SENTENCE_END = /[.!?。！？…]$/;
@@ -30,79 +35,220 @@ interface SttWord {
 export class GenSuiteSttAdapter implements ITranscriptionProvider {
   readonly engine = 'cloud' as const;
   readonly isLocal = false;
+  private controller: AbortController | null = null;
+  private jobId = '';
 
   constructor(private feature?: GenSuiteFeature) {}
 
+  private async requestJson(url: string, init: RequestInit, timeoutMs: number): Promise<any> {
+    const parentSignal = this.controller?.signal;
+    const controller = new AbortController();
+    let timedOut = false;
+    const abort = () => controller.abort();
+    parentSignal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    try {
+      const response = await gensuiteFetch(url, { ...init, signal: controller.signal }, this.feature);
+      const text = await response.text();
+      let data: any = null;
+      try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+      if (!response.ok) throw sttFailure(response.status, String(data?.error || ''));
+      if (!data || typeof data !== 'object') throw clientAppError('TRANSCRIPTION_RESULT_INVALID');
+      return data;
+    } catch (error) {
+      if (parentSignal?.aborted) throw clientAppError('TRANSCRIPTION_CANCELLED');
+      if (timedOut) throw clientAppError('TRANSCRIPTION_REQUEST_TIMEOUT');
+      if (isPublicAppError(error) || String(error).includes('AUTH_REQUIRED:gensuite') || String(error).includes('UPGRADE_REQUIRED')) throw error;
+      throw clientAppError('TRANSCRIPTION_SERVICE_UNAVAILABLE');
+    } finally {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', abort);
+    }
+  }
+
   async transcribe(req: TranscribeRequest): Promise<TranscriptSegment[]> {
-    const extracted = await window.gensuite.whisper.extract({
-      projectId: req.projectId,
-      sourcePath: req.sourcePath,
-    });
-    if (!extracted.ok) throw extracted.error;
+    this.controller = new AbortController();
+    try {
+      const extracted = await window.gensuite.whisper.extract({
+        projectId: req.projectId,
+        sourcePath: req.sourcePath,
+      });
+      if (!extracted.ok) throw extracted.error;
 
-    const url = localFileUrl(extracted.value);
-    if (!url) throw new Error('Không đọc được file WAV đã trích.');
-    const wavResp = await fetch(url);
-    if (!wavResp.ok) throw new Error('Không đọc được file WAV đã trích.');
-    const blob = await wavResp.blob();
-    const durationSeconds = await probeBlobDuration(blob);
+      const url = localFileUrl(extracted.value);
+      if (!url) throw clientAppError('TRANSCRIPTION_SOURCE_UNREADABLE');
+      const blob = await this.loadSourceBlob(url);
+      const durationSeconds = await probeBlobDuration(blob);
+      if (!(durationSeconds > 0)) throw clientAppError('TRANSCRIPTION_SOURCE_UNREADABLE');
 
-    const form = new FormData();
-    form.set('file', blob, 'source-16k.wav');
-    form.set('durationSeconds', String(Math.max(1, Math.ceil(durationSeconds))));
-    if (req.language && req.language !== 'auto') form.set('language', req.language);
+      const checkpointKey = sttCheckpointKey(req.projectId, req.sourcePath, req.language);
+      let checkpoint = loadSttCheckpoint(checkpointKey);
+      const idempotencyKey = checkpointKey.replace('gensuite_stt_checkpoint_v1:', 'desktop-stt-');
+      const submit = async () => {
+        const form = new FormData();
+        form.set('file', blob, 'source-16k.wav');
+        form.set('durationSeconds', String(Math.max(1, Math.ceil(durationSeconds))));
+        form.set('idempotencyKey', idempotencyKey);
+        if (req.language && req.language !== 'auto') form.set('language', req.language);
+        let data: any = null;
+        for (let attempt = 1; attempt <= 4; attempt += 1) {
+          try {
+            data = await this.requestJson(`${BASE_URL}/stt`, {
+              method: 'POST',
+              headers: { 'Idempotency-Key': idempotencyKey },
+              body: form,
+            }, UPLOAD_TIMEOUT_MS);
+            break;
+          } catch (error) {
+            const retryableSubmit = isPublicAppError(error)
+              && ['TRANSCRIPTION_JOB_CONFLICT', 'TRANSCRIPTION_SERVICE_UNAVAILABLE', 'TRANSCRIPTION_REQUEST_TIMEOUT', 'TRANSCRIPTION_RATE_LIMITED'].includes(error.code);
+            if (!retryableSubmit || attempt === 4) throw error;
+            await delay(Math.min(8_000, 900 * 2 ** (attempt - 1)), this.controller?.signal);
+          }
+        }
+        const jobId = String(data?.jobId ?? '');
+        if (!jobId) throw clientAppError('TRANSCRIPTION_RESULT_INVALID');
+        checkpoint = { jobId, createdAt: Date.now() };
+        saveSttCheckpoint(checkpointKey, checkpoint);
+        return jobId;
+      };
 
-    const submit = await gensuiteFetch(`${BASE_URL}/stt`, {
-      method: 'POST',
-      body: form,
-    }, this.feature);
-    if (!submit.ok) throw await sttError(submit);
-    const submitData = await submit.json().catch(() => null as any);
-    const jobId = String(submitData?.jobId ?? '');
-    if (!jobId) throw new Error('Không thể bắt đầu nhận dạng lời thoại. Vui lòng thử lại.');
+      let jobId = checkpoint?.jobId || await submit();
+      this.jobId = jobId;
+      let job: any;
+      try {
+        job = await this.pollJob(jobId);
+      } catch (error) {
+        if (!isPublicAppError(error) || error.code !== 'TRANSCRIPTION_JOB_EXPIRED') throw error;
+        localStorage.removeItem(checkpointKey);
+        jobId = await submit();
+        this.jobId = jobId;
+        job = await this.pollJob(jobId);
+      }
+      const transcript = String(job?.transcript ?? '').trim();
+      const words: SttWord[] = Array.isArray(job?.words) ? job.words : [];
 
-    const job = await this.pollJob(jobId);
-    const transcript = String(job?.transcript ?? '').trim();
-    const words: SttWord[] = Array.isArray(job?.words) ? job.words : [];
+      const segments = words.length
+        ? groupWordsIntoSegments(words)
+        : transcript
+          ? estimateTranscriptSegments(transcript, durationSeconds)
+          : [];
+      if (!segments.length) throw clientAppError('TRANSCRIPTION_NO_SPEECH');
+      localStorage.removeItem(checkpointKey);
+      return segments;
+    } finally {
+      this.controller = null;
+      this.jobId = '';
+    }
+  }
 
-    const segments = words.length
-      ? groupWordsIntoSegments(words)
-      : transcript
-        ? [{ id: 'seg_0', start: 0, end: Math.max(1, durationSeconds), text: transcript }]
-        : [];
-    if (!segments.length) throw new Error('Không nhận dạng được lời thoại nào trong tệp nguồn.');
-    return segments;
+  private async loadSourceBlob(url: string): Promise<Blob> {
+    const parentSignal = this.controller?.signal;
+    const controller = new AbortController();
+    let timedOut = false;
+    const abort = () => controller.abort();
+    parentSignal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, UPLOAD_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) throw clientAppError('TRANSCRIPTION_SOURCE_UNREADABLE');
+      return await response.blob();
+    } catch (error) {
+      if (parentSignal?.aborted) throw clientAppError('TRANSCRIPTION_CANCELLED');
+      if (timedOut) throw clientAppError('TRANSCRIPTION_AUDIO_PREPARATION_TIMEOUT');
+      if (isPublicAppError(error)) throw error;
+      throw clientAppError('TRANSCRIPTION_SOURCE_UNREADABLE');
+    } finally {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', abort);
+    }
   }
 
   private async pollJob(jobId: string): Promise<any> {
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const resp = await gensuiteFetch(`${BASE_URL}/stt/${jobId}`, {}, this.feature);
-      if (!resp.ok) throw await sttError(resp);
-      const data = await resp.json().catch(() => null as any);
-      const status = String(data?.status ?? '');
-      if (status === 'done') return data;
-      if (status === 'failed' || status === 'error') {
-        throw new Error('Không thể nhận dạng lời thoại. Vui lòng kiểm tra tệp nguồn và thử lại.');
+    const hardDeadline = Date.now() + 60 * 60 * 1000;
+    let inactivityDeadline = Date.now() + POLL_TIMEOUT_MS;
+    let lastProgress = -1;
+    let failures = 0;
+    while (Date.now() < hardDeadline && Date.now() < inactivityDeadline) {
+      try {
+        const data = await this.requestJson(`${BASE_URL}/stt/${jobId}`, {}, REQUEST_TIMEOUT_MS);
+        const status = String(data?.status ?? '').toLowerCase();
+        const progress = Number(data?.progress ?? 0);
+        if (Number.isFinite(progress) && progress > lastProgress) {
+          lastProgress = progress;
+          inactivityDeadline = Date.now() + POLL_TIMEOUT_MS;
+        }
+        if (status === 'done') return data;
+        if (status === 'failed' || status === 'error') throw clientAppError('TRANSCRIPTION_CHUNK_FAILED');
+        if (status === 'cancelled') throw clientAppError('TRANSCRIPTION_CANCELLED');
+        failures = 0;
+      } catch (error) {
+        if (isPublicAppError(error)
+          && ['TRANSCRIPTION_SERVICE_UNAVAILABLE', 'TRANSCRIPTION_REQUEST_TIMEOUT', 'TRANSCRIPTION_RATE_LIMITED'].includes(error.code)
+          && failures < 4) {
+          failures += 1;
+          await delay(Math.min(8_000, 900 * 2 ** failures), this.controller?.signal);
+          continue;
+        }
+        throw error;
       }
-      await delay(POLL_INTERVAL_MS);
+      await delay(POLL_INTERVAL_MS, this.controller?.signal);
     }
-    throw new Error('Nhận dạng lời thoại quá thời gian chờ. Vui lòng thử lại.');
+    throw clientAppError('TRANSCRIPTION_REQUEST_TIMEOUT');
+  }
+
+  cancel(): void {
+    this.controller?.abort();
+    const jobId = this.jobId;
+    this.controller = null;
+    this.jobId = '';
+    if (jobId) gensuiteFetch(`${BASE_URL}/stt/${encodeURIComponent(jobId)}`, { method: 'DELETE' }, this.feature).catch(() => undefined);
   }
 }
 
-async function sttError(resp: Response): Promise<Error> {
-  const data = await resp.json().catch(() => null as any);
-  const code = String(data?.error ?? '');
-  const message = String(data?.message ?? '');
-  if (resp.status === 401 || code === 'INVALID_API_KEY' || code === 'AUTH_REQUIRED') return new Error('AUTH_REQUIRED:gensuite');
+function sttFailure(status: number, code: string): unknown {
+  if (status === 401 || code === 'INVALID_API_KEY' || code === 'AUTH_REQUIRED') return new Error('AUTH_REQUIRED:gensuite');
   if (code === 'FEATURE_UPGRADE_REQUIRED') return new Error('UPGRADE_REQUIRED:basic');
-  if (resp.status === 402 || code === 'INSUFFICIENT_CREDITS') return new Error('Tài khoản GenSuite không đủ credits để nhận dạng.');
-  return new Error(String(message || code || 'Không thể nhận dạng lời thoại. Vui lòng thử lại.').slice(0, 300));
+  if (status === 402 || code === 'INSUFFICIENT_CREDITS') return new Error('INSUFFICIENT_CREDITS');
+  if (status === 429) return clientAppError('TRANSCRIPTION_RATE_LIMITED');
+  if (status === 409) return clientAppError('TRANSCRIPTION_JOB_CONFLICT');
+  if (status === 403) return clientAppError('TRANSCRIPTION_ACCESS_DENIED');
+  if (status === 408) return clientAppError('TRANSCRIPTION_REQUEST_TIMEOUT');
+  if (status === 404 || code === 'NOT_FOUND') return clientAppError('TRANSCRIPTION_JOB_EXPIRED');
+  return clientAppError(status >= 500 ? 'TRANSCRIPTION_SERVICE_UNAVAILABLE' : 'TRANSCRIPTION_RESULT_INVALID');
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(clientAppError('TRANSCRIPTION_CANCELLED')); };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function sttCheckpointKey(projectId: string, sourcePath: string, language?: string): string {
+  let hash = 2166136261;
+  for (const char of `${sourcePath}|${language || 'auto'}`) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+  return `gensuite_stt_checkpoint_v1:${projectId}:${(hash >>> 0).toString(36)}`;
+}
+
+function loadSttCheckpoint(key: string): { jobId: string; createdAt: number } | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || 'null') as { jobId?: string; createdAt?: number } | null;
+    if (!value?.jobId || !value.createdAt || Date.now() - value.createdAt > CHECKPOINT_TTL_MS) {
+      localStorage.removeItem(key);
+      return null;
+    }
+    return { jobId: value.jobId, createdAt: value.createdAt };
+  } catch { return null; }
+}
+
+function saveSttCheckpoint(key: string, value: { jobId: string; createdAt: number }): void {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* retry can submit a fresh job */ }
 }
 
 // Read a WAV Blob's duration through an <audio> element (renderer has no ffprobe).
@@ -114,6 +260,36 @@ function probeBlobDuration(blob: Blob): Promise<number> {
     el.addEventListener('loadedmetadata', () => done(Number.isFinite(el.duration) ? el.duration : 0));
     el.addEventListener('error', () => done(0));
     el.src = objectUrl;
+  });
+}
+
+function estimateTranscriptSegments(transcript: string, durationSeconds: number): TranscriptSegment[] {
+  const phrases = transcript
+    .replace(/\r\n|\r|\n/g, ' ')
+    .split(/(?<=[.!?。！？…])\s+/u)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const parts: string[] = [];
+  for (const phrase of phrases.length ? phrases : [transcript.trim()]) {
+    let remaining = phrase;
+    while (remaining.length > MAX_SEGMENT_CHARS) {
+      const window = remaining.slice(0, MAX_SEGMENT_CHARS + 1);
+      let split = Math.max(window.lastIndexOf(', '), window.lastIndexOf('，'), window.lastIndexOf(' '));
+      if (split < Math.floor(MAX_SEGMENT_CHARS * 0.45)) split = MAX_SEGMENT_CHARS;
+      const part = remaining.slice(0, split + (split < MAX_SEGMENT_CHARS ? 1 : 0)).trim();
+      if (part) parts.push(part);
+      remaining = remaining.slice(split + (split < MAX_SEGMENT_CHARS ? 1 : 0)).trim();
+    }
+    if (remaining) parts.push(remaining);
+  }
+  const weights = parts.map((part) => Math.max(1, [...part].length));
+  const total = weights.reduce((sum, value) => sum + value, 0);
+  let cursor = 0;
+  return parts.map((text, index) => {
+    const start = durationSeconds * (cursor / total);
+    cursor += weights[index];
+    const end = index === parts.length - 1 ? durationSeconds : durationSeconds * (cursor / total);
+    return { id: `seg_${index}`, start, end: Math.max(start + 0.01, end), text };
   });
 }
 

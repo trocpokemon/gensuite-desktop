@@ -10,6 +10,7 @@ import { localFileUrl } from '../shared/localFile';
 import type { Scene, VoiceEngine } from '../shared/types';
 import { AudioPlayer } from '../components/AudioPlayer';
 import { VoiceConfigPanel, GENMAX_LANGUAGE_IDS } from '../components/VoiceConfigPanel';
+import { probeUsableAudio } from '../providers/voice/audioUtils';
 
 interface Props { onOpenSettings: () => void; }
 
@@ -34,16 +35,16 @@ export function SoundStage({ onOpenSettings }: Props) {
   const liveProviders = useRef<Record<string, IVoiceProvider>>({});
   const scenePrepStartedRef = useRef('');
 
-  const synthesize = async (sceneId: string, text: string, engineOverride?: VoiceEngine) => {
+  const synthesize = async (sceneId: string, text: string, engineOverride?: VoiceEngine): Promise<boolean> => {
     const useEngine = engineOverride ?? engine;
     const useConfig = project.settings.voiceConfigs[useEngine];
     if ((useEngine === 'elevenlabs' || useEngine === 'minimax') && !GENMAX_LANGUAGE_IDS.includes(useConfig.language)) {
       setErrors((old) => ({ ...old, [sceneId]: 'Hãy chọn ngôn ngữ trước khi tạo giọng.' }));
-      return;
+      return false;
     }
     if (useEngine === 'elevenlabs' && useConfig.language === 'vietnamese' && useConfig.modelId !== 'eleven_v3') {
       setErrors((old) => ({ ...old, [sceneId]: 'Tiếng Việt chỉ được hỗ trợ trên Eleven v3.' }));
-      return;
+      return false;
     }
     setBusy((old) => ({ ...old, [sceneId]: true }));
     setErrors((old) => ({ ...old, [sceneId]: '' }));
@@ -66,12 +67,15 @@ export function SoundStage({ onOpenSettings }: Props) {
         subtitleWords: result.wordTimings,
         subtitleTimingText: result.wordTimings?.length ? text : undefined,
         subtitleTimingAudioPath: result.wordTimings?.length ? result.audioPath : undefined,
+        subtitleTimingQuality: result.wordTimings?.length ? 'exact' : undefined,
       });
+      return true;
     } catch (err) {
-      if (isCancellationError(err)) return;
+      if (isCancellationError(err)) return false;
       const service = missingKeyService(err);
       if (service) setMissingKey(service);
       else setErrors((old) => ({ ...old, [sceneId]: errorMessage(err) }));
+      return false;
     } finally {
       if (liveProviders.current[sceneId] === provider) delete liveProviders.current[sceneId];
       setBusy((old) => ({ ...old, [sceneId]: false }));
@@ -91,14 +95,46 @@ export function SoundStage({ onOpenSettings }: Props) {
     try {
       for (let index = 0; index < project.scenes.length; index += 1) {
         const scene = project.scenes[index];
+        const current = useProjectStore.getState().project.scenes.find((item) => item.id === scene.id);
+        if (current?.audioPath) {
+          const existing = await probeUsableAudio(current.audioPath);
+          if (existing) {
+            if (Math.abs((current.audioDuration ?? 0) - existing.durationSec) > 0.1) updateScene(scene.id, { audioDuration: existing.durationSec });
+            setBulkCompleted((count) => count + 1);
+            continue;
+          }
+          updateScene(scene.id, {
+            audioPath: undefined, audioDuration: undefined, subtitleWords: undefined,
+            subtitleTimingText: undefined, subtitleTimingAudioPath: undefined, subtitleTimingQuality: undefined,
+          });
+        }
         setBulkCurrentSceneId(scene.id);
-        await synthesize(scene.id, scene.narration);
-        setBulkCompleted(index + 1);
+        const succeeded = await synthesize(scene.id, scene.narration);
+        if (succeeded) setBulkCompleted((count) => count + 1);
       }
     } finally {
       setBulkCurrentSceneId(null);
       setBulkBusy(false);
     }
+  };
+
+  const continueOrSynthesize = async () => {
+    if (!allDone) {
+      await synthesizeAll();
+      return;
+    }
+    let valid = true;
+    for (const scene of useProjectStore.getState().project.scenes) {
+      const existing = await probeUsableAudio(scene.audioPath);
+      if (existing) continue;
+      valid = false;
+      updateScene(scene.id, {
+        audioPath: undefined, audioDuration: undefined, subtitleWords: undefined,
+        subtitleTimingText: undefined, subtitleTimingAudioPath: undefined, subtitleTimingQuality: undefined,
+      });
+    }
+    if (valid) setStep('storyboard');
+    else await synthesizeAll();
   };
 
   const prepareVoiceScenes = async () => {
@@ -153,7 +189,7 @@ export function SoundStage({ onOpenSettings }: Props) {
 
   const footer = (
     <>
-      <button onClick={allDone ? () => setStep('storyboard') : synthesizeAll} disabled={bulkBusy || Object.values(busy).some(Boolean)} className="primary-action flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-45">{bulkBusy ? <Loader2 size={16} className="animate-spin" /> : allDone ? <ArrowRight size={16} /> : <Sparkles size={16} />}{bulkBusy ? `Đang tạo ${Math.max(1, bulkCurrentIndex + 1)}/${project.scenes.length}…` : allDone ? 'Sang bước Storyboard' : 'Tạo giọng cho tất cả'}</button>
+      <button onClick={() => void continueOrSynthesize()} disabled={bulkBusy || Object.values(busy).some(Boolean)} className="primary-action flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-45">{bulkBusy ? <Loader2 size={16} className="animate-spin" /> : allDone ? <ArrowRight size={16} /> : <Sparkles size={16} />}{bulkBusy ? `Đang tạo ${Math.max(1, bulkCurrentIndex + 1)}/${project.scenes.length}…` : allDone ? 'Sang bước Storyboard' : 'Tạo giọng cho tất cả'}</button>
       <p className="text-[10px] leading-4 text-white/25">Thay đổi nguồn giọng, giọng đọc hoặc thông số sẽ yêu cầu tạo lại audio để giữ dự án đồng nhất.</p>
     </>
   );

@@ -42,7 +42,22 @@ export async function persistCloudAudio(
   ext: 'mp3' | 'wav',
 ): Promise<{ audioPath: string; durationSec: number }> {
   const base64 = await blobToBase64(blob);
-  const audioPath = await window.gensuite.audio.write({ projectId, segmentId, base64, ext });
-  const durationSec = await measureDuration(blob);
-  return { audioPath, durationSec };
+  const persisted = await window.gensuite.audio.write({ projectId, segmentId, base64, ext });
+  if (!persisted.ok) throw persisted.error;
+  const measured = await measureDuration(blob);
+  return {
+    audioPath: persisted.value.audioPath,
+    durationSec: persisted.value.durationSec > 0 ? persisted.value.durationSec : measured,
+  };
+}
+
+/** Revalidate a resumed scene before it is skipped or passed to video export. */
+export async function probeUsableAudio(audioPath?: string): Promise<{ audioPath: string; durationSec: number } | null> {
+  if (!audioPath) return null;
+  try {
+    const result = await window.gensuite.audio.probe({ audioPath });
+    return result.ok && result.value.durationSec > 0 ? result.value : null;
+  } catch {
+    return null;
+  }
 }

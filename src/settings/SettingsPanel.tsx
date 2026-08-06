@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { X, Eye, EyeOff, Save, Loader2, ExternalLink, ShieldCheck, Trash2 } from 'lucide-react';
+import { X, Eye, EyeOff, Save, Loader2, ExternalLink, ShieldCheck, Trash2, ClipboardCopy } from 'lucide-react';
 import { useSettingsStore } from '../store/settingsStore';
 import type { AppSettings } from '../shared/types';
+import { diagnosticSummary } from '../shared/diagnosticSummary';
 
 interface Props {
   onClose: () => void;
@@ -27,6 +28,7 @@ export function SettingsPanel({ onClose }: Props) {
   const [saved, setSaved] = useState(false);
   const [clearingSession, setClearingSession] = useState<'tiktok' | 'douyin' | null>(null);
   const [sessionMessage, setSessionMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
+  const [diagnosticMessage, setDiagnosticMessage] = useState('');
 
   // Sync the draft when the store finishes loading after mount.
   useEffect(() => {
@@ -58,6 +60,15 @@ export function SettingsPanel({ onClose }: Props) {
       setSessionMessage({ kind: 'error', text: `Không thể xóa phiên ${platformName}. Vui lòng thử lại.` });
     } finally {
       setClearingSession(null);
+    }
+  };
+
+  const copyDiagnostics = async () => {
+    try {
+      await navigator.clipboard.writeText(await diagnosticSummary());
+      setDiagnosticMessage('Đã sao chép thông tin chẩn đoán an toàn.');
+    } catch {
+      setDiagnosticMessage('Chưa thể sao chép. Vui lòng thử lại.');
     }
   };
 
@@ -161,6 +172,20 @@ export function SettingsPanel({ onClose }: Props) {
                 {sessionMessage.text}
               </p>
             )}
+          </section>
+
+          <section className="mt-sm border-t border-white/10 pt-lg">
+            <div className="flex items-start gap-3">
+              <span className="rounded-xl bg-sky-400/10 p-2.5 text-sky-300"><ClipboardCopy size={19} /></span>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-sm font-semibold text-white">Hỗ trợ chẩn đoán</h3>
+                <p className="mt-1 text-xs leading-5 text-text/50">Sao chép mã lỗi và thông tin vận hành an toàn. Không bao gồm nội dung, đường dẫn hay khóa tài khoản.</p>
+              </div>
+            </div>
+            <button type="button" onClick={() => void copyDiagnostics()} className="mt-md flex w-full items-center justify-center gap-2 rounded-xl border border-sky-300/20 bg-sky-300/[0.06] px-3 py-3 text-xs font-semibold text-sky-200 transition-colors hover:bg-sky-300/10">
+              <ClipboardCopy size={15} /> Sao chép thông tin chẩn đoán
+            </button>
+            {diagnosticMessage && <p className="mt-sm text-xs text-white/55">{diagnosticMessage}</p>}
           </section>
         </div>
 

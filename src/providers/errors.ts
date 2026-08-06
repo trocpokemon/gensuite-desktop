@@ -1,6 +1,7 @@
 import { isPublicAppError } from '../shared/appErrors';
 import type { AppErrorCode, PublicAppError } from '../shared/appErrors';
 import { notifyIfInsufficientCredits } from '../store/creditPromptStore';
+import { rememberDiagnostic } from '../shared/diagnosticSummary';
 
 const PREFIX = 'MISSING_KEY:';
 const AUTH_REQUIRED = 'AUTH_REQUIRED:gensuite';
@@ -15,7 +16,7 @@ function rawErrorMessage(err: unknown): string {
 }
 
 export function isCancellationError(err: unknown): boolean {
-  if (isPublicAppError(err) && err.code === 'VOICE_CANCELLED') return true;
+  if (isPublicAppError(err) && (err.code === 'VOICE_CANCELLED' || err.code === 'TRANSCRIPTION_CANCELLED')) return true;
   const message = rawErrorMessage(err);
   return message.includes('voice:cancelled')
     || message.includes('edgetts:killed')
@@ -87,6 +88,17 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
   TRANSCRIPTION_AUDIO_RECOVERY_FAILED: () => 'Không thể khôi phục an toàn dữ liệu nhận dạng trước đó. Hãy giữ nguyên dự án và gửi mã chẩn đoán để được hỗ trợ.',
   TRANSCRIPTION_COMPONENT_UNAVAILABLE: () => 'Thành phần nhận dạng lời thoại không khả dụng. Hãy cập nhật hoặc cài đặt lại ứng dụng.',
   TRANSCRIPTION_MODEL_UNAVAILABLE: () => 'Dữ liệu nhận dạng chưa sẵn sàng. Hãy kiểm tra mạng rồi thử lại.',
+  TRANSCRIPTION_MODEL_DOWNLOAD_FAILED: () => 'Không thể tải dữ liệu nhận dạng. Hãy kiểm tra kết nối rồi thử lại.',
+  TRANSCRIPTION_MODEL_INVALID: () => 'Dữ liệu nhận dạng trên máy chưa đầy đủ hoặc bị hỏng. Ứng dụng sẽ chuẩn bị lại ở lần thử tiếp theo.',
+  TRANSCRIPTION_MODEL_PERMISSION_DENIED: () => 'Ứng dụng không có quyền lưu dữ liệu nhận dạng. Hãy kiểm tra quyền thư mục ứng dụng rồi thử lại.',
+  TRANSCRIPTION_MODEL_STORAGE_FULL: () => 'Không đủ dung lượng để chuẩn bị dữ liệu nhận dạng. Hãy giải phóng dung lượng rồi thử lại.',
+  TRANSCRIPTION_CANCELLED: () => 'Đã dừng nhận dạng lời thoại. Những phần hoàn thành vẫn được giữ để tiếp tục sau.',
+  TRANSCRIPTION_JOB_CONFLICT: () => 'Dự án này đang có một lượt nhận dạng chạy. Hãy chờ hoàn tất hoặc dừng lượt hiện tại.',
+  TRANSCRIPTION_JOB_EXPIRED: () => 'Tác vụ nhận dạng trước đã hết hạn. Ứng dụng sẽ tạo lại tác vụ khi bạn thử tiếp.',
+  TRANSCRIPTION_SERVICE_UNAVAILABLE: () => 'Nguồn nhận dạng trực tuyến hiện chưa phản hồi. Hãy kiểm tra mạng rồi thử lại.',
+  TRANSCRIPTION_REQUEST_TIMEOUT: () => 'Nhận dạng trực tuyến mất nhiều thời gian hơn dự kiến. Tác vụ đã được giữ để tiếp tục ở lần thử sau.',
+  TRANSCRIPTION_RATE_LIMITED: () => 'Nguồn nhận dạng đang bận. Hãy chờ ít phút rồi tiếp tục tác vụ.',
+  TRANSCRIPTION_ACCESS_DENIED: () => 'Tài khoản hiện chưa được phép dùng nguồn nhận dạng này. Hãy kiểm tra gói tài khoản.',
   TRANSCRIPTION_PROCESS_START_DENIED: (error) => `Ứng dụng chưa được phép bắt đầu nhận dạng${chunkLabel(error)}. Hãy kiểm tra quyền bảo mật của máy rồi thử lại.`,
   TRANSCRIPTION_PROCESS_START_FAILED: (error) => `Không thể bắt đầu nhận dạng${chunkLabel(error)}. Hãy khởi động lại ứng dụng rồi thử lại.`,
   TRANSCRIPTION_MEMORY_LIMIT: (error) => `Máy không đủ bộ nhớ để nhận dạng${chunkLabel(error)}. Hãy đóng bớt ứng dụng hoặc chọn mức độ chính xác thấp hơn.`,
@@ -98,6 +110,11 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
   TRANSCRIPTION_TEMP_STORAGE_FULL: () => 'Vùng lưu tạm không đủ dung lượng để nhận dạng. Hãy giải phóng dung lượng trên ổ hệ thống rồi thử lại.',
   TRANSCRIPTION_TEMP_UNAVAILABLE: () => 'Không thể tạo dữ liệu tạm để nhận dạng. Hãy khởi động lại ứng dụng rồi thử lại.',
   TRANSCRIPTION_UNEXPECTED: () => 'Nhận dạng lời thoại dừng ngoài dự kiến. Hãy thử lại hoặc gửi mã chẩn đoán để được hỗ trợ.',
+  SUBTITLE_ALIGNMENT_INPUT_INVALID: () => 'Thiếu dữ liệu để đồng bộ phụ đề với giọng đọc.',
+  SUBTITLE_ALIGNMENT_AUDIO_UNAVAILABLE: (error) => `Không tìm thấy âm thanh${segmentLabel(error)} để đồng bộ phụ đề. Hãy tạo lại giọng cho câu này.`,
+  SUBTITLE_ALIGNMENT_TIMEOUT: (error) => `Đồng bộ phụ đề${segmentLabel(error)} mất nhiều thời gian hơn dự kiến. Ứng dụng có thể dùng thời gian ước lượng để tiếp tục.`,
+  SUBTITLE_ALIGNMENT_FAILED: (error) => `Chưa thể đồng bộ chính xác phụ đề${segmentLabel(error)}. Ứng dụng có thể dùng thời gian ước lượng để tiếp tục.`,
+  SUBTITLE_ALIGNMENT_RESULT_INVALID: (error) => `Không xác định được nhịp lời đọc${segmentLabel(error)}. Ứng dụng có thể dùng thời gian ước lượng để tiếp tục.`,
   VIDEO_SOURCE_REQUIRED: () => 'Cần chọn video nguồn trước khi hoàn thiện.',
   VIDEO_SEGMENTS_EMPTY: () => 'Không có đoạn lời thoại nào để hoàn thiện video.',
   VIDEO_SOURCE_UNAVAILABLE: () => 'Video nguồn không còn khả dụng. Hãy chọn lại video nguồn.',
@@ -135,7 +152,7 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
   VOICE_TEXT_TOO_LONG: () => 'Nội dung vượt giới hạn cho một lượt tạo giọng. Hãy chia thành các đoạn ngắn hơn.',
   VOICE_CANCELLED: () => 'Đã hủy tạo giọng.',
   VOICE_JOB_CONFLICT: () => 'Một lượt tạo giọng cho nội dung này đang chạy. Hãy chờ hoàn tất hoặc hủy lượt trước rồi thử lại.',
-  VOICE_SERVICE_UNAVAILABLE: (error) => `Nguồn tạo giọng miễn phí hiện không phản hồi${chunkLabel(error)}. Hãy kiểm tra mạng và thử lại sau.`,
+  VOICE_SERVICE_UNAVAILABLE: (error) => `Nguồn tạo giọng hiện không phản hồi${chunkLabel(error)}. Hãy kiểm tra mạng và thử lại sau.`,
   VOICE_SERVICE_ACCESS_DENIED: (error) => `Nguồn tạo giọng từ chối quyền xử lý${chunkLabel(error)}. Hãy chờ ít phút rồi thử lại.`,
   VOICE_RATE_LIMITED: (error) => `Nguồn tạo giọng đang giới hạn số lượt yêu cầu${chunkLabel(error)}. Hãy chờ ít phút rồi thử lại.`,
   VOICE_REQUEST_REJECTED: (error) => `Nguồn tạo giọng không thể xử lý nội dung hoặc giọng đã chọn${chunkLabel(error)}. Hãy đổi lựa chọn rồi thử lại.`,
@@ -161,6 +178,7 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
 };
 
 function structuredErrorMessage(error: PublicAppError): string {
+  rememberDiagnostic(error);
   return `${STRUCTURED_ERROR_MESSAGES[error.code](error)}${diagnosticSuffix(error)}`;
 }
 

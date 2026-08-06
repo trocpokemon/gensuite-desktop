@@ -360,6 +360,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
           subtitleWords: undefined,
           subtitleTimingText: undefined,
           subtitleTimingAudioPath: undefined,
+          subtitleTimingQuality: undefined,
         })),
       };
       await window.gensuite.project.save(project);

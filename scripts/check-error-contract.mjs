@@ -43,6 +43,7 @@ const creditPrompt = evaluateCommonJs(await compile(creditPromptPath), (name) =>
 const errors = evaluateCommonJs(await compile(errorsPath), (name) => {
   if (name === '../shared/appErrors') return shared;
   if (name === '../store/creditPromptStore') return creditPrompt;
+  if (name === '../shared/diagnosticSummary') return { rememberDiagnostic: () => undefined };
   throw new Error(`Unexpected dependency in error presentation: ${name}`);
 });
 

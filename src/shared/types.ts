@@ -2,7 +2,7 @@
 // This file is the single source of truth for the IPC contract: every field here
 // matches an actual handler signature in electron/ipc/*.
 
-import type { IpcResult } from './appErrors';
+import type { IpcResult, PublicAppError } from './appErrors';
 
 export type AspectRatio = '16:9' | '9:16';
 export type LocalizeAspectRatio = 'original' | AspectRatio;
@@ -221,6 +221,8 @@ export interface Scene {
   /** Cache identity so timing is invalidated when text or audio changes. */
   subtitleTimingText?: string;
   subtitleTimingAudioPath?: string;
+  /** Whether caption timing came from the voice source, local alignment, or a safe estimate. */
+  subtitleTimingQuality?: 'exact' | 'aligned' | 'estimated';
   /** Narration-only production metadata used by the duration fitting loop. */
   narrationFitStatus?: NarrationFitStatus;
   narrationRevision?: number;
@@ -510,10 +512,13 @@ export interface EdgeTtsSynthesizeArgs {
   pitch?: number;
   /** Volume 0–100 (100 = default). */
   volume?: number;
+  chunkNumber?: number;
+  chunkCount?: number;
 }
 
 export interface EdgeTtsSynthesizeResult {
   audioPath: string;
+  durationSec: number;
   /** Exact word boundaries returned with the generated speech, in seconds. */
   wordTimings?: SubtitleWordTiming[];
 }
@@ -540,6 +545,21 @@ export interface CapCutTtsSynthesizeArgs {
 export interface CapCutTtsSynthesizeResult {
   audioPath: string;
   durationSec: number;
+}
+
+export interface AudioPersistResult {
+  audioPath: string;
+  durationSec: number;
+}
+
+export interface AudioAssembleArgs {
+  projectId: string;
+  segmentId: string;
+  partPaths: string[];
+}
+
+export interface AudioProbeArgs {
+  audioPath: string;
 }
 
 export interface CapCutTtsPreviewArgs {
@@ -639,6 +659,8 @@ export interface WhisperAlignArgs {
   text: string;
   model: WhisperModelName;
   language?: string;
+  segmentNumber?: number;
+  segmentCount?: number;
 }
 
 export interface YtdlpDownloadArgs {
@@ -729,6 +751,10 @@ export type UpdaterStatus =
 
 /** The type-safe API surface exposed to the renderer via contextBridge. */
 export interface GensuiteBridge {
+  diagnostics: {
+    /** Persist an already-sanitized renderer failure under the same diagnostic id shown to the user. */
+    record(error: PublicAppError): void;
+  };
   window: {
     minimize(): void;
     toggleMaximize(): void;
@@ -776,12 +802,14 @@ export interface GensuiteBridge {
     import(projectId: string): Promise<CharacterImportResult | null>;
   };
   audio: {
-    write(args: AudioWriteArgs): Promise<string>;
-    download(args: AudioDownloadArgs): Promise<string>;
+    write(args: AudioWriteArgs): Promise<IpcResult<AudioPersistResult>>;
+    download(args: AudioDownloadArgs): Promise<IpcResult<AudioPersistResult>>;
+    assemble(args: AudioAssembleArgs): Promise<IpcResult<AudioPersistResult>>;
+    probe(args: AudioProbeArgs): Promise<IpcResult<AudioPersistResult>>;
   };
   edgetts: {
-    voices(): Promise<EdgeTtsVoice[]>;
-    synthesize(args: EdgeTtsSynthesizeArgs): Promise<EdgeTtsSynthesizeResult>;
+    voices(): Promise<IpcResult<EdgeTtsVoice[]>>;
+    synthesize(args: EdgeTtsSynthesizeArgs): Promise<IpcResult<EdgeTtsSynthesizeResult>>;
     kill(jobId: string): Promise<boolean>;
   };
   capcuttts: {
@@ -832,10 +860,12 @@ export interface GensuiteBridge {
     /** Run local whisper.cpp on the WAV. Returns timed segments. */
     transcribe(args: WhisperTranscribeArgs): Promise<IpcResult<TranscriptSegment[]>>;
     /** Measure word timing from synthesized voice audio for caption highlighting. */
-    align(args: WhisperAlignArgs): Promise<SubtitleWordTiming[]>;
-    modelStatus(args: WhisperModelStatusArgs): Promise<WhisperModelStatus>;
+    align(args: WhisperAlignArgs): Promise<IpcResult<SubtitleWordTiming[]>>;
+    modelStatus(args: WhisperModelStatusArgs): Promise<IpcResult<WhisperModelStatus>>;
     /** Download the GGML model on demand. Returns its absolute path. */
-    downloadModel(args: WhisperModelDownloadArgs): Promise<string>;
+    downloadModel(args: WhisperModelDownloadArgs): Promise<IpcResult<string>>;
+    /** Stop an active local recognition job while keeping completed checkpoints. */
+    cancel(projectId: string): Promise<boolean>;
     onProgress(cb: (p: WhisperProgress) => void): () => void;
   };
   auth: {

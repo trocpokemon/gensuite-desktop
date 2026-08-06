@@ -9,6 +9,11 @@ import type {
   MediaDownloadArgs,
   AudioWriteArgs,
   AudioDownloadArgs,
+  AudioPersistResult,
+  AudioAssembleArgs,
+  AudioProbeArgs,
+  EdgeTtsSynthesizeResult,
+  EdgeTtsVoice,
   EdgeTtsSynthesizeArgs,
   CapCutTtsSynthesizeArgs,
   CapCutTtsSynthesizeResult,
@@ -27,6 +32,7 @@ import type {
   WhisperModelDownloadArgs,
   WhisperProgress,
   TranscriptSegment,
+  SubtitleWordTiming,
   AuthCallbackPayload,
   UpdaterStatus,
   NarrationAnalyzeArgs,
@@ -101,6 +107,26 @@ function isCapCutTtsResult(value: unknown): value is CapCutTtsSynthesizeResult {
     && value.durationSec > 0;
 }
 
+function isAudioPersistResult(value: unknown): value is AudioPersistResult {
+  return isRecord(value)
+    && Object.keys(value).length === 2
+    && typeof value.audioPath === 'string' && value.audioPath.trim().length > 0
+    && typeof value.durationSec === 'number' && Number.isFinite(value.durationSec) && value.durationSec > 0;
+}
+
+function isEdgeTtsResult(value: unknown): value is EdgeTtsSynthesizeResult {
+  if (!isRecord(value) || !isAudioPersistResult({ audioPath: value.audioPath, durationSec: value.durationSec })) return false;
+  if (value.wordTimings === undefined) return Object.keys(value).every((key) => ['audioPath', 'durationSec'].includes(key));
+  return Object.keys(value).every((key) => ['audioPath', 'durationSec', 'wordTimings'].includes(key))
+    && isSubtitleWordTimings(value.wordTimings);
+}
+
+function isEdgeTtsVoices(value: unknown): value is EdgeTtsVoice[] {
+  return Array.isArray(value) && value.every((voice) => isRecord(voice)
+    && Object.keys(voice).every((key) => ['shortName', 'friendlyName', 'locale', 'gender'].includes(key))
+    && ['shortName', 'friendlyName', 'locale', 'gender'].every((key) => typeof voice[key] === 'string'));
+}
+
 function isCapCutTtsPreviewResult(value: unknown): value is CapCutTtsPreviewResult {
   return isRecord(value)
     && Object.keys(value).length === 1
@@ -124,7 +150,26 @@ function isTranscriptSegments(value: unknown): value is TranscriptSegment[] {
     && typeof item.text === 'string' && item.text.trim().length > 0);
 }
 
+function isSubtitleWordTimings(value: unknown): value is SubtitleWordTiming[] {
+  return Array.isArray(value) && value.every((item) => isRecord(item)
+    && Object.keys(item).every((key) => ['word', 'start', 'end'].includes(key))
+    && typeof item.word === 'string' && item.word.trim().length > 0
+    && typeof item.start === 'number' && Number.isFinite(item.start) && item.start >= 0
+    && typeof item.end === 'number' && Number.isFinite(item.end) && item.end > item.start);
+}
+
+function isWhisperModelStatus(value: unknown): value is import('../src/shared/types').WhisperModelStatus {
+  return isRecord(value)
+    && Object.keys(value).every((key) => ['model', 'present', 'path'].includes(key))
+    && ['tiny', 'base', 'small', 'medium'].includes(String(value.model))
+    && typeof value.present === 'boolean'
+    && typeof value.path === 'string';
+}
+
 const bridge: GensuiteBridge = {
+  diagnostics: {
+    record: (error: PublicAppError) => ipcRenderer.send('diagnostics:client-failure', copyPublicError(error)),
+  },
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),
     toggleMaximize: () => ipcRenderer.send('window:toggleMaximize'),
@@ -161,12 +206,14 @@ const bridge: GensuiteBridge = {
     download: (args: MediaDownloadArgs) => ipcRenderer.invoke('media:download', args),
   },
   audio: {
-    write: (args: AudioWriteArgs) => ipcRenderer.invoke('audio:write', args),
-    download: (args: AudioDownloadArgs) => ipcRenderer.invoke('audio:download', args),
+    write: (args: AudioWriteArgs) => invokeStructured('audio:write', args, isAudioPersistResult),
+    download: (args: AudioDownloadArgs) => invokeStructured('audio:download', args, isAudioPersistResult),
+    assemble: (args: AudioAssembleArgs) => invokeStructured('audio:assemble', args, isAudioPersistResult),
+    probe: (args: AudioProbeArgs) => invokeStructured('audio:probe', args, isAudioPersistResult),
   },
   edgetts: {
-    voices: () => ipcRenderer.invoke('edgetts:voices'),
-    synthesize: (args: EdgeTtsSynthesizeArgs) => ipcRenderer.invoke('edgetts:synthesize', args),
+    voices: () => invokeStructured('edgetts:voices', undefined, isEdgeTtsVoices),
+    synthesize: (args: EdgeTtsSynthesizeArgs) => invokeStructured('edgetts:synthesize', args, isEdgeTtsResult),
     kill: (jobId: string) => ipcRenderer.invoke('edgetts:kill', jobId),
   },
   capcuttts: {
@@ -224,9 +271,10 @@ const bridge: GensuiteBridge = {
   whisper: {
     extract: (args: WhisperExtractArgs) => invokeStructured('whisper:extract', args, isNonEmptyString),
     transcribe: (args: WhisperTranscribeArgs) => invokeStructured('whisper:transcribe', args, isTranscriptSegments),
-    align: (args: WhisperAlignArgs) => ipcRenderer.invoke('whisper:align', args),
-    modelStatus: (args: WhisperModelStatusArgs) => ipcRenderer.invoke('whisper:modelStatus', args),
-    downloadModel: (args: WhisperModelDownloadArgs) => ipcRenderer.invoke('whisper:downloadModel', args),
+    align: (args: WhisperAlignArgs) => invokeStructured('whisper:align', args, isSubtitleWordTimings),
+    modelStatus: (args: WhisperModelStatusArgs) => invokeStructured('whisper:modelStatus', args, isWhisperModelStatus),
+    downloadModel: (args: WhisperModelDownloadArgs) => invokeStructured('whisper:downloadModel', args, isNonEmptyString),
+    cancel: (projectId: string) => ipcRenderer.invoke('whisper:cancel', projectId),
     onProgress: (cb: (p: WhisperProgress) => void) => {
       const listener = (_e: unknown, p: WhisperProgress) => cb(p);
       ipcRenderer.on('whisper:progress', listener);

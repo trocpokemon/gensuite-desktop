@@ -7,20 +7,30 @@ import type { TranscriptSegment } from '../../shared/types';
 export class LocalWhisperAdapter implements ITranscriptionProvider {
   readonly engine = 'local' as const;
   readonly isLocal = true;
+  private projectId = '';
 
   async transcribe(req: TranscribeRequest): Promise<TranscriptSegment[]> {
-    const extracted = await window.gensuite.whisper.extract({
-      projectId: req.projectId,
-      sourcePath: req.sourcePath,
-    });
-    if (!extracted.ok) throw extracted.error;
-    const result = await window.gensuite.whisper.transcribe({
-      projectId: req.projectId,
-      wavPath: extracted.value,
-      model: req.model,
-      language: req.language,
-    });
-    if (!result.ok) throw result.error;
-    return result.value;
+    this.projectId = req.projectId;
+    try {
+      const extracted = await window.gensuite.whisper.extract({
+        projectId: req.projectId,
+        sourcePath: req.sourcePath,
+      });
+      if (!extracted.ok) throw extracted.error;
+      const result = await window.gensuite.whisper.transcribe({
+        projectId: req.projectId,
+        wavPath: extracted.value,
+        model: req.model,
+        language: req.language,
+      });
+      if (!result.ok) throw result.error;
+      return result.value;
+    } finally {
+      this.projectId = '';
+    }
+  }
+
+  cancel(): void {
+    if (this.projectId) window.gensuite.whisper.cancel(this.projectId).catch(() => false);
   }
 }

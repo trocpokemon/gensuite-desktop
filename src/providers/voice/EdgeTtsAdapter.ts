@@ -1,65 +1,111 @@
+import type { SubtitleWordTiming } from '../../shared/types';
+import { clientAppError } from '../clientAppError';
 import type { IVoiceProvider, VoiceRequest, VoiceResult } from './types';
-import { localFileUrl } from '../../shared/localFile';
+import {
+  createVoiceCheckpoint,
+  loadVoiceCheckpoint,
+  retryDelay,
+  saveVoiceCheckpoint,
+  splitVoiceText,
+  voiceRequestKey,
+} from './voiceReliability';
 
-// Local-free mode: drives Microsoft Edge's online Read-Aloud service through the
-// main process (window.gensuite.edgetts). Free and keyless, but needs network.
-// The renderer can call cancel() to close the WebSocket mid-run; synthesize()
-// then rejects with 'edgetts:killed'.
+const MAX_FREE_VOICE_CHARS = 50_000;
+
+// Free/keyless voice source. It still needs a network connection, so every
+// request is split, checkpointed and validated before the scene is committed.
 export class EdgeTtsAdapter implements IVoiceProvider {
   readonly engine = 'edgetts' as const;
   readonly isLocal = true;
 
   private jobId: string | null = null;
+  private controller: AbortController | null = null;
 
   async synthesize(req: VoiceRequest): Promise<VoiceResult> {
-    if (!req.text?.trim()) throw new Error('Đoạn văn trống.');
+    if (!req.text?.trim()) throw clientAppError('VOICE_INPUT_INVALID');
+    if (req.text.length > MAX_FREE_VOICE_CHARS) throw clientAppError('VOICE_TEXT_TOO_LONG');
+    this.controller = new AbortController();
+    const signal = this.controller.signal;
+    const chunks = splitVoiceText(req.text, 900);
+    const requestKey = voiceRequestKey(req, this.engine);
+    const checkpoint = loadVoiceCheckpoint(req.projectId, req.segmentId, requestKey)
+      ?? createVoiceCheckpoint(requestKey, chunks.length);
+    if (checkpoint.parts.length !== chunks.length) checkpoint.parts = createVoiceCheckpoint(requestKey, chunks.length).parts;
+    saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
 
-    const jobId = `${req.segmentId}_${Date.now()}`;
-    this.jobId = jobId;
-
-    let synthesis: Awaited<ReturnType<typeof window.gensuite.edgetts.synthesize>>;
+    const partPaths: string[] = [];
+    const wordTimings: SubtitleWordTiming[] = [];
+    let offset = 0;
     try {
-      synthesis = await window.gensuite.edgetts.synthesize({
-        projectId: req.projectId,
-        jobId,
-        segmentId: req.segmentId,
-        text: req.text,
-        voiceId: req.voiceId,
-        speed: req.speed,
-        pitch: req.pitch,
-        volume: req.volume,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes('edgetts:killed')) throw new Error('voice:cancelled');
-      if (message.includes('ngắt kết nối giữa chừng')) {
-        throw new Error('Kết nối tạo giọng bị gián đoạn. Hãy chờ vài giây rồi thử lại.');
-      }
-      throw new Error('Chưa thể tạo giọng lúc này. Hãy kiểm tra kết nối mạng hoặc thử lại sau.');
-    } finally {
-      if (this.jobId === jobId) this.jobId = null;
-    }
+      for (let index = 0; index < chunks.length; index += 1) {
+        const part = checkpoint.parts[index];
+        if (signal.aborted) throw clientAppError('VOICE_CANCELLED', { chunkNumber: index + 1, chunkCount: chunks.length });
+        if (part.status === 'done' && part.audioPath) {
+          const existing = await window.gensuite.audio.probe({ audioPath: part.audioPath });
+          if (existing.ok) {
+            const duration = existing.value.durationSec;
+            for (const timing of part.wordTimings ?? []) {
+              wordTimings.push({ word: timing.word, start: timing.start + offset, end: timing.end + offset });
+            }
+            offset += duration;
+            partPaths.push(existing.value.audioPath);
+            continue;
+          }
+          part.status = 'pending';
+          part.audioPath = undefined;
+          part.durationSec = undefined;
+          part.wordTimings = undefined;
+        }
 
-    const durationSec = await probeFileDuration(synthesis.audioPath);
-    return { audioPath: synthesis.audioPath, durationSec, wordTimings: synthesis.wordTimings };
+        let result: Awaited<ReturnType<typeof window.gensuite.edgetts.synthesize>> | null = null;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          const jobId = `${req.segmentId}_${requestKey}_${index + 1}_${Date.now()}`;
+          this.jobId = jobId;
+          result = await window.gensuite.edgetts.synthesize({
+            projectId: req.projectId,
+            jobId,
+            segmentId: `${req.segmentId}-${requestKey}-${index + 1}`,
+            text: chunks[index],
+            voiceId: req.voiceId,
+            speed: req.speed,
+            pitch: req.pitch,
+            volume: req.volume,
+            chunkNumber: index + 1,
+            chunkCount: chunks.length,
+          });
+          if (result.ok || !result.error.retryable || attempt === 3 || signal.aborted) break;
+          await retryDelay(attempt, signal);
+        }
+        if (!result?.ok) throw result?.error ?? clientAppError('VOICE_UNEXPECTED', { chunkNumber: index + 1, chunkCount: chunks.length });
+        part.status = 'done';
+        part.audioPath = result.value.audioPath;
+        part.durationSec = result.value.durationSec;
+        part.wordTimings = result.value.wordTimings;
+        checkpoint.createdAt = Date.now();
+        saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
+        for (const timing of result.value.wordTimings ?? []) {
+          wordTimings.push({ word: timing.word, start: timing.start + offset, end: timing.end + offset });
+        }
+        offset += result.value.durationSec;
+        partPaths.push(result.value.audioPath);
+      }
+
+      const assembled = await window.gensuite.audio.assemble({ projectId: req.projectId, segmentId: req.segmentId, partPaths });
+      if (!assembled.ok) throw assembled.error;
+      return {
+        audioPath: assembled.value.audioPath,
+        durationSec: assembled.value.durationSec,
+        wordTimings: wordTimings.length ? wordTimings : undefined,
+      };
+    } finally {
+      this.jobId = null;
+      this.controller = null;
+    }
   }
 
   cancel(): void {
-    if (this.jobId) {
-      window.gensuite.edgetts.kill(this.jobId).catch(() => {});
-      this.jobId = null;
-    }
+    this.controller?.abort();
+    if (this.jobId) window.gensuite.edgetts.kill(this.jobId).catch(() => undefined);
+    this.jobId = null;
   }
-}
-
-// edge-tts writes an MP3 to disk; load it through an <audio> element to read length.
-function probeFileDuration(audioPath: string): Promise<number> {
-  return new Promise((resolve) => {
-    const el = new Audio();
-    el.addEventListener('loadedmetadata', () =>
-      resolve(Number.isFinite(el.duration) ? el.duration : 0),
-    );
-    el.addEventListener('error', () => resolve(0));
-    el.src = localFileUrl(audioPath) ?? '';
-  });
 }

@@ -230,8 +230,10 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
       let active = true;
       setCatalogBusy(true);
       setCatalogError('');
-      window.gensuite.edgetts.voices().then((list) => {
+      window.gensuite.edgetts.voices().then((result) => {
         if (!active) return;
+        if (!result.ok) throw result.error;
+        const list = result.value;
         const options = list.map(edgeVoiceToOption).sort(compareEdgeVoices);
         edgeVoiceCache = options.length ? options : EDGE_VOICE_OPTIONS;
         setVoices(edgeVoiceCache);
@@ -351,7 +353,15 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature }: Props) {
 
   const clearGeneratedAudio = () => {
     if (!project.scenes.some((scene) => scene.audioPath)) return;
-    setScenes(project.scenes.map((scene) => ({ ...scene, audioPath: undefined, audioDuration: undefined })));
+    setScenes(project.scenes.map((scene) => ({
+      ...scene,
+      audioPath: undefined,
+      audioDuration: undefined,
+      subtitleWords: undefined,
+      subtitleTimingText: undefined,
+      subtitleTimingAudioPath: undefined,
+      subtitleTimingQuality: undefined,
+    })));
   };
 
   const canUseVoiceEngine = (next: VoiceEngine): boolean => next === 'edgetts' || next === 'capcuttts' || (

@@ -6,13 +6,14 @@ import { EngineToggle } from '../components/EngineToggle';
 import { VoiceConfigPanel } from '../components/VoiceConfigPanel';
 import { AppSelect } from '../components/AppSelect';
 import { SubtitleDesigner } from '../components/SubtitleDesigner';
-import { getTranscriptionProvider } from '../providers/transcription';
+import { getTranscriptionProvider, type ITranscriptionProvider } from '../providers/transcription';
 import { getScriptProvider } from '../providers/script';
 import { getVoiceProvider } from '../providers/voice';
 import { missingKeyService, serviceLabel, errorMessage, loginRequiredPlatform, type VideoLoginPlatform } from '../providers/errors';
 import type { FfmpegProgress, WhisperModelName } from '../shared/types';
 import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
 import { useEntitlementStore } from '../store/entitlementStore';
+import { probeUsableAudio } from '../providers/voice/audioUtils';
 
 interface Props {
   onOpenSettings: () => void;
@@ -155,6 +156,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
   const runningRef = useRef(running);
   runningRef.current = running;
   const reviewPreparingRef = useRef(false);
+  const transcriptionProviderRef = useRef<ITranscriptionProvider | null>(null);
 
   useEffect(() => {
     onNavigationLockChange?.(running);
@@ -298,9 +300,15 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
 
     setStage('transcribe');
     const transcriber = getTranscriptionProvider(settings.transcriptionEngine, keys, 'localize-cloud');
-    const segments = await transcriber.transcribe({
-      projectId, sourcePath: src, model: settings.whisperModel, language: selectedSourceLanguage,
-    });
+    transcriptionProviderRef.current = transcriber;
+    let segments;
+    try {
+      segments = await transcriber.transcribe({
+        projectId, sourcePath: src, model: settings.whisperModel, language: selectedSourceLanguage,
+      });
+    } finally {
+      if (transcriptionProviderRef.current === transcriber) transcriptionProviderRef.current = null;
+    }
     if (transcriptHasAbnormalRepetition(segments)) {
       throw new Error('Kết quả nhận dạng bị lặp bất thường. Hãy chọn đúng ngôn ngữ gốc hoặc tăng chất lượng nhận dạng rồi thử lại.');
     }
@@ -460,8 +468,21 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     const doneCount = () => useProjectStore.getState().project.scenes.filter((s) => s.audioPath).length;
     setVoiceProgress({ done: doneCount(), total: scenes.length });
     for (let i = 0; i < scenes.length; i += 1) {
-      const scene = scenes[i];
-      if (scene.audioPath) continue; // already voiced (fresh run skips nothing, retry skips the done ones)
+      let scene = useProjectStore.getState().project.scenes.find((item) => item.id === scenes[i].id) ?? scenes[i];
+      if (scene.audioPath) {
+        const existing = await probeUsableAudio(scene.audioPath);
+        if (existing) {
+          if (Math.abs((scene.audioDuration ?? 0) - existing.durationSec) > 0.1) {
+            useProjectStore.getState().updateScene(scene.id, { audioDuration: existing.durationSec });
+          }
+          continue;
+        }
+        useProjectStore.getState().updateScene(scene.id, {
+          audioPath: undefined, audioDuration: undefined, subtitleWords: undefined,
+          subtitleTimingText: undefined, subtitleTimingAudioPath: undefined, subtitleTimingQuality: undefined,
+        });
+        scene = { ...scene, audioPath: undefined, audioDuration: undefined };
+      }
       try {
         const result = await voice.synthesize({
           projectId, segmentId: scene.id, text: scene.narration,
@@ -476,6 +497,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
           subtitleWords: result.wordTimings,
           subtitleTimingText: result.wordTimings?.length ? scene.narration : undefined,
           subtitleTimingAudioPath: result.wordTimings?.length ? result.audioPath : undefined,
+          subtitleTimingQuality: result.wordTimings?.length ? 'exact' : undefined,
         });
         setVoiceProgress({ done: doneCount(), total: scenes.length });
       } catch (err) {
@@ -496,12 +518,13 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       setAlignmentProgress({ done: 0, total: finalScenes.length });
       for (let index = 0; index < finalScenes.length; index += 1) {
         const scene = finalScenes[index];
-        const wordTimings = await alignSceneSubtitle(scene, projectId, targetLanguage);
+        const alignment = await alignSceneSubtitle(scene, projectId, targetLanguage, index + 1, finalScenes.length);
         if (!hasFreshSubtitleTiming(scene)) {
           useProjectStore.getState().updateScene(scene.id, {
-            subtitleWords: wordTimings,
+            subtitleWords: alignment.words,
             subtitleTimingText: scene.narration,
             subtitleTimingAudioPath: scene.audioPath,
+            subtitleTimingQuality: alignment.quality,
           });
         }
         setAlignmentProgress({ done: index + 1, total: finalScenes.length });
@@ -554,6 +577,12 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       else setError(errorMessage(err));
       setStage('error');
     }
+  };
+
+  const cancelRecognition = async () => {
+    if (stage !== 'transcribe') return;
+    transcriptionProviderRef.current?.cancel?.();
+    await window.gensuite.whisper.cancel(project.id).catch(() => false);
   };
 
   const stageLabel = (): string => {
@@ -765,6 +794,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
 
       <footer className={`mx-auto flex w-full shrink-0 items-center gap-3 rounded-2xl border border-white/[0.08] bg-[#151516]/95 p-3 shadow-2xl backdrop-blur-xl ${setupStep === 'subtitle' ? 'mt-2 max-w-none' : 'mt-4 max-w-5xl'}`}>
         {running ? <div className="min-w-0 flex-1 px-2"><p className="flex items-center gap-2 truncate text-xs font-semibold text-emerald-200"><Loader2 size={15} className="shrink-0 animate-spin" /> {taskMode === 'batch' && activeBatchId ? `Video ${Math.max(1, batchItems.findIndex((item) => item.id === activeBatchId) + 1)}/${batchItems.length} · ` : ''}{stageLabel()}</p><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${stage === 'download' ? downloadPercent : stage === 'transcribe' ? (transcribePercent ?? 1) : stage === 'merge' ? mergePercent : stage === 'align' ? (alignmentProgress.total ? (alignmentProgress.done / alignmentProgress.total) * 100 : 0) : stage === 'voice' && voiceProgress.total ? (voiceProgress.done / voiceProgress.total) * 100 : 18}%` }} /></div></div> : <div className="min-w-0 flex-1 px-2"><p className="truncate text-xs font-semibold text-white/60">Bước {currentStepIndex + 1}/4 · {SETUP_STEPS[currentStepIndex].label}</p><p className="mt-0.5 truncate text-[10px] text-white/25">{sourceReady ? taskMode === 'batch' ? `${batchItems.length} video · ${completedBatchCount} đã xong` : `${sourceLanguageLabel} → ${targetLanguageLabel}` : 'Hãy chọn video để bắt đầu'}</p></div>}
+        {stage === 'transcribe' && <button type="button" onClick={() => void cancelRecognition()} className="inline-flex items-center gap-2 rounded-xl border border-red-300/20 px-4 py-3 text-xs font-bold text-red-200/80 hover:bg-red-400/10"><X size={14} /> Dừng</button>}
         {currentStepIndex > 0 && !running && <button onClick={goBack} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-xs font-bold text-white/55 hover:text-white"><ArrowLeft size={14} /> Quay lại</button>}
         {setupStep !== 'export' ? <button onClick={() => void goNext()} disabled={running || !stepReady(setupStep)} className="primary-action inline-flex items-center gap-2 rounded-xl px-5 py-3 text-xs font-bold disabled:opacity-40">{running && setupStep === 'voice' ? <><Loader2 size={14} className="animate-spin" /> Đang chuẩn bị review</> : <>Tiếp tục <ChevronRight size={14} /></>}</button> : <button onClick={run} disabled={running || !sourceReady || !voiceConfig.voiceId || (taskMode === 'batch' && remainingBatchCount === 0)} className="primary-action inline-flex min-w-40 items-center justify-center gap-2 rounded-xl px-5 py-3 text-xs font-bold disabled:opacity-40">{running ? <><Loader2 size={15} className="animate-spin" /> Đang xử lý</> : <><Play size={15} /> {taskMode === 'batch' ? remainingBatchCount === 0 ? 'Đã hoàn tất' : completedBatchCount ? 'Chạy phần còn lại' : `Tạo ${batchItems.length} video` : 'Tạo video'}</>}</button>}
       </footer>

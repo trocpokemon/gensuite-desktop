@@ -18,6 +18,7 @@ import { registerWhisperIpc } from './ipc/whisper';
 import { registerFilesIpc } from './ipc/files';
 import { registerNarrationIpc } from './ipc/narration';
 import { registerUpdater, startUpdateChecks } from './updater';
+import { isPublicAppError } from '../src/shared/appErrors';
 
 // Vite injects these in dev; undefined in a packaged build.
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
@@ -96,6 +97,17 @@ function registerWindowIpc(): void {
       code: record.code,
       stage: 'desktop',
       cause: 'transport-failed',
+    });
+  });
+  ipcMain.on('diagnostics:client-failure', (_e, payload: unknown) => {
+    if (!isPublicAppError(payload)) return;
+    log.error('operation failed', {
+      diagnosticId: payload.diagnosticId,
+      code: payload.code,
+      stage: payload.stage,
+      cause: payload.cause,
+      retryable: payload.retryable,
+      ...payload.context,
     });
   });
   ipcMain.on('window:minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize());

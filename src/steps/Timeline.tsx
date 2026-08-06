@@ -65,14 +65,16 @@ export function Timeline() {
       const scenes: ExportScene[] = [];
       for (let index = 0; index < project.scenes.length; index += 1) {
         const scene = project.scenes[index];
-        const wordTimings = sub.enabled
-          ? await alignSceneSubtitle(scene, project.id, voiceLanguage)
+        const alignment = sub.enabled
+          ? await alignSceneSubtitle(scene, project.id, voiceLanguage, index + 1, project.scenes.length)
           : undefined;
+        const wordTimings = alignment?.words;
         if (sub.enabled && !hasFreshSubtitleTiming(scene)) {
           useProjectStore.getState().updateScene(scene.id, {
             subtitleWords: wordTimings,
             subtitleTimingText: scene.narration,
             subtitleTimingAudioPath: scene.audioPath,
+            subtitleTimingQuality: alignment?.quality,
           });
         }
         scenes.push({

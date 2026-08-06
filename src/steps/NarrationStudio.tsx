@@ -14,6 +14,7 @@ import { AppSelect } from '../components/AppSelect';
 import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
 import { localFileUrl } from '../shared/localFile';
 import type { MusicConfig, NarrationDensity, NarrationProgressPhase, Scene, SubtitleConfig } from '../shared/types';
+import { probeUsableAudio } from '../providers/voice/audioUtils';
 
 const NARRATION_LANGUAGES = [
   ['vi-VN', 'Tiếng Việt'], ['en-US', 'English'], ['zh-CN', '中文'], ['ja-JP', '日本語'],
@@ -287,6 +288,7 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
       subtitleWords: undefined,
       subtitleTimingText: undefined,
       subtitleTimingAudioPath: undefined,
+      subtitleTimingQuality: undefined,
       narrationFitStatus: 'pending',
       narrationRevision: 0,
     });
@@ -324,6 +326,18 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
       for (let index = 0; index < snapshot.scenes.length; index += 1) {
         const original = useProjectStore.getState().project.scenes.find((scene) => scene.id === snapshot.scenes[index].id);
         if (!original) continue;
+        if (original.audioPath) {
+          const existing = await probeUsableAudio(original.audioPath);
+          if (existing) {
+            if (Math.abs((original.audioDuration ?? 0) - existing.durationSec) > 0.1) updateScene(original.id, { audioDuration: existing.durationSec });
+            setVoiceProgress({ done: index + 1, total: snapshot.scenes.length, fitting: false });
+            continue;
+          }
+          updateScene(original.id, {
+            audioPath: undefined, audioDuration: undefined, subtitleWords: undefined,
+            subtitleTimingText: undefined, subtitleTimingAudioPath: undefined, subtitleTimingQuality: undefined,
+          });
+        }
         let text = original.narration.replace(/\s+/g, ' ').trim();
         if (!text) throw new Error(`Đoạn ${index + 1} chưa có lời thuyết minh.`);
         const windowSeconds = Math.max(0.8, (original.sourceEnd ?? 0) - (original.sourceStart ?? 0));
@@ -382,6 +396,7 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
           subtitleWords: result.wordTimings,
           subtitleTimingText: result.wordTimings?.length ? text : undefined,
           subtitleTimingAudioPath: result.wordTimings?.length ? result.audioPath : undefined,
+          subtitleTimingQuality: result.wordTimings?.length ? 'exact' : undefined,
           narrationFitStatus: fits ? 'fits' : 'needs-review',
           narrationRevision: revision,
         });
@@ -458,13 +473,15 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
       }
       if (sub.enabled) {
         const language = project.settings.voiceConfigs[project.settings.voiceEngine].language;
-        for (const scene of scenes) {
-          const words = await alignSceneSubtitle(scene, project.id, language);
+        for (let index = 0; index < scenes.length; index += 1) {
+          const scene = scenes[index];
+          const alignment = await alignSceneSubtitle(scene, project.id, language, index + 1, scenes.length);
           if (!hasFreshSubtitleTiming(scene)) {
             updateScene(scene.id, {
-              subtitleWords: words,
+              subtitleWords: alignment.words,
               subtitleTimingText: scene.narration,
               subtitleTimingAudioPath: scene.audioPath,
+              subtitleTimingQuality: alignment.quality,
             });
           }
         }

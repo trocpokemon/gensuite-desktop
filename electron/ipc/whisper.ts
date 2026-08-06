@@ -2,6 +2,8 @@ import { ipcMain, BrowserWindow, app } from 'electron';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createWriteStream } from 'node:fs';
+import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { projectDir } from './project';
@@ -51,6 +53,12 @@ const MIN_MODEL_BYTES: Record<WhisperModelName, number> = {
   medium: 1_300_000_000,
 };
 
+const MODEL_DOWNLOAD_INACTIVITY_MS = 45_000;
+const MODEL_PREFLIGHT_TIMEOUT_MS = 3 * 60 * 1000;
+const modelDownloads = new Map<WhisperModelName, Promise<string>>();
+type RecognitionJob = { cancelled: boolean; child?: ReturnType<typeof spawn> };
+const runningTranscriptions = new Map<string, RecognitionJob>();
+
 // HuggingFace mirror of the official ggml whisper models.
 function modelUrl(model: WhisperModelName): string {
   return `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model}.bin`;
@@ -66,25 +74,109 @@ async function fileExists(filePath: string): Promise<boolean> {
 
 async function modelIsUsable(filePath: string, model: WhisperModelName): Promise<boolean> {
   const stat = await fs.stat(filePath).catch(() => null);
-  return Boolean(stat?.isFile() && stat.size >= MIN_MODEL_BYTES[model]);
+  if (!stat?.isFile() || stat.size < MIN_MODEL_BYTES[model]) return false;
+  const handle = await fs.open(filePath, 'r').catch(() => null);
+  if (!handle) return false;
+  try {
+    const header = Buffer.alloc(4);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (bytesRead !== header.length) return false;
+    return ['lmgg', 'ggml', 'GGUF'].includes(header.toString('ascii'));
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
-async function ensureModel(model: WhisperModelName, win: BrowserWindow | null): Promise<string> {
-  const dest = modelPath(model);
-  if (await modelIsUsable(dest, model)) return dest;
+function modelFailure(error: unknown): AppFailure {
+  if (error instanceof AppFailure) return error;
+  const code = processErrorCode(error);
+  if (code === 'EACCES' || code === 'EPERM') return appFailure('TRANSCRIPTION_MODEL_PERMISSION_DENIED', undefined, { systemCode: code });
+  if (code === 'ENOSPC') return appFailure('TRANSCRIPTION_MODEL_STORAGE_FULL', undefined, { systemCode: code });
+  return appFailure('TRANSCRIPTION_MODEL_UNAVAILABLE', undefined, { systemCode: code });
+}
 
-  await fs.mkdir(modelsDir(), { recursive: true });
-  // A short file can otherwise remain cached forever and make every later run
-  // fail at the recognition step.
-  await fs.unlink(dest).catch(() => undefined);
-  emit(win, { phase: 'downloading-model', percent: 0, model });
+function silentWav(durationSeconds = 0.5): Buffer {
+  const sampleRate = 16_000;
+  const sampleCount = Math.max(1, Math.round(sampleRate * durationSeconds));
+  const dataLength = sampleCount * 2;
+  const buffer = Buffer.alloc(44 + dataLength);
+  buffer.write('RIFF', 0); buffer.writeUInt32LE(36 + dataLength, 4); buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12); buffer.writeUInt32LE(16, 16); buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22); buffer.writeUInt32LE(sampleRate, 24); buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32); buffer.writeUInt16LE(16, 34); buffer.write('data', 36); buffer.writeUInt32LE(dataLength, 40);
+  return buffer;
+}
 
-  const resp = await fetch(modelUrl(model));
-  if (!resp.ok || !resp.body) throw new Error('Không thể chuẩn bị dữ liệu nhận dạng. Hãy kiểm tra kết nối và thử lại.');
+async function validateModelRuntime(model: WhisperModelName, filePath: string): Promise<void> {
+  const stat = await fs.stat(filePath);
+  const binaryStat = await fs.stat(whisperBinary());
+  const stampPath = `${filePath}.verified.json`;
+  const stamp = await fs.readFile(stampPath, 'utf8').then((raw) => JSON.parse(raw) as {
+    size?: number; mtimeMs?: number; binaryMtimeMs?: number;
+  }).catch(() => null);
+  if (stamp?.size === stat.size && stamp.mtimeMs === stat.mtimeMs && stamp.binaryMtimeMs === binaryStat.mtimeMs) return;
+
+  const samplePath = path.join(modelsDir(), `.verify-${model}.wav`);
+  await fs.writeFile(samplePath, silentWav());
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(whisperBinary(), [
+        '-m', filePath, '-f', samplePath, '-nt', '-np', '-l', 'en',
+      ], { cwd: path.dirname(whisperBinary()), stdio: ['ignore', 'ignore', 'pipe'] });
+      let settled = false;
+      const timer = setTimeout(() => {
+        child.kill();
+        if (!settled) {
+          settled = true;
+          reject(appFailure('TRANSCRIPTION_MODEL_INVALID', undefined, { classifier: 'preflight-timeout' }));
+        }
+      }, MODEL_PREFLIGHT_TIMEOUT_MS);
+      child.on('error', (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(modelFailure(error));
+      });
+      child.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        code === 0
+          ? resolve()
+          : reject(appFailure('TRANSCRIPTION_MODEL_INVALID', undefined, { exitCode: code ?? undefined, classifier: 'preflight-exit' }));
+      });
+    });
+    const verified = await fs.stat(filePath);
+    const partial = `${stampPath}.partial`;
+    await fs.writeFile(partial, JSON.stringify({
+      size: verified.size,
+      mtimeMs: verified.mtimeMs,
+      binaryMtimeMs: binaryStat.mtimeMs,
+    }), 'utf8');
+    await fs.rm(stampPath, { force: true }).catch(() => undefined);
+    await fs.rename(partial, stampPath);
+  } finally {
+    await fs.unlink(samplePath).catch(() => undefined);
+  }
+}
+
+async function downloadModel(model: WhisperModelName, win: BrowserWindow | null, dest: string): Promise<void> {
+  const controller = new AbortController();
+  let responseTimer = setTimeout(() => controller.abort(), MODEL_DOWNLOAD_INACTIVITY_MS);
+  let resp: Response;
+  try {
+    resp = await fetch(modelUrl(model), { signal: controller.signal });
+  } catch (error) {
+    throw appFailure('TRANSCRIPTION_MODEL_DOWNLOAD_FAILED', undefined, {
+      systemCode: processErrorCode(error), classifier: 'request-failed',
+    });
+  } finally {
+    clearTimeout(responseTimer);
+  }
+  if (!resp.ok || !resp.body) {
+    throw appFailure('TRANSCRIPTION_MODEL_DOWNLOAD_FAILED', undefined, { statusCode: resp.status, classifier: 'response-rejected' });
+  }
   const total = Number(resp.headers.get('content-length')) || 0;
-
-  // Write to a temp file first so an interrupted download never leaves a
-  // truncated model that later looks "present".
   const tmp = `${dest}.part`;
   await fs.unlink(tmp).catch(() => undefined);
   const out = createWriteStream(tmp);
@@ -92,28 +184,59 @@ async function ensureModel(model: WhisperModelName, win: BrowserWindow | null): 
   const reader = resp.body.getReader();
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const packet = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+        responseTimer = setTimeout(() => {
+          controller.abort();
+          reject(appFailure('TRANSCRIPTION_MODEL_DOWNLOAD_FAILED', undefined, { classifier: 'body-timeout' }));
+        }, MODEL_DOWNLOAD_INACTIVITY_MS);
+        reader.read().then(resolve, reject).finally(() => clearTimeout(responseTimer));
+      });
+      if (packet.done) break;
+      const value = packet.value;
       received += value.length;
-      await new Promise<void>((resolve, reject) =>
-        out.write(value, (err) => (err ? reject(err) : resolve())));
+      await new Promise<void>((resolve, reject) => out.write(value, (error) => error ? reject(error) : resolve()));
       if (total > 0) emit(win, { phase: 'downloading-model', percent: Math.round((received / total) * 100), model });
     }
     await new Promise<void>((resolve, reject) => {
-      out.once('finish', resolve);
-      out.once('error', reject);
-      out.end();
+      out.once('finish', resolve); out.once('error', reject); out.end();
     });
     if ((total > 0 && received !== total) || received < MIN_MODEL_BYTES[model]) {
-      throw new Error('Dữ liệu nhận dạng tải xuống chưa đầy đủ. Vui lòng thử lại.');
+      throw appFailure('TRANSCRIPTION_MODEL_INVALID', undefined, { classifier: 'incomplete-download' });
     }
     await fs.rename(tmp, dest);
   } catch (error) {
     out.destroy();
     await fs.unlink(tmp).catch(() => undefined);
-    throw error;
+    throw modelFailure(error);
   }
+}
+
+async function ensureModelUnlocked(model: WhisperModelName, win: BrowserWindow | null): Promise<string> {
+  const dest = modelPath(model);
+  await fs.mkdir(modelsDir(), { recursive: true }).catch((error) => { throw modelFailure(error); });
+  if (await modelIsUsable(dest, model)) {
+    try {
+      await validateModelRuntime(model, dest);
+      return dest;
+    } catch {
+      await fs.unlink(dest).catch(() => undefined);
+      await fs.unlink(`${dest}.verified.json`).catch(() => undefined);
+    }
+  }
+  await fs.unlink(dest).catch(() => undefined);
+  emit(win, { phase: 'downloading-model', percent: 0, model });
+  await downloadModel(model, win, dest);
+  if (!(await modelIsUsable(dest, model))) throw appFailure('TRANSCRIPTION_MODEL_INVALID', undefined, { classifier: 'header-invalid' });
+  await validateModelRuntime(model, dest);
   return dest;
+}
+
+async function ensureModel(model: WhisperModelName, win: BrowserWindow | null): Promise<string> {
+  const running = modelDownloads.get(model);
+  if (running) return running;
+  const task = ensureModelUnlocked(model, win).finally(() => modelDownloads.delete(model));
+  modelDownloads.set(model, task);
+  return task;
 }
 
 // whisper.cpp -oj emits { transcription: [{ offsets:{from,to}(ms), text }] }.
@@ -257,6 +380,7 @@ const TRANSCRIPTION_CORE_SECONDS = 60;
 const TRANSCRIPTION_OVERLAP_SECONDS = 2;
 const TRANSCRIPTION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const EXTRACTION_STALL_TIMEOUT_MS = 5 * 60 * 1000;
+const ALIGNMENT_STALL_TIMEOUT_MS = 2 * 60 * 1000;
 
 export interface TranscriptionChunk {
   coreStart: number;
@@ -313,6 +437,81 @@ export function mergeTranscriptionChunks(
   return merged;
 }
 
+interface TranscriptionCheckpoint {
+  schemaVersion: 1;
+  fingerprint: string;
+  duration: number;
+  model: WhisperModelName;
+  language: string;
+  completed: Array<{ index: number; chunk: TranscriptionChunk; segments: TranscriptSegment[] }>;
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const hash = createHash('sha256');
+    const input = createReadStream(filePath);
+    input.on('data', (chunk) => hash.update(chunk));
+    input.on('error', reject);
+    input.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+async function transcriptionFingerprint(
+  wavPath: string,
+  model: WhisperModelName,
+  language: string | undefined,
+  duration: number,
+): Promise<string> {
+  const audioHash = await sha256File(wavPath);
+  return createHash('sha256')
+    .update(JSON.stringify({ audioHash, model, language: language || 'auto', duration: Math.round(duration * 1000) }))
+    .digest('hex');
+}
+
+function validCheckpoint(value: unknown, fingerprint: string, chunks: TranscriptionChunk[]): value is TranscriptionCheckpoint {
+  if (!value || typeof value !== 'object') return false;
+  const checkpoint = value as TranscriptionCheckpoint;
+  if (checkpoint.schemaVersion !== 1 || checkpoint.fingerprint !== fingerprint || !Array.isArray(checkpoint.completed)) return false;
+  const seen = new Set<number>();
+  return checkpoint.completed.every((row) => {
+    if (!Number.isInteger(row?.index) || row.index < 0 || row.index >= chunks.length || seen.has(row.index)) return false;
+    seen.add(row.index);
+    const expected = chunks[row.index];
+    if (!row.chunk || row.chunk.coreStart !== expected.coreStart || row.chunk.coreEnd !== expected.coreEnd
+      || row.chunk.windowStart !== expected.windowStart || row.chunk.windowEnd !== expected.windowEnd) return false;
+    return Array.isArray(row.segments) && row.segments.every((segment) =>
+      typeof segment?.id === 'string'
+      && Number.isFinite(segment.start) && segment.start >= 0
+      && Number.isFinite(segment.end) && segment.end > segment.start
+      && typeof segment.text === 'string' && segment.text.trim().length > 0);
+  });
+}
+
+async function replaceJsonTransaction(dest: string, value: unknown): Promise<void> {
+  const partial = `${dest}.partial`;
+  const backup = `${dest}.backup`;
+  await fs.writeFile(partial, JSON.stringify(value), 'utf8');
+  await fs.rm(backup, { force: true }).catch(() => undefined);
+  const hadPrevious = await fileExists(dest);
+  if (hadPrevious) await fs.rename(dest, backup);
+  try {
+    await fs.rename(partial, dest);
+    await fs.rm(backup, { force: true }).catch(() => undefined);
+  } catch (error) {
+    await fs.rm(partial, { force: true }).catch(() => undefined);
+    if (hadPrevious) await fs.rename(backup, dest).catch(() => undefined);
+    throw error;
+  }
+}
+
+function recognitionThreads(model: WhisperModelName): number {
+  const totalGb = os.totalmem() / (1024 ** 3);
+  const freeGb = os.freemem() / (1024 ** 3);
+  if (model === 'medium' || totalGb < 10 || freeGb < 3) return 1;
+  if (model === 'small' || totalGb < 16 || freeGb < 6) return Math.min(2, os.availableParallelism());
+  return Math.max(1, Math.min(4, os.availableParallelism()));
+}
+
 function processErrorCode(error: unknown): string | undefined {
   const code = error && typeof error === 'object' ? (error as NodeJS.ErrnoException).code : undefined;
   return typeof code === 'string' ? code.toUpperCase() : undefined;
@@ -364,6 +563,174 @@ async function mediaDuration(sourcePath: string): Promise<number> {
     child.on('error', () => resolve(0));
     child.on('close', () => resolve(Math.max(0, Number.parseFloat(stdout.trim()) || 0)));
   });
+}
+
+async function recognizeWindow(options: {
+  binary: string;
+  modelFile: string;
+  wavPath: string;
+  workDir: string;
+  language?: string;
+  windowStart: number;
+  windowEnd: number;
+  threads: number;
+  context: { chunkNumber: number; chunkCount: number };
+  identity: string;
+  attempt: number;
+  job: RecognitionJob;
+}): Promise<TranscriptSegment[]> {
+  if (options.job.cancelled) throw appFailure('TRANSCRIPTION_CANCELLED', options.context);
+  const outBase = path.join(options.workDir, `transcript-${options.identity}`);
+  const jsonPath = `${outBase}.json`;
+  await fs.unlink(jsonPath).catch(() => undefined);
+  const args = [
+    '-m', options.modelFile,
+    '-f', options.wavPath,
+    '-t', String(Math.max(1, options.threads)),
+    '-ot', String(Math.round(options.windowStart * 1000)),
+    '-d', String(Math.round((options.windowEnd - options.windowStart) * 1000)),
+    '-oj',
+    '-of', outBase,
+    '-l', options.language && options.language !== 'auto' ? options.language : 'auto',
+  ];
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(options.binary, args, { cwd: path.dirname(options.binary), stdio: ['ignore', 'pipe', 'pipe'] });
+      options.job.child = child;
+      let diagnosticOutput = '';
+      let stalled = false;
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      const finish = (error?: AppFailure) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (options.job.child === child) options.job.child = undefined;
+        error ? reject(error) : resolve();
+      };
+      const armTimer = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          stalled = true;
+          child.kill();
+        }, TRANSCRIPTION_STALL_TIMEOUT_MS);
+      };
+      const consume = (data: unknown) => {
+        armTimer();
+        diagnosticOutput = `${diagnosticOutput}${String(data)}`.slice(-8192);
+      };
+      armTimer();
+      child.stdout?.on('data', consume);
+      child.stderr?.on('data', consume);
+      child.on('error', (error) => {
+        const code = processErrorCode(error);
+        finish(appFailure(
+          code === 'EACCES' || code === 'EPERM' ? 'TRANSCRIPTION_PROCESS_START_DENIED' : 'TRANSCRIPTION_PROCESS_START_FAILED',
+          options.context,
+          { systemCode: code, attempt: options.attempt },
+        ));
+      });
+      child.on('close', (code) => {
+        if (options.job.cancelled) finish(appFailure('TRANSCRIPTION_CANCELLED', options.context, { attempt: options.attempt }));
+        else if (stalled) finish(appFailure('TRANSCRIPTION_CHUNK_TIMEOUT', options.context, { exitCode: code ?? undefined, attempt: options.attempt }));
+        else if (code === 0) finish();
+        else if (isMemoryFailure(code, diagnosticOutput)) finish(appFailure('TRANSCRIPTION_MEMORY_LIMIT', options.context, { exitCode: code ?? undefined, attempt: options.attempt }));
+        else finish(appFailure('TRANSCRIPTION_CHUNK_FAILED', options.context, { exitCode: code ?? undefined, attempt: options.attempt }));
+      });
+    });
+
+    if (options.job.cancelled) throw appFailure('TRANSCRIPTION_CANCELLED', options.context);
+    try {
+      return parseWhisperJson(await fs.readFile(jsonPath, 'utf8'));
+    } catch (error) {
+      throw appFailure('TRANSCRIPTION_RESULT_INVALID', options.context, {
+        systemCode: processErrorCode(error), attempt: options.attempt,
+      });
+    }
+  } finally {
+    await fs.unlink(jsonPath).catch(() => undefined);
+  }
+}
+
+async function recognizeChunkWithRetry(options: {
+  binary: string;
+  modelFile: string;
+  wavPath: string;
+  workDir: string;
+  language?: string;
+  chunk: TranscriptionChunk;
+  chunkIndex: number;
+  chunkCount: number;
+  duration: number;
+  model: WhisperModelName;
+  job: RecognitionJob;
+}): Promise<TranscriptSegment[]> {
+  const context = { chunkNumber: options.chunkIndex + 1, chunkCount: options.chunkCount };
+  const primaryThreads = recognitionThreads(options.model);
+  let lastFailure: AppFailure | null = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      return await recognizeWindow({
+        ...options,
+        context,
+        windowStart: options.chunk.windowStart,
+        windowEnd: options.chunk.windowEnd,
+        threads: attempt === 1 ? primaryThreads : 1,
+        identity: `${options.chunkIndex + 1}-attempt-${attempt}`,
+        attempt,
+      });
+    } catch (error) {
+      const failure = error instanceof AppFailure ? error : appFailure('TRANSCRIPTION_CHUNK_FAILED', context);
+      if (failure.code === 'TRANSCRIPTION_CANCELLED'
+        || failure.code === 'TRANSCRIPTION_PROCESS_START_DENIED'
+        || failure.code === 'TRANSCRIPTION_PROCESS_START_FAILED') throw failure;
+      lastFailure = failure;
+    }
+  }
+
+  // A smaller retry isolates difficult/noisy windows and reduces peak work.
+  // The selected recognition quality is preserved; the app never silently
+  // switches to a less accurate model.
+  const midpoint = options.chunk.coreStart + (options.chunk.coreEnd - options.chunk.coreStart) / 2;
+  if (midpoint > options.chunk.coreStart + 1 && midpoint < options.chunk.coreEnd - 1) {
+    const subChunks: TranscriptionChunk[] = [
+      {
+        coreStart: options.chunk.coreStart,
+        coreEnd: midpoint,
+        windowStart: options.chunk.windowStart,
+        windowEnd: Math.min(options.chunk.windowEnd, midpoint + TRANSCRIPTION_OVERLAP_SECONDS),
+      },
+      {
+        coreStart: midpoint,
+        coreEnd: options.chunk.coreEnd,
+        windowStart: Math.max(options.chunk.windowStart, midpoint - TRANSCRIPTION_OVERLAP_SECONDS),
+        windowEnd: options.chunk.windowEnd,
+      },
+    ];
+    try {
+      const rows: Array<{ chunk: TranscriptionChunk; segments: TranscriptSegment[] }> = [];
+      for (let index = 0; index < subChunks.length; index += 1) {
+        const chunk = subChunks[index];
+        rows.push({
+          chunk,
+          segments: await recognizeWindow({
+            ...options,
+            context,
+            windowStart: chunk.windowStart,
+            windowEnd: chunk.windowEnd,
+            threads: 1,
+            identity: `${options.chunkIndex + 1}-attempt-3-${index + 1}`,
+            attempt: 3,
+          }),
+        });
+      }
+      return mergeTranscriptionChunks(rows, options.duration);
+    } catch (error) {
+      if (error instanceof AppFailure) throw error;
+    }
+  }
+  throw lastFailure ?? appFailure('TRANSCRIPTION_CHUNK_FAILED', context, { attempt: 3 });
 }
 
 export function registerWhisperIpc(): void {
@@ -465,22 +832,37 @@ export function registerWhisperIpc(): void {
     }
   });
 
-  ipcMain.handle('whisper:modelStatus', async (_e, args: WhisperModelStatusArgs): Promise<WhisperModelStatus> => {
-    const dest = modelPath(args.model);
-    return { model: args.model, present: await fileExists(dest), path: dest };
+  ipcMain.handle('whisper:modelStatus', async (_e, args: WhisperModelStatusArgs): Promise<IpcResult<WhisperModelStatus>> => {
+    try {
+      if (!args?.model) throw appFailure('TRANSCRIPTION_INPUT_REQUIRED');
+      const dest = modelPath(args.model);
+      return appSuccess({ model: args.model, present: await modelIsUsable(dest, args.model), path: dest });
+    } catch (error) {
+      return appFailureResult(error, 'TRANSCRIPTION_MODEL_UNAVAILABLE', { operation: 'model-status' });
+    }
   });
 
-  ipcMain.handle('whisper:downloadModel', async (e, args: WhisperModelDownloadArgs): Promise<string> => {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    const dest = await ensureModel(args.model, win);
-    emit(win, { phase: 'complete', model: args.model });
-    return dest;
+  ipcMain.handle('whisper:downloadModel', async (e, args: WhisperModelDownloadArgs): Promise<IpcResult<string>> => {
+    try {
+      if (!args?.model) throw appFailure('TRANSCRIPTION_INPUT_REQUIRED');
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const dest = await ensureModel(args.model, win);
+      emit(win, { phase: 'complete', model: args.model });
+      return appSuccess(dest);
+    } catch (error) {
+      return appFailureResult(modelFailure(error), 'TRANSCRIPTION_MODEL_UNAVAILABLE', { operation: 'download-model' });
+    }
   });
 
   ipcMain.handle('whisper:transcribe', async (e, args: WhisperTranscribeArgs): Promise<IpcResult<TranscriptSegment[]>> => {
+    let activeProjectId = '';
     try {
       const { projectId, wavPath, model, language } = args ?? {};
       if (!projectId || !wavPath || !model) throw appFailure('TRANSCRIPTION_INPUT_REQUIRED');
+      if (runningTranscriptions.has(projectId)) throw appFailure('TRANSCRIPTION_JOB_CONFLICT');
+      activeProjectId = projectId;
+      const recognitionJob: RecognitionJob = { cancelled: false };
+      runningTranscriptions.set(projectId, recognitionJob);
       try {
         const stat = await fs.stat(wavPath);
         if (!stat.isFile() || stat.size <= 44) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
@@ -496,7 +878,7 @@ export function registerWhisperIpc(): void {
       try {
         modelFile = await ensureModel(model, win);
       } catch (error) {
-        throw appFailure('TRANSCRIPTION_MODEL_UNAVAILABLE', undefined, { systemCode: processErrorCode(error) });
+        throw modelFailure(error);
       }
       const audioDuration = await mediaDuration(wavPath);
       if (!(audioDuration > 0)) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
@@ -510,144 +892,182 @@ export function registerWhisperIpc(): void {
       } catch (error) {
         throw tempFailure(error);
       }
-      const chunkResults: Array<{ chunk: TranscriptionChunk; segments: TranscriptSegment[] }> = [];
+      let fingerprint: string;
+      try {
+        fingerprint = await transcriptionFingerprint(wavPath, model, language, audioDuration);
+      } catch (error) {
+        throw sourceFailure(error);
+      }
+      const checkpointPath = path.join(workDir, `checkpoint-${fingerprint}.json`);
+      const rawCheckpoint = await fs.readFile(checkpointPath, 'utf8')
+        .then((raw) => JSON.parse(raw) as unknown)
+        .catch(() => null);
+      const checkpoint: TranscriptionCheckpoint = validCheckpoint(rawCheckpoint, fingerprint, chunks)
+        ? rawCheckpoint
+        : {
+          schemaVersion: 1,
+          fingerprint,
+          duration: audioDuration,
+          model,
+          language: language || 'auto',
+          completed: [],
+        };
+      const completed = new Map(checkpoint.completed.map((row) => [row.index, row]));
+      if (completed.size) {
+        const resumedPercent = Math.max(1, Math.min(99, Math.round((completed.size / chunks.length) * 99)));
+        emit(win, {
+          phase: 'transcribing', percent: resumedPercent, model,
+          chunkNumber: Math.min(chunks.length, completed.size + 1), chunkCount: chunks.length,
+        });
+      }
 
       for (let index = 0; index < chunks.length; index += 1) {
+        if (recognitionJob.cancelled) throw appFailure('TRANSCRIPTION_CANCELLED', { chunkNumber: index + 1, chunkCount: chunks.length });
+        if (completed.has(index)) continue;
         const chunk = chunks[index];
-        const context = { chunkNumber: index + 1, chunkCount: chunks.length };
-        const outBase = path.join(workDir, `transcript-${index + 1}`);
-        const jsonPath = `${outBase}.json`;
-        await fs.unlink(jsonPath).catch(() => undefined);
-        const windowDuration = chunk.windowEnd - chunk.windowStart;
-        const whisperArgs = [
-          '-m', modelFile,
-          '-f', wavPath,
-          '-t', String(Math.max(1, Math.min(4, os.availableParallelism()))),
-          '-ot', String(Math.round(chunk.windowStart * 1000)),
-          '-d', String(Math.round(windowDuration * 1000)),
-          '-oj',
-          '-of', outBase,
-          '-l', language && language !== 'auto' ? language : 'auto',
-        ];
-
-        await new Promise<void>((resolve, reject) => {
-          const child = spawn(binary, whisperArgs, { cwd: path.dirname(binary), stdio: ['ignore', 'pipe', 'pipe'] });
-          let diagnosticOutput = '';
-          let stalled = false;
-          let settled = false;
-          let timer: NodeJS.Timeout;
-          const finish = (error?: AppFailure) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            error ? reject(error) : resolve();
-          };
-          const armTimer = () => {
-            clearTimeout(timer);
-            timer = setTimeout(() => {
-              stalled = true;
-              child.kill();
-            }, TRANSCRIPTION_STALL_TIMEOUT_MS);
-          };
-          const consume = (data: unknown) => {
-            armTimer();
-            diagnosticOutput = `${diagnosticOutput}${String(data)}`.slice(-8192);
-          };
-          armTimer();
-          child.stdout?.on('data', consume);
-          child.stderr?.on('data', consume);
-          child.on('error', (error) => {
-            const code = processErrorCode(error);
-            finish(appFailure(
-              code === 'EACCES' || code === 'EPERM' ? 'TRANSCRIPTION_PROCESS_START_DENIED' : 'TRANSCRIPTION_PROCESS_START_FAILED',
-              context,
-              { systemCode: code, chunkNumber: index + 1, chunkCount: chunks.length },
-            ));
-          });
-          child.on('close', (code) => {
-            if (stalled) finish(appFailure('TRANSCRIPTION_CHUNK_TIMEOUT', context, { exitCode: code ?? undefined }));
-            else if (code === 0) finish();
-            else if (isMemoryFailure(code, diagnosticOutput)) finish(appFailure('TRANSCRIPTION_MEMORY_LIMIT', context, { exitCode: code ?? undefined }));
-            else finish(appFailure('TRANSCRIPTION_CHUNK_FAILED', context, { exitCode: code ?? undefined }));
-          });
+        const segments = await recognizeChunkWithRetry({
+          binary,
+          modelFile,
+          wavPath,
+          workDir,
+          language,
+          chunk,
+          chunkIndex: index,
+          chunkCount: chunks.length,
+          duration: audioDuration,
+          model,
+          job: recognitionJob,
         });
-
+        const row = { index, chunk, segments };
+        completed.set(index, row);
+        checkpoint.completed = [...completed.values()].sort((a, b) => a.index - b.index);
         try {
-          const raw = await fs.readFile(jsonPath, 'utf-8');
-          const parsed = parseWhisperJson(raw);
-          chunkResults.push({ chunk, segments: parsed });
+          await replaceJsonTransaction(checkpointPath, checkpoint);
         } catch (error) {
-          throw appFailure('TRANSCRIPTION_RESULT_INVALID', context, { systemCode: processErrorCode(error) });
-        } finally {
-          await fs.unlink(jsonPath).catch(() => undefined);
+          throw tempFailure(error);
         }
-        const percent = Math.max(1, Math.min(99, Math.round(((index + 1) / chunks.length) * 99)));
+        const percent = Math.max(1, Math.min(99, Math.round((completed.size / chunks.length) * 99)));
         emit(win, { phase: 'transcribing', percent, model, chunkNumber: index + 1, chunkCount: chunks.length });
       }
 
+      const chunkResults = [...completed.values()]
+        .sort((a, b) => a.index - b.index)
+        .map(({ chunk, segments }) => ({ chunk, segments }));
       const segments = mergeTranscriptionChunks(chunkResults, audioDuration);
       if (!segments.length) throw appFailure('TRANSCRIPTION_NO_SPEECH');
       emit(win, { phase: 'complete', percent: 100, model, chunkNumber: chunks.length, chunkCount: chunks.length });
       return appSuccess(segments);
     } catch (error) {
       return appFailureResult(error, 'TRANSCRIPTION_UNEXPECTED', { operation: 'transcribe' });
+    } finally {
+      if (activeProjectId) runningTranscriptions.delete(activeProjectId);
     }
   });
 
-  ipcMain.handle('whisper:align', async (e, args: WhisperAlignArgs): Promise<SubtitleWordTiming[]> => {
-    const { projectId, audioPath, text, model } = args;
-    if (!projectId || !audioPath || !text?.trim()) throw new Error('Thiếu dữ liệu để căn phụ đề với lời đọc.');
-    if (!(await fileExists(audioPath))) throw new Error('Không tìm thấy giọng đọc để căn phụ đề.');
-    const expected = expectedWords(text);
-    if (!expected.length) return [];
+  ipcMain.handle('whisper:cancel', async (_e, projectId: string): Promise<boolean> => {
+    const job = runningTranscriptions.get(String(projectId || ''));
+    if (!job) return false;
+    job.cancelled = true;
+    job.child?.kill();
+    return true;
+  });
 
-    const win = BrowserWindow.fromWebContents(e.sender);
-    const modelFile = await ensureModel(model, win);
-    const workDir = path.join(projectDir(projectId), 'work', 'caption-timing');
-    await fs.mkdir(workDir, { recursive: true });
-    const identity = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const wavPath = path.join(workDir, `${identity}.wav`);
-    const outBase = path.join(workDir, identity);
-    const jsonPath = `${outBase}.json`;
-
+  ipcMain.handle('whisper:align', async (e, args: WhisperAlignArgs): Promise<IpcResult<SubtitleWordTiming[]>> => {
+    const segmentContext = args?.segmentNumber && args?.segmentCount
+      ? { segmentNumber: args.segmentNumber, segmentCount: args.segmentCount }
+      : undefined;
     try {
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(ffmpegBinary(), ['-y', '-i', audioPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath], {
-          cwd: path.dirname(ffmpegBinary()), stdio: ['ignore', 'ignore', 'pipe'],
+      const { projectId, audioPath, text, model } = args ?? {};
+      if (!projectId || !audioPath || !text?.trim() || !model) throw appFailure('SUBTITLE_ALIGNMENT_INPUT_INVALID', segmentContext);
+      if (!(await fileExists(audioPath))) throw appFailure('SUBTITLE_ALIGNMENT_AUDIO_UNAVAILABLE', segmentContext);
+      const expected = expectedWords(text);
+      if (!expected.length) throw appFailure('SUBTITLE_ALIGNMENT_INPUT_INVALID', segmentContext);
+
+      const win = BrowserWindow.fromWebContents(e.sender);
+      let modelFile: string;
+      try {
+        modelFile = await ensureModel(model, win);
+      } catch (error) {
+        throw modelFailure(error);
+      }
+      const workDir = path.join(projectDir(projectId), 'work', 'caption-timing');
+      try {
+        await fs.mkdir(workDir, { recursive: true });
+      } catch (error) {
+        throw tempFailure(error);
+      }
+      const identity = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const wavPath = path.join(workDir, `${identity}.wav`);
+      const outBase = path.join(workDir, identity);
+      const jsonPath = `${outBase}.json`;
+
+      const runAlignmentProcess = async (binary: string, processArgs: string[], cwd: string): Promise<void> => {
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn(binary, processArgs, { cwd, stdio: ['ignore', 'ignore', 'pipe'] });
+          let settled = false;
+          let timedOut = false;
+          let timer: NodeJS.Timeout;
+          const finish = (failure?: AppFailure) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            failure ? reject(failure) : resolve();
+          };
+          const arm = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+              timedOut = true;
+              child.kill();
+            }, ALIGNMENT_STALL_TIMEOUT_MS);
+          };
+          arm();
+          child.stderr?.on('data', arm);
+          child.on('error', (error) => finish(appFailure('SUBTITLE_ALIGNMENT_FAILED', segmentContext, {
+            systemCode: processErrorCode(error),
+            classifier: 'start-failed',
+          })));
+          child.on('close', (code) => {
+            if (timedOut) finish(appFailure('SUBTITLE_ALIGNMENT_TIMEOUT', segmentContext, { exitCode: code ?? undefined }));
+            else if (code === 0) finish();
+            else finish(appFailure('SUBTITLE_ALIGNMENT_FAILED', segmentContext, { exitCode: code ?? undefined }));
+          });
         });
-        child.on('error', () => reject(new Error('Không thể chuẩn bị giọng đọc để căn phụ đề.')));
-        child.on('close', (code) => code === 0 ? resolve() : reject(new Error('Không thể chuẩn bị giọng đọc để căn phụ đề.')));
-      });
+      };
 
-      // The exact script is known and the input is clean generated speech, so a
-      // single decoding candidate plus a prompt is both faster and more stable
-      // than the exploratory settings used for source-video transcription.
-      const whisperArgs = [
-        '-m', modelFile,
-        '-f', wavPath,
-        '-ojf',
-        '-np',
-        '-bo', '1',
-        '-bs', '1',
-        '-nf',
-        '--prompt', text.slice(0, 1200),
-        '-of', outBase,
-      ];
-      const language = languageCode(args.language);
-      whisperArgs.push('-l', language ?? 'auto');
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn(whisperBinary(), whisperArgs, { cwd: path.dirname(whisperBinary()), stdio: ['ignore', 'ignore', 'pipe'] });
-        child.on('error', () => reject(new Error('Không thể căn phụ đề với lời đọc. Vui lòng thử lại.')));
-        child.on('close', (code) => code === 0 ? resolve() : reject(new Error('Không thể căn phụ đề với lời đọc. Vui lòng thử lại.')));
-      });
+      try {
+        await runAlignmentProcess(ffmpegBinary(), [
+          '-y', '-i', audioPath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath,
+        ], path.dirname(ffmpegBinary()));
 
-      const [raw, duration] = await Promise.all([fs.readFile(jsonPath, 'utf8'), mediaDuration(audioPath)]);
-      const aligned = parseAlignedWords(raw, expected, duration);
-      if (!aligned.length) throw new Error('Không xác định được nhịp lời đọc cho phụ đề. Vui lòng thử lại.');
-      return aligned;
-    } finally {
-      fs.unlink(wavPath).catch(() => {});
-      fs.unlink(jsonPath).catch(() => {});
+        const whisperArgs = [
+          '-m', modelFile,
+          '-f', wavPath,
+          '-ojf',
+          '-np',
+          '-bo', '1',
+          '-bs', '1',
+          '-nf',
+          '--prompt', text.slice(0, 1200),
+          '-of', outBase,
+        ];
+        const language = languageCode(args.language);
+        whisperArgs.push('-l', language ?? 'auto');
+        await runAlignmentProcess(whisperBinary(), whisperArgs, path.dirname(whisperBinary()));
+
+        const [raw, duration] = await Promise.all([fs.readFile(jsonPath, 'utf8'), mediaDuration(audioPath)]);
+        const aligned = parseAlignedWords(raw, expected, duration);
+        if (!aligned.length) throw appFailure('SUBTITLE_ALIGNMENT_RESULT_INVALID', segmentContext);
+        return appSuccess(aligned);
+      } finally {
+        await fs.unlink(wavPath).catch(() => undefined);
+        await fs.unlink(jsonPath).catch(() => undefined);
+      }
+    } catch (error) {
+      return appFailureResult(error, 'SUBTITLE_ALIGNMENT_FAILED', {
+        operation: 'align',
+        segmentNumber: args?.segmentNumber,
+        segmentCount: args?.segmentCount,
+      });
     }
   });
 }

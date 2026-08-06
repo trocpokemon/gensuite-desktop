@@ -17,4 +17,5 @@ export interface ITranscriptionProvider {
   /** True for the fully local engine (whisper.cpp) that needs no API key. */
   readonly isLocal: boolean;
   transcribe(req: TranscribeRequest): Promise<TranscriptSegment[]>;
+  cancel?(): void;
 }

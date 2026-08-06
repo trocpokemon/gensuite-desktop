@@ -4,6 +4,9 @@ import path from 'node:path';
 import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 import { projectDir } from './project';
 import type { EdgeTtsSynthesizeArgs, EdgeTtsSynthesizeResult, EdgeTtsVoice, SubtitleWordTiming } from '../../src/shared/types';
+import type { IpcResult } from '../../src/shared/appErrors';
+import { AppFailure, appFailure, appFailureResult, appSuccess } from './appErrors';
+import { audioOutputFailure, replaceAudioFile, validateAudioFile } from './audio';
 
 // edge-tts calls Microsoft Edge's online Read-Aloud service over a WebSocket —
 // free, no API key, but requires network. Node-only (the service now demands an
@@ -12,6 +15,32 @@ import type { EdgeTtsSynthesizeArgs, EdgeTtsSynthesizeResult, EdgeTtsVoice, Subt
 
 type Job = { tts: MsEdgeTTS };
 const running = new Map<string, Job>();
+const EDGE_SYNTHESIS_INACTIVITY_MS = 90_000;
+const EDGE_REQUEST_START_TIMEOUT_MS = 35_000;
+
+async function withStartTimeout<T>(work: Promise<T>, tts: MsEdgeTTS, context?: { chunkNumber?: number; chunkCount?: number }): Promise<T> {
+  let timer: NodeJS.Timeout;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          tts.close();
+          reject(appFailure('VOICE_REQUEST_TIMEOUT', context));
+        }, EDGE_REQUEST_START_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+function freeVoiceFailure(error: unknown, context?: { chunkNumber?: number; chunkCount?: number }): AppFailure {
+  if (error instanceof AppFailure) return error;
+  const code = error && typeof error === 'object' ? String((error as NodeJS.ErrnoException).code || '').toUpperCase() : '';
+  if (['EACCES', 'EPERM', 'ENOSPC'].includes(code)) return audioOutputFailure(error);
+  return appFailure('VOICE_SERVICE_UNAVAILABLE', context);
+}
 
 // The SSML template inserts text verbatim, so user input must be XML-escaped to
 // avoid breaking the document (or injecting extra SSML tags).
@@ -110,68 +139,110 @@ function boundaryTimings(text: string, chunks: Buffer[]): SubtitleWordTiming[] {
 }
 
 export function registerEdgeTtsIpc(): void {
-  ipcMain.handle('edgetts:voices', async (): Promise<EdgeTtsVoice[]> => {
-    const tts = new MsEdgeTTS();
-    const voices = await tts.getVoices();
-    return voices.map((voice) => ({
-      shortName: voice.ShortName,
-      friendlyName: voice.FriendlyName,
-      locale: voice.Locale,
-      gender: voice.Gender,
-    }));
+  ipcMain.handle('edgetts:voices', async (): Promise<IpcResult<EdgeTtsVoice[]>> => {
+    try {
+      const tts = new MsEdgeTTS();
+      const voices = await withStartTimeout(tts.getVoices(), tts);
+      return appSuccess(voices.map((voice) => ({
+        shortName: voice.ShortName,
+        friendlyName: voice.FriendlyName,
+        locale: voice.Locale,
+        gender: voice.Gender,
+      })));
+    } catch (error) {
+      return appFailureResult(error, 'VOICE_SERVICE_UNAVAILABLE', { operation: 'voice-catalog' });
+    }
   });
 
-  ipcMain.handle('edgetts:synthesize', async (_e, args: EdgeTtsSynthesizeArgs): Promise<EdgeTtsSynthesizeResult> => {
-    const { projectId, jobId, segmentId, text, voiceId } = args;
-    if (!projectId || !jobId || !text?.trim()) throw new Error('edgetts:synthesize missing args');
-    if (!voiceId) throw new Error('Chưa chọn giọng edge-tts.');
-
-    const audioDir = path.join(projectDir(projectId), 'audio');
-    await fs.mkdir(audioDir, { recursive: true });
-    const outPath = path.join(audioDir, `${segmentId}.mp3`);
-
-    const tts = new MsEdgeTTS();
-    running.set(jobId, { tts });
-
+  ipcMain.handle('edgetts:synthesize', async (_e, args: EdgeTtsSynthesizeArgs): Promise<IpcResult<EdgeTtsSynthesizeResult>> => {
+    const context = args?.chunkNumber && args?.chunkCount
+      ? { chunkNumber: args.chunkNumber, chunkCount: args.chunkCount }
+      : undefined;
+    let partialPath = '';
     try {
-      await tts.setMetadata(voiceId, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3, { wordBoundaryEnabled: true });
-      const pitchHz = Math.round(Number(args.pitch) || 0);
-      const volume = Math.max(0, Math.min(100, Number.isFinite(args.volume as number) ? Number(args.volume) : 100));
-      const { audioStream, metadataStream } = tts.toStream(escapeXml(text), {
-        rate: ratePercent(args.speed),
-        pitch: `${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz`,
-        volume,
-      });
+      const { projectId, jobId, segmentId, text, voiceId } = args ?? {};
+      if (!projectId || !jobId || !segmentId || !text?.trim() || !voiceId) throw appFailure('VOICE_INPUT_INVALID', context);
+      if (running.has(jobId)) throw appFailure('VOICE_JOB_CONFLICT', context);
 
-      const chunks: Buffer[] = [];
-      const metadataChunks: Buffer[] = [];
-      const audioDone = new Promise<void>((resolve, reject) => {
-        audioStream.on('data', (chunk: Buffer) => chunks.push(chunk));
-        audioStream.on('close', resolve);
-        audioStream.on('error', (err: Error) => {
-          if (/turn\.end|Stream closed before the synthesis/i.test(err?.message ?? '')) {
-            reject(new Error('Máy chủ Edge TTS ngắt kết nối giữa chừng nên audio bị cắt. Thường do bị giới hạn khi tạo nhiều đoạn liên tiếp — hãy chờ vài giây rồi bấm "Đọc" lại cho phân cảnh này.'));
-            return;
-          }
-          reject(err);
+      const audioDir = path.join(projectDir(projectId), 'audio');
+      await fs.mkdir(audioDir, { recursive: true }).catch((error) => { throw audioOutputFailure(error); });
+      const outPath = path.join(audioDir, `${segmentId.replace(/[^a-z0-9_-]/gi, '_')}.mp3`);
+      partialPath = `${outPath}.partial.mp3`;
+      await fs.rm(partialPath, { force: true }).catch(() => undefined);
+
+      const tts = new MsEdgeTTS();
+      running.set(jobId, { tts });
+
+      try {
+        await withStartTimeout(
+          tts.setMetadata(voiceId, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3, { wordBoundaryEnabled: true }),
+          tts,
+          context,
+        );
+        const pitchHz = Math.round(Number(args.pitch) || 0);
+        const volume = Math.max(0, Math.min(100, Number.isFinite(args.volume as number) ? Number(args.volume) : 100));
+        const { audioStream, metadataStream } = tts.toStream(escapeXml(text), {
+          rate: ratePercent(args.speed),
+          pitch: `${pitchHz >= 0 ? '+' : ''}${pitchHz}Hz`,
+          volume,
         });
+
+        const chunks: Buffer[] = [];
+        const metadataChunks: Buffer[] = [];
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          let audioClosed = false;
+          let timer: NodeJS.Timeout;
+          const finish = (error?: unknown) => {
+            if (settled) return;
+            if (!error && !audioClosed) return;
+            settled = true;
+            clearTimeout(timer);
+            error ? reject(error) : resolve();
+          };
+          const arm = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+              tts.close();
+              finish(appFailure('VOICE_REQUEST_TIMEOUT', context));
+            }, EDGE_SYNTHESIS_INACTIVITY_MS);
+          };
+          arm();
+          audioStream.on('data', (chunk: Buffer) => { arm(); chunks.push(chunk); });
+          const audioDone = () => { audioClosed = true; finish(); };
+          audioStream.on('end', audioDone);
+          audioStream.on('close', audioDone);
+          audioStream.on('error', () => finish(appFailure('VOICE_SERVICE_UNAVAILABLE', context)));
+          metadataStream?.on('data', (chunk: Buffer) => { arm(); metadataChunks.push(chunk); });
+          // Metadata is an enhancement. If it fails, keep valid audio and let
+          // the caption pipeline use its alignment/fallback tiers.
+          metadataStream?.on('error', () => undefined);
+        });
+
+        if (!running.has(jobId)) throw appFailure('VOICE_CANCELLED', context);
+        if (!chunks.length) throw appFailure('VOICE_AUDIO_RESULT_UNAVAILABLE', context);
+
+        await fs.writeFile(partialPath, Buffer.concat(chunks)).catch((error) => { throw audioOutputFailure(error); });
+        const validated = await validateAudioFile(partialPath);
+        await replaceAudioFile(partialPath, outPath);
+        const wordTimings = boundaryTimings(text, metadataChunks);
+        return appSuccess({
+          audioPath: outPath,
+          durationSec: validated.durationSec,
+          wordTimings: wordTimings.length ? wordTimings : undefined,
+        });
+      } finally {
+        tts.close();
+        running.delete(jobId);
+      }
+    } catch (error) {
+      return appFailureResult(freeVoiceFailure(error, context), 'VOICE_UNEXPECTED', {
+        operation: 'free-voice',
+        chunkNumber: args?.chunkNumber,
+        chunkCount: args?.chunkCount,
       });
-      const metadataDone = metadataStream ? new Promise<void>((resolve, reject) => {
-        metadataStream.on('data', (chunk: Buffer) => metadataChunks.push(chunk));
-        metadataStream.on('close', resolve);
-        metadataStream.on('error', reject);
-      }) : Promise.resolve();
-      await Promise.all([audioDone, metadataDone]);
-
-      if (!running.has(jobId)) throw new Error('edgetts:killed');
-      if (!chunks.length) throw new Error('edge-tts không trả về audio. Kiểm tra kết nối mạng và tên giọng.');
-
-      await fs.writeFile(outPath, Buffer.concat(chunks));
-      const wordTimings = boundaryTimings(text, metadataChunks);
-      return { audioPath: outPath, wordTimings: wordTimings.length ? wordTimings : undefined };
     } finally {
-      tts.close();
-      running.delete(jobId);
+      if (partialPath) await fs.rm(partialPath, { force: true }).catch(() => undefined);
     }
   });
 
