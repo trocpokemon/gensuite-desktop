@@ -20,6 +20,7 @@ module.exports.__watchdogTest = {
   runMediaProbe,
   processFailure,
   probeInfrastructureFailure,
+  sourceSubtitleCoverFilters,
 };`;
 
 class MockAppFailure extends Error {
@@ -76,6 +77,7 @@ execute((name) => {
   }
   if (name === 'node:child_process') return { ...requireNode(name), spawn: fakeSpawn };
   if (name === '../../src/shared/subtitlePresets') return { DEFAULT_SUBTITLE_CONFIG: {} };
+  if (name === '../../src/shared/subtitleCovers') return { subtitleCoverLayers: (config) => config.originalSubtitleCovers ?? [] };
   if (name === './project') return { projectDir: (id) => path.join(process.cwd(), String(id)) };
   if (name === './appErrors') {
     return {
@@ -92,6 +94,7 @@ const {
   runMediaProbe,
   processFailure,
   probeInfrastructureFailure,
+  sourceSubtitleCoverFilters,
 } = module.exports.__watchdogTest;
 const violations = [];
 
@@ -159,6 +162,41 @@ try {
 }
 
 if (killCount < 2) violations.push('Watchdog không dừng đủ các tiến trình bị treo.');
+
+const coverTemplate = {
+  enabled: true,
+  xPct: 5,
+  yPct: 8,
+  widthPct: 25,
+  heightPct: 20,
+  opacity: 82,
+  blurStrength: 8,
+  featherPct: 10,
+  color: '#0F172A',
+};
+const coverGraph = sourceSubtitleCoverFilters({
+  originalSubtitleCovers: [
+    { ...coverTemplate, id: 'one', name: 'Vùng 1', mode: 'overlay', startSec: 0.2, endSec: 0.9 },
+    { ...coverTemplate, id: 'two', name: 'Vùng 2', mode: 'blur', startSec: 0.7, endSec: 1.6, xPct: 35 },
+    { ...coverTemplate, id: 'three', name: 'Vùng 3', mode: 'restore', startSec: 1.3, endSec: 2.2, xPct: 65 },
+  ],
+}, 320, 180);
+if (!coverGraph || coverGraph.output !== 'vcover2out') {
+  violations.push('Chuỗi xuất nhiều layer vùng che không tạo đủ đầu ra độc lập.');
+} else {
+  const graphText = coverGraph.filters.join(';');
+  for (const timeRange of ['between(t,0.200,0.900)', 'between(t,0.700,1.600)', 'between(t,1.300,2.200)']) {
+    if (!graphText.includes(timeRange)) violations.push(`Layer vùng che thiếu khoảng thời gian ${timeRange}.`);
+  }
+  const mediaBinary = path.resolve('resources/ffmpeg/ffmpeg.exe');
+  const validation = requireNode('node:child_process').spawnSync(mediaBinary, [
+    '-hide_banner', '-loglevel', 'error',
+    '-f', 'lavfi', '-i', 'color=c=blue:s=320x180:d=2.5:r=10',
+    '-filter_complex', graphText,
+    '-map', `[${coverGraph.output}]`, '-frames:v', '25', '-f', 'null', 'NUL',
+  ], { encoding: 'utf8', timeout: 30_000 });
+  if (validation.status !== 0) violations.push('Chuỗi xuất nhiều layer vùng che không xử lý được video kiểm thử.');
+}
 
 if (violations.length) {
   console.error(`Kiểm tra watchdog video thất bại:\n${violations.map((item) => `- ${item}`).join('\n')}`);

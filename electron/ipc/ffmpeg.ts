@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { FfmpegProgress, LocalizeAspectRatio, SubtitleConfig, SubtitleWordTiming } from '../../src/shared/types';
 import type { AppErrorCode, AppErrorContext, IpcResult } from '../../src/shared/appErrors';
 import { DEFAULT_SUBTITLE_CONFIG } from '../../src/shared/subtitlePresets';
+import { subtitleCoverLayers } from '../../src/shared/subtitleCovers';
 import { projectDir } from './project';
 import { appFailure, appFailureResult, appSuccess, type AppFailure } from './appErrors';
 
@@ -379,63 +380,64 @@ export function buildCaptionAss(items: TimedCaption[], w: number, h: number, sty
 }
 
 function sourceSubtitleCoverFilters(config: SubtitleConfig, w: number, h: number, input = '0:v'): { filters: string[]; output: string } | null {
-  const cover = config.originalSubtitleCover;
-  if (!cover?.enabled) return null;
-  const x = Math.max(0, Math.min(w - 2, Math.round(w * cover.xPct / 100))) & ~1;
-  const y = Math.max(0, Math.min(h - 2, Math.round(h * cover.yPct / 100))) & ~1;
-  const width = Math.max(2, Math.min(w - x, Math.round(w * cover.widthPct / 100))) & ~1;
-  const height = Math.max(2, Math.min(h - y, Math.round(h * cover.heightPct / 100))) & ~1;
-  const featherPx = Math.max(0, Math.round(Math.min(width, height) * Math.max(0, Math.min(40, cover.featherPct ?? 12)) / 100));
-  const featherMask = (opacity = 1) => {
-    const peak = Math.round(255 * Math.max(0, Math.min(1, opacity)));
-    return `color=c=white:s=${width}x${height},format=gray,geq=lum='${peak}*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/${featherPx})'[vcovermask]`;
-  };
-  if (cover.mode === 'blur') {
-    const strength = Math.max(2, Math.min(30, Math.round(cover.blurStrength)));
-    if (featherPx > 0) return {
-      filters: [
-        `[${input}]split=2[vcoverbase][vcoversource]`,
-        `[vcoversource]crop=${width}:${height}:${x}:${y},boxblur=luma_radius=${strength}:luma_power=2:chroma_radius=${Math.max(1, Math.round(strength / 2))}:chroma_power=1[vcoverarea]`,
-        featherMask(),
-        `[vcoverarea][vcovermask]alphamerge[vcoverblend]`,
-        `[vcoverbase][vcoverblend]overlay=${x}:${y}[vcover]`,
-      ],
-      output: 'vcover',
+  const covers = subtitleCoverLayers(config).filter((cover) => cover.enabled);
+  if (!covers.length) return null;
+  const filters: string[] = [];
+  let currentInput = input;
+
+  covers.forEach((cover, index) => {
+    const prefix = `vcover${index}`;
+    const output = `${prefix}out`;
+    const x = Math.max(0, Math.min(w - 2, Math.round(w * cover.xPct / 100))) & ~1;
+    const y = Math.max(0, Math.min(h - 2, Math.round(h * cover.yPct / 100))) & ~1;
+    const width = Math.max(2, Math.min(w - x, Math.round(w * cover.widthPct / 100))) & ~1;
+    const height = Math.max(2, Math.min(h - y, Math.round(h * cover.heightPct / 100))) & ~1;
+    const featherPx = Math.max(0, Math.round(Math.min(width, height) * Math.max(0, Math.min(40, cover.featherPct ?? 12)) / 100));
+    const start = Math.max(0, cover.startSec).toFixed(3);
+    const enable = cover.endSec === undefined
+      ? `gte(t,${start})`
+      : `between(t,${start},${Math.max(cover.startSec + 0.25, cover.endSec).toFixed(3)})`;
+    const overlay = (area: string) => `[${prefix}base][${area}]overlay=${x}:${y}:enable='${enable}'[${output}]`;
+    const featherMask = (opacity = 1) => {
+      const peak = Math.round(255 * Math.max(0, Math.min(1, opacity)));
+      return `color=c=white:s=${width}x${height},format=gray,geq=lum='${peak}*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/${featherPx})'[${prefix}mask]`;
     };
-    return {
-      filters: [
-        `[${input}]split=2[vcoverbase][vcoversource]`,
-        `[vcoversource]crop=${width}:${height}:${x}:${y},boxblur=luma_radius=${strength}:luma_power=2:chroma_radius=${Math.max(1, Math.round(strength / 2))}:chroma_power=1[vcoverarea]`,
-        `[vcoverbase][vcoverarea]overlay=${x}:${y}[vcover]`,
-      ],
-      output: 'vcover',
-    };
-  }
-  if (cover.mode === 'restore') {
-    if (featherPx > 0) return {
-      filters: [
-        `[${input}]split=2[vcoverbase][vcoversource]`,
-        `[vcoversource]delogo=x=${x}:y=${y}:w=${width}:h=${height}:show=0,crop=${width}:${height}:${x}:${y}[vcoverarea]`,
-        featherMask(),
-        `[vcoverarea][vcovermask]alphamerge[vcoverblend]`,
-        `[vcoverbase][vcoverblend]overlay=${x}:${y}[vcover]`,
-      ],
-      output: 'vcover',
-    };
-    return { filters: [`[${input}]delogo=x=${x}:y=${y}:w=${width}:h=${height}:show=0[vcover]`], output: 'vcover' };
-  }
-  const color = /^#[0-9a-f]{6}$/i.test(cover.color) ? `0x${cover.color.slice(1)}` : '0x0F172A';
-  const opacity = Math.max(0.2, Math.min(1, cover.opacity / 100));
-  if (featherPx > 0) return {
-    filters: [
-      `color=c=${color}:s=${width}x${height},format=rgba[vcoverarea]`,
-      featherMask(opacity),
-      `[vcoverarea][vcovermask]alphamerge[vcoverblend]`,
-      `[${input}][vcoverblend]overlay=${x}:${y}[vcover]`,
-    ],
-    output: 'vcover',
-  };
-  return { filters: [`[${input}]drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=${color}@${opacity.toFixed(3)}:t=fill[vcover]`], output: 'vcover' };
+
+    if (cover.mode === 'blur') {
+      const strength = Math.max(2, Math.min(30, Math.round(cover.blurStrength)));
+      filters.push(
+        `[${currentInput}]split=2[${prefix}base][${prefix}source]`,
+        `[${prefix}source]crop=${width}:${height}:${x}:${y},boxblur=luma_radius=${strength}:luma_power=2:chroma_radius=${Math.max(1, Math.round(strength / 2))}:chroma_power=1[${prefix}area]`,
+      );
+      if (featherPx > 0) {
+        filters.push(featherMask(), `[${prefix}area][${prefix}mask]alphamerge[${prefix}blend]`, overlay(`${prefix}blend`));
+      } else filters.push(overlay(`${prefix}area`));
+    } else if (cover.mode === 'restore') {
+      filters.push(
+        `[${currentInput}]split=2[${prefix}base][${prefix}source]`,
+        `[${prefix}source]delogo=x=${x}:y=${y}:w=${width}:h=${height}:show=0,crop=${width}:${height}:${x}:${y}[${prefix}area]`,
+      );
+      if (featherPx > 0) {
+        filters.push(featherMask(), `[${prefix}area][${prefix}mask]alphamerge[${prefix}blend]`, overlay(`${prefix}blend`));
+      } else filters.push(overlay(`${prefix}area`));
+    } else {
+      const color = /^#[0-9a-f]{6}$/i.test(cover.color) ? `0x${cover.color.slice(1)}` : '0x0F172A';
+      const opacity = Math.max(0.2, Math.min(1, cover.opacity / 100));
+      if (featherPx > 0) {
+        filters.push(
+          `color=c=${color}:s=${width}x${height},format=rgba[${prefix}area]`,
+          featherMask(opacity),
+          `[${prefix}area][${prefix}mask]alphamerge[${prefix}blend]`,
+          `[${currentInput}][${prefix}blend]overlay=${x}:${y}:enable='${enable}'[${output}]`,
+        );
+      } else {
+        filters.push(`[${currentInput}]drawbox=x=${x}:y=${y}:w=${width}:h=${height}:color=${color}@${opacity.toFixed(3)}:t=fill:enable='${enable}'[${output}]`);
+      }
+    }
+    currentInput = output;
+  });
+
+  return { filters, output: currentInput };
 }
 
 // Narration audio is concatenated, so each caption starts at the cumulative scene time.

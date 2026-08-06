@@ -22,6 +22,7 @@ import { DEFAULT_EDGE_VOICE } from '../providers/voice/edgeTtsCatalog';
 import { DEFAULT_CAPCUT_VOICE } from '../providers/voice/capcutTtsCatalog';
 import { useSettingsStore } from './settingsStore';
 import { DEFAULT_SUBTITLE_CONFIG, findSubtitlePreset, subtitleConfigFromStyle } from '../shared/subtitlePresets';
+import { subtitleCoverLayers, withSubtitleCoverLayers } from '../shared/subtitleCovers';
 
 export function uid(prefix = ''): string {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -145,18 +146,21 @@ function normalizeProject(raw: ProjectState): ProjectState {
       ...raw.settings,
       // Discard legacy visual controls: the new caption treatment is intentionally
       // consistent across projects and only keeps the on/off preference.
-      subtitle: {
-        ...DEFAULT_SUBTITLE,
-        ...(raw.settings?.subtitle ?? {}),
-        enabled: raw.settings?.subtitle?.enabled ?? DEFAULT_SUBTITLE.enabled,
-        xPct: raw.settings?.subtitle?.xPct ?? DEFAULT_SUBTITLE.xPct,
-        yPct: raw.settings?.subtitle?.yPct ?? DEFAULT_SUBTITLE.yPct,
-        widthPct: raw.settings?.subtitle?.widthPct ?? DEFAULT_SUBTITLE.widthPct,
-        originalSubtitleCover: {
-          ...DEFAULT_SUBTITLE.originalSubtitleCover,
-          ...(raw.settings?.subtitle?.originalSubtitleCover ?? {}),
-        },
-      },
+      subtitle: (() => {
+        const mergedSubtitle: SubtitleConfig = {
+          ...DEFAULT_SUBTITLE,
+          ...(raw.settings?.subtitle ?? {}),
+          enabled: raw.settings?.subtitle?.enabled ?? DEFAULT_SUBTITLE.enabled,
+          xPct: raw.settings?.subtitle?.xPct ?? DEFAULT_SUBTITLE.xPct,
+          yPct: raw.settings?.subtitle?.yPct ?? DEFAULT_SUBTITLE.yPct,
+          widthPct: raw.settings?.subtitle?.widthPct ?? DEFAULT_SUBTITLE.widthPct,
+          originalSubtitleCover: {
+            ...DEFAULT_SUBTITLE.originalSubtitleCover,
+            ...(raw.settings?.subtitle?.originalSubtitleCover ?? {}),
+          },
+        };
+        return withSubtitleCoverLayers(mergedSubtitle, subtitleCoverLayers(mergedSubtitle));
+      })(),
       originalAudioVolume: raw.settings?.originalAudioVolume ?? DEFAULT_SETTINGS.originalAudioVolume,
       localizeOutputDirectory: raw.settings?.localizeOutputDirectory ?? DEFAULT_SETTINGS.localizeOutputDirectory,
       localizeAspectRatio: raw.settings?.localizeAspectRatio ?? DEFAULT_SETTINGS.localizeAspectRatio,

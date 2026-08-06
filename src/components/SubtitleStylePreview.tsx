@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, Maximize, Minimize, Move, Pause, Play, ScanLine, Volume2, VolumeX } from 'lucide-react';
 import { localFileUrl } from '../shared/localFile';
-import type { SubtitleConfig } from '../shared/types';
+import { coverIsActive, subtitleCoverLayers, withSubtitleCoverLayers } from '../shared/subtitleCovers';
+import type { OriginalSubtitleCoverLayer, SubtitleConfig } from '../shared/types';
 
 interface TimedPreviewCaption { start: number; end: number; text: string; }
 
@@ -23,6 +24,8 @@ interface Props {
   viewportHeight?: number;
   seekTime?: number;
   onPlaybackTimeChange?: (currentTime: number, duration: number) => void;
+  selectedCoverId?: string;
+  onSelectedCoverIdChange?: (id: string) => void;
 }
 
 export type SubtitleEditMode = 'subtitle' | 'cover';
@@ -32,6 +35,8 @@ type DragState = {
   startY: number;
   initial: { x: number; y: number; width: number; height: number; fontSize: number };
   corner?: string;
+  coverId?: string;
+  coverLayers?: OriginalSubtitleCoverLayer[];
 };
 
 function withOpacity(color: string, opacity: number): string {
@@ -53,7 +58,7 @@ function clock(seconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(Math.floor(safe % 60)).padStart(2, '0')}`;
 }
 
-export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo, config, onChange, captions = [], loading = false, loadingProgress = 0, editMode: controlledEditMode, onEditModeChange, showToolbar = true, zoom = 1, viewportWidth = 0, viewportHeight = 0, seekTime, onPlaybackTimeChange }: Props) {
+export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo, config, onChange, captions = [], loading = false, loadingProgress = 0, editMode: controlledEditMode, onEditModeChange, showToolbar = true, zoom = 1, viewportWidth = 0, viewportHeight = 0, seekTime, onPlaybackTimeChange, selectedCoverId, onSelectedCoverIdChange }: Props) {
   const fullscreenRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -77,7 +82,8 @@ export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo,
   const frameWidth = Math.min(764, editorHeight * stageAspect);
   const frameHeight = frameWidth / stageAspect;
   const backgroundUrl = localFileUrl(backgroundPath);
-  const cover = config.originalSubtitleCover;
+  const covers = subtitleCoverLayers(config);
+  const cover = covers.find((item) => item.id === selectedCoverId) ?? covers[0];
   const activeCaption = useMemo(
     () => captions.find((item) => currentTime >= item.start && currentTime < item.end),
     [captions, currentTime],
@@ -183,18 +189,39 @@ export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo,
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  const beginCoverDrag = (event: React.PointerEvent, kind: 'cover' | 'resize', corner?: string) => {
+  const updateCover = (coverId: string, patch: Partial<OriginalSubtitleCoverLayer>, source = covers) => {
+    const next = source.map((item) => item.id === coverId ? { ...item, ...patch } : item);
+    onChange(withSubtitleCoverLayers(config, next));
+  };
+
+  const beginCoverDrag = (event: React.PointerEvent, layer: OriginalSubtitleCoverLayer, kind: 'cover' | 'resize', corner?: string) => {
     event.stopPropagation();
+    onSelectedCoverIdChange?.(layer.id);
     const point = stagePoint(event);
-    dragRef.current = { kind, corner, startX: point.x, startY: point.y, initial: { x: cover.xPct, y: cover.yPct, width: cover.widthPct, height: cover.heightPct, fontSize: config.fontSizePct } };
+    dragRef.current = { kind, corner, coverId: layer.id, coverLayers: covers, startX: point.x, startY: point.y, initial: { x: layer.xPct, y: layer.yPct, width: layer.widthPct, height: layer.heightPct, fontSize: config.fontSizePct } };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const beginDraw = (event: React.PointerEvent) => {
     if (editMode !== 'cover') return;
     const point = stagePoint(event);
-    dragRef.current = { kind: 'draw', startX: point.x, startY: point.y, initial: { x: point.x, y: point.y, width: 0, height: 0, fontSize: config.fontSizePct } };
-    onChange({ ...config, originalSubtitleCover: { ...cover, enabled: true, xPct: point.x, yPct: point.y, widthPct: 1, heightPct: 1 } });
+    const id = `cover_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    const layer: OriginalSubtitleCoverLayer = {
+      ...config.originalSubtitleCover,
+      enabled: true,
+      id,
+      name: `Vùng che ${covers.length + 1}`,
+      startSec: Math.max(0, currentTime),
+      endSec: duration > currentTime ? Math.min(duration, currentTime + 5) : currentTime + 5,
+      xPct: point.x,
+      yPct: point.y,
+      widthPct: 1,
+      heightPct: 1,
+    };
+    const coverLayers = [...covers, layer];
+    dragRef.current = { kind: 'draw', coverId: id, coverLayers, startX: point.x, startY: point.y, initial: { x: point.x, y: point.y, width: 0, height: 0, fontSize: config.fontSizePct } };
+    onSelectedCoverIdChange?.(id);
+    onChange(withSubtitleCoverLayers(config, coverLayers));
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
@@ -223,11 +250,11 @@ export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo,
     if (drag.kind === 'draw') {
       const x = Math.min(drag.startX, point.x);
       const y = Math.min(drag.startY, point.y);
-      onChange({ ...config, originalSubtitleCover: { ...cover, enabled: true, xPct: x, yPct: y, widthPct: Math.max(2, Math.abs(point.x - drag.startX)), heightPct: Math.max(2, Math.abs(point.y - drag.startY)) } });
+      if (drag.coverId) updateCover(drag.coverId, { enabled: true, xPct: x, yPct: y, widthPct: Math.max(2, Math.abs(point.x - drag.startX)), heightPct: Math.max(2, Math.abs(point.y - drag.startY)) }, drag.coverLayers);
       return;
     }
     if (drag.kind === 'cover') {
-      onChange({ ...config, originalSubtitleCover: { ...cover, xPct: clamp(drag.initial.x + dx, 0, 100 - drag.initial.width), yPct: clamp(drag.initial.y + dy, 0, 100 - drag.initial.height) } });
+      if (drag.coverId) updateCover(drag.coverId, { xPct: clamp(drag.initial.x + dx, 0, 100 - drag.initial.width), yPct: clamp(drag.initial.y + dy, 0, 100 - drag.initial.height) }, drag.coverLayers);
       return;
     }
     let { x, y, width, height } = drag.initial;
@@ -235,22 +262,24 @@ export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo,
     if (drag.corner?.includes('r')) width = clamp(width + dx, 3, 100 - x);
     if (drag.corner?.includes('t')) { y = clamp(y + dy, 0, y + height - 3); height = drag.initial.height - (y - drag.initial.y); }
     if (drag.corner?.includes('b')) height = clamp(height + dy, 3, 100 - y);
-    onChange({ ...config, originalSubtitleCover: { ...cover, xPct: x, yPct: y, widthPct: width, heightPct: height } });
+    if (drag.coverId) updateCover(drag.coverId, { xPct: x, yPct: y, widthPct: width, heightPct: height }, drag.coverLayers);
   };
 
   const endDrag = () => { dragRef.current = null; };
-  const feather = clamp(cover.featherPct ?? 12, 0, 40);
-  const featherMask: React.CSSProperties = feather > 0 ? {
-    WebkitMaskImage: `linear-gradient(to right, transparent 0%, black ${feather}%, black ${100 - feather}%, transparent 100%), linear-gradient(to bottom, transparent 0%, black ${feather}%, black ${100 - feather}%, transparent 100%)`,
-    WebkitMaskComposite: 'source-in',
-    maskImage: `linear-gradient(to right, transparent 0%, black ${feather}%, black ${100 - feather}%, transparent 100%), linear-gradient(to bottom, transparent 0%, black ${feather}%, black ${100 - feather}%, transparent 100%)`,
-    maskComposite: 'intersect',
-  } : {};
-  const coverVisual: React.CSSProperties = cover.mode === 'overlay'
-    ? { background: withOpacity(cover.color, cover.opacity), ...featherMask }
-    : cover.mode === 'blur'
-      ? { backdropFilter: `blur(${Math.max(2, cover.blurStrength)}px)`, background: 'rgba(8,12,18,.12)', ...featherMask }
-      : { backdropFilter: `blur(${Math.max(5, cover.blurStrength * 0.7)}px)`, background: 'rgba(255,255,255,.05)', ...featherMask };
+  const coverVisual = (layer: OriginalSubtitleCoverLayer): React.CSSProperties => {
+    const feather = clamp(layer.featherPct ?? 12, 0, 40);
+    const featherMask: React.CSSProperties = feather > 0 ? {
+      WebkitMaskImage: `linear-gradient(to right, transparent 0%, black ${feather}%, black ${100 - feather}%, transparent 100%), linear-gradient(to bottom, transparent 0%, black ${feather}%, black ${100 - feather}%, transparent 100%)`,
+      WebkitMaskComposite: 'source-in',
+      maskImage: `linear-gradient(to right, transparent 0%, black ${feather}%, black ${100 - feather}%, transparent 100%), linear-gradient(to bottom, transparent 0%, black ${feather}%, black ${100 - feather}%, transparent 100%)`,
+      maskComposite: 'intersect',
+    } : {};
+    return layer.mode === 'overlay'
+      ? { background: withOpacity(layer.color, layer.opacity), ...featherMask }
+      : layer.mode === 'blur'
+        ? { backdropFilter: `blur(${Math.max(2, layer.blurStrength)}px)`, background: 'rgba(8,12,18,.12)', ...featherMask }
+        : { backdropFilter: `blur(${Math.max(5, layer.blurStrength * 0.7)}px)`, background: 'rgba(255,255,255,.05)', ...featherMask };
+  };
   const fullscreenFrameWidth = Math.min(fullscreenSize.width || frameWidth, (fullscreenSize.height || frameHeight) * stageAspect);
   const fullscreenFrameHeight = fullscreenFrameWidth / stageAspect;
   const fitScale = !showToolbar && viewportWidth > 0 && viewportHeight > 0
@@ -285,17 +314,23 @@ export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo,
             <img src={backgroundUrl} alt="" className="absolute inset-0 h-full w-full object-contain" draggable={false} />
           ))}
 
-          {cover.enabled && <div
-            onPointerDown={(event) => beginCoverDrag(event, 'cover')}
-            className={`absolute z-10 ${editMode === 'cover' ? 'cursor-move rounded-sm border border-dashed border-emerald-300/75' : ''}`}
-            style={{ left: `${cover.xPct}%`, top: `${cover.yPct}%`, width: `${cover.widthPct}%`, height: `${cover.heightPct}%` }}
-          >
-            <span className="pointer-events-none absolute inset-0" style={coverVisual} />
-            {editMode === 'cover' && <>
-              <span className="absolute -top-5 left-0 text-[9px] font-semibold text-emerald-200/65">Vùng che</span>
-              {(['lt', 'rt', 'lb', 'rb'] as const).map((corner) => <button key={corner} type="button" aria-label="Đổi kích thước vùng che" onPointerDown={(event) => beginCoverDrag(event, 'resize', corner)} className={`absolute size-6 cursor-nwse-resize ${corner.includes('l') ? '-left-3' : '-right-3'} ${corner.includes('t') ? '-top-3' : '-bottom-3'}`}><span className="pointer-events-none absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/70 bg-emerald-200 shadow" /></button>)}
-            </>}
-          </div>}
+          {covers.map((layer, layerIndex) => {
+            const selected = layer.id === cover?.id;
+            const active = coverIsActive(layer, currentTime);
+            if (!active && !(editMode === 'cover' && selected && layer.enabled)) return null;
+            return <div
+              key={layer.id}
+              onPointerDown={(event) => beginCoverDrag(event, layer, 'cover')}
+              className={`absolute ${editMode === 'cover' ? 'cursor-move rounded-sm border border-dashed' : 'pointer-events-none'} ${selected ? 'border-emerald-200' : 'border-white/30 opacity-70'}`}
+              style={{ zIndex: 10 + layerIndex, left: `${layer.xPct}%`, top: `${layer.yPct}%`, width: `${layer.widthPct}%`, height: `${layer.heightPct}%` }}
+            >
+              <span className="pointer-events-none absolute inset-0" style={coverVisual(layer)} />
+              {editMode === 'cover' && selected && <>
+                <span className="absolute -top-5 left-0 whitespace-nowrap text-[9px] font-semibold text-emerald-200/80">{layer.name}</span>
+                {(['lt', 'rt', 'lb', 'rb'] as const).map((corner) => <button key={corner} type="button" aria-label="Đổi kích thước vùng che" onPointerDown={(event) => beginCoverDrag(event, layer, 'resize', corner)} className={`absolute size-6 cursor-nwse-resize ${corner.includes('l') ? '-left-3' : '-right-3'} ${corner.includes('t') ? '-top-3' : '-bottom-3'}`}><span className="pointer-events-none absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/70 bg-emerald-200 shadow" /></button>)}
+              </>}
+            </div>;
+          })}
 
           {config.enabled && <div
             onPointerDown={beginSubtitleDrag}
@@ -319,7 +354,7 @@ export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo,
             <button type="button" onClick={() => setEditMode('subtitle')} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-semibold ${editMode === 'subtitle' ? 'bg-emerald-400 text-black' : 'text-white/70 hover:bg-white/10'}`}><Move size={13} /> Phụ đề</button>
             <button type="button" onClick={() => setEditMode('cover')} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-semibold ${editMode === 'cover' ? 'bg-emerald-400 text-black' : 'text-white/70 hover:bg-white/10'}`}><ScanLine size={13} /> Vùng che</button>
           </div>}
-          {cover.enabled && cover.mode === 'restore' && <span className="absolute right-2 top-2 z-30 rounded bg-black/65 px-2 py-1 text-[9px] text-white/65">Bản xem trước gần đúng</span>}
+          {covers.some((layer) => coverIsActive(layer, currentTime) && layer.mode === 'restore') && <span className="absolute right-2 top-2 z-30 rounded bg-black/65 px-2 py-1 text-[9px] text-white/65">Bản xem trước gần đúng</span>}
           {loading && <div className="absolute inset-0 z-50 grid place-items-center bg-[#111722]/95 px-8 text-center"><div className="w-full max-w-xs"><Loader2 size={24} className="mx-auto animate-spin text-emerald-300" /><p className="mt-3 text-sm font-bold text-white/75">Đang tải video review… {Math.round(clamp(loadingProgress, 0, 100))}%</p><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${clamp(loadingProgress, 0, 100)}%` }} /></div></div></div>}
           {!backgroundUrl && !loading && <div className="absolute inset-0 z-40 grid place-items-center bg-[#111722] px-8 text-center"><div><p className="text-sm font-bold text-white/70">Chưa có video nguồn để review</p><p className="mt-2 text-xs leading-5 text-white/35">Quay lại bước Video & ngôn ngữ, chọn video rồi mở lại bước Phụ đề.</p></div></div>}
           {backgroundUrl && backgroundIsVideo && <div onPointerDown={(event) => event.stopPropagation()} className="absolute inset-x-0 bottom-0 z-40 flex items-center gap-2 bg-gradient-to-t from-black/90 via-black/55 to-transparent px-3 pb-2 pt-8 opacity-90 transition hover:opacity-100">

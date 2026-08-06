@@ -66,6 +66,7 @@ export function subtitleConfigFromStyle(style: SubtitleStyle, presetId = ''): Su
       featherPct: 12,
       color: '#0F172A',
     },
+    originalSubtitleCovers: [],
   };
 }
 
@@ -77,6 +78,7 @@ export function subtitleStyleFromConfig(config: SubtitleConfig): SubtitleStyle {
     yPct: _yPct,
     widthPct: _widthPct,
     originalSubtitleCover: _originalSubtitleCover,
+    originalSubtitleCovers: _originalSubtitleCovers,
     ...style
   } = config;
   return style;

@@ -258,6 +258,15 @@ export interface OriginalSubtitleCoverConfig {
   color: string;
 }
 
+export interface OriginalSubtitleCoverLayer extends OriginalSubtitleCoverConfig {
+  /** Stable identity used by the canvas and timeline. */
+  id: string;
+  name: string;
+  /** Inclusive start and exclusive end in source-video seconds. */
+  startSec: number;
+  endSec?: number;
+}
+
 export interface SubtitleWordTiming {
   word: string;
   /** Seconds relative to the start of the synthesized audio. */
@@ -300,6 +309,8 @@ export interface SubtitleConfig extends SubtitleStyle {
   widthPct: number;
   /** Project-specific treatment for subtitles already present in the source video. */
   originalSubtitleCover: OriginalSubtitleCoverConfig;
+  /** Independent cover layers. The legacy single cover above remains for migration. */
+  originalSubtitleCovers: OriginalSubtitleCoverLayer[];
 }
 
 export interface SubtitlePreset {
