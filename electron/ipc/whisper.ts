@@ -56,6 +56,11 @@ const MIN_MODEL_BYTES: Record<WhisperModelName, number> = {
 const MODEL_DOWNLOAD_INACTIVITY_MS = 45_000;
 const MODEL_PREFLIGHT_TIMEOUT_MS = 3 * 60 * 1000;
 const modelDownloads = new Map<WhisperModelName, Promise<string>>();
+const VAD_MODEL_FILE = 'ggml-silero-v6.2.0.bin';
+const VAD_MODEL_BYTES = 885_098;
+const VAD_MODEL_SHA256 = '2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987';
+const VAD_MODEL_URL = `https://huggingface.co/ggml-org/whisper-vad/resolve/main/${VAD_MODEL_FILE}`;
+let vadModelDownload: Promise<string> | null = null;
 type RecognitionJob = { cancelled: boolean; child?: ReturnType<typeof spawn> };
 const runningTranscriptions = new Map<string, RecognitionJob>();
 
@@ -64,12 +69,93 @@ function modelUrl(model: WhisperModelName): string {
   return `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model}.bin`;
 }
 
+function vadModelPath(): string {
+  return path.join(modelsDir(), VAD_MODEL_FILE);
+}
+
 function emit(win: BrowserWindow | null, p: WhisperProgress): void {
   win?.webContents.send('whisper:progress', p);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
   return fs.access(filePath).then(() => true).catch(() => false);
+}
+
+async function vadModelIsUsable(filePath: string): Promise<boolean> {
+  const stat = await fs.stat(filePath).catch(() => null);
+  if (!stat?.isFile() || stat.size !== VAD_MODEL_BYTES) return false;
+  return await sha256File(filePath).then((hash) => hash === VAD_MODEL_SHA256).catch(() => false);
+}
+
+async function downloadVadModel(win: BrowserWindow | null, model: WhisperModelName, dest: string): Promise<void> {
+  const controller = new AbortController();
+  let timer = setTimeout(() => controller.abort(), MODEL_DOWNLOAD_INACTIVITY_MS);
+  let response: Response;
+  try {
+    response = await fetch(VAD_MODEL_URL, { signal: controller.signal });
+  } catch (error) {
+    throw appFailure('TRANSCRIPTION_MODEL_DOWNLOAD_FAILED', undefined, {
+      systemCode: processErrorCode(error), classifier: 'vad-request-failed',
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!response.ok || !response.body) {
+    throw appFailure('TRANSCRIPTION_MODEL_DOWNLOAD_FAILED', undefined, {
+      statusCode: response.status, classifier: 'vad-response-rejected',
+    });
+  }
+
+  const partial = `${dest}.part`;
+  await fs.unlink(partial).catch(() => undefined);
+  const output = createWriteStream(partial);
+  const reader = response.body.getReader();
+  const hash = createHash('sha256');
+  let received = 0;
+  try {
+    for (;;) {
+      const packet = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(appFailure('TRANSCRIPTION_MODEL_DOWNLOAD_FAILED', undefined, { classifier: 'vad-body-timeout' }));
+        }, MODEL_DOWNLOAD_INACTIVITY_MS);
+        reader.read().then(resolve, reject).finally(() => clearTimeout(timer));
+      });
+      if (packet.done) break;
+      hash.update(packet.value);
+      received += packet.value.length;
+      await new Promise<void>((resolve, reject) => output.write(packet.value, (error) => error ? reject(error) : resolve()));
+      emit(win, { phase: 'downloading-model', percent: Math.min(99, Math.round((received / VAD_MODEL_BYTES) * 100)), model });
+    }
+    await new Promise<void>((resolve, reject) => {
+      output.once('finish', resolve); output.once('error', reject); output.end();
+    });
+    if (received !== VAD_MODEL_BYTES || hash.digest('hex') !== VAD_MODEL_SHA256) {
+      throw appFailure('TRANSCRIPTION_MODEL_INVALID', undefined, { classifier: 'vad-integrity' });
+    }
+    await fs.rm(dest, { force: true }).catch(() => undefined);
+    await fs.rename(partial, dest);
+  } catch (error) {
+    output.destroy();
+    await fs.unlink(partial).catch(() => undefined);
+    throw modelFailure(error);
+  }
+}
+
+async function ensureVadModel(win: BrowserWindow | null, model: WhisperModelName): Promise<string> {
+  if (vadModelDownload) return vadModelDownload;
+  const task = (async () => {
+    const dest = vadModelPath();
+    await fs.mkdir(modelsDir(), { recursive: true }).catch((error) => { throw modelFailure(error); });
+    if (await vadModelIsUsable(dest)) return dest;
+    await fs.rm(dest, { force: true }).catch(() => undefined);
+    emit(win, { phase: 'downloading-model', percent: 0, model });
+    await downloadVadModel(win, model, dest);
+    if (!(await vadModelIsUsable(dest))) throw appFailure('TRANSCRIPTION_MODEL_INVALID', undefined, { classifier: 'vad-invalid' });
+    return dest;
+  })().finally(() => { vadModelDownload = null; });
+  vadModelDownload = task;
+  return task;
 }
 
 async function modelIsUsable(filePath: string, model: WhisperModelName): Promise<boolean> {
@@ -410,9 +496,8 @@ export function mergeTranscriptionChunks(
 ): TranscriptSegment[] {
   const owned: TranscriptSegment[] = [];
   rows.forEach(({ chunk, segments }, chunkIndex) => {
-    // The recognizer's offset option returns absolute source timestamps. Keep
-    // them unchanged; guessing relative timestamps can shift an early segment
-    // in the second window by another full minute.
+    // Each short recognition window is converted back to absolute source time
+    // before it reaches this merge step.
     segments.forEach((segment) => {
       const start = Math.max(0, Math.min(duration, segment.start));
       const end = Math.max(start, Math.min(duration, segment.end));
@@ -437,8 +522,28 @@ export function mergeTranscriptionChunks(
   return merged;
 }
 
+export function offsetRecognitionWindowSegments(
+  segments: TranscriptSegment[],
+  windowStart: number,
+  windowEnd: number,
+): TranscriptSegment[] {
+  const windowDuration = Math.max(0, windowEnd - windowStart);
+  if (!(windowDuration > 0)) return [];
+  return segments.flatMap((segment) => {
+    const relativeStart = Math.max(0, segment.start);
+    const relativeEnd = Math.min(windowDuration, segment.end);
+    if (!segment.text.trim() || relativeStart >= windowDuration || relativeEnd <= relativeStart) return [];
+    return [{
+      ...segment,
+      start: windowStart + relativeStart,
+      end: windowStart + relativeEnd,
+      text: segment.text.trim(),
+    }];
+  });
+}
+
 interface TranscriptionCheckpoint {
-  schemaVersion: 1;
+  schemaVersion: 2;
   fingerprint: string;
   duration: number;
   model: WhisperModelName;
@@ -464,14 +569,21 @@ async function transcriptionFingerprint(
 ): Promise<string> {
   const audioHash = await sha256File(wavPath);
   return createHash('sha256')
-    .update(JSON.stringify({ audioHash, model, language: language || 'auto', duration: Math.round(duration * 1000) }))
+    .update(JSON.stringify({
+      pipelineVersion: 4,
+      voiceActivityFilter: 'silero-v6.2.0',
+      audioHash,
+      model,
+      language: language || 'auto',
+      duration: Math.round(duration * 1000),
+    }))
     .digest('hex');
 }
 
 function validCheckpoint(value: unknown, fingerprint: string, chunks: TranscriptionChunk[]): value is TranscriptionCheckpoint {
   if (!value || typeof value !== 'object') return false;
   const checkpoint = value as TranscriptionCheckpoint;
-  if (checkpoint.schemaVersion !== 1 || checkpoint.fingerprint !== fingerprint || !Array.isArray(checkpoint.completed)) return false;
+  if (checkpoint.schemaVersion !== 2 || checkpoint.fingerprint !== fingerprint || !Array.isArray(checkpoint.completed)) return false;
   const seen = new Set<number>();
   return checkpoint.completed.every((row) => {
     if (!Number.isInteger(row?.index) || row.index < 0 || row.index >= chunks.length || seen.has(row.index)) return false;
@@ -565,9 +677,80 @@ async function mediaDuration(sourcePath: string): Promise<number> {
   });
 }
 
+async function extractRecognitionWindow(options: {
+  sourcePath: string;
+  outputPath: string;
+  windowStart: number;
+  windowEnd: number;
+  context: { chunkNumber: number; chunkCount: number };
+  job: RecognitionJob;
+}): Promise<void> {
+  if (options.job.cancelled) throw appFailure('TRANSCRIPTION_CANCELLED', options.context);
+  const binary = ffmpegBinary();
+  if (!(await fileExists(binary))) throw appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE', options.context);
+  const partialPath = `${options.outputPath}.partial.wav`;
+  await fs.unlink(partialPath).catch(() => undefined);
+  await fs.unlink(options.outputPath).catch(() => undefined);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(binary, [
+        '-y',
+        '-ss', options.windowStart.toFixed(3),
+        '-t', Math.max(0, options.windowEnd - options.windowStart).toFixed(3),
+        '-i', options.sourcePath,
+        '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le',
+        partialPath,
+      ], { cwd: path.dirname(binary), stdio: ['ignore', 'ignore', 'pipe'] });
+      options.job.child = child;
+      let timedOut = false;
+      let settled = false;
+      let timer: NodeJS.Timeout;
+      const finish = (error?: AppFailure) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (options.job.child === child) options.job.child = undefined;
+        error ? reject(error) : resolve();
+      };
+      const armTimer = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          timedOut = true;
+          child.kill();
+        }, EXTRACTION_STALL_TIMEOUT_MS);
+      };
+      armTimer();
+      child.stderr?.on('data', armTimer);
+      child.on('error', (error) => {
+        const code = processErrorCode(error);
+        finish(appFailure(
+          code === 'EACCES' || code === 'EPERM' ? 'TRANSCRIPTION_PROCESS_START_DENIED' : 'TRANSCRIPTION_PROCESS_START_FAILED',
+          options.context,
+          { systemCode: code },
+        ));
+      });
+      child.on('close', (code) => {
+        if (options.job.cancelled) finish(appFailure('TRANSCRIPTION_CANCELLED', options.context));
+        else if (timedOut) finish(appFailure('TRANSCRIPTION_AUDIO_PREPARATION_TIMEOUT', options.context));
+        else if (code === 0) finish();
+        else finish(appFailure('TRANSCRIPTION_AUDIO_PREPARATION_FAILED', options.context, { exitCode: code ?? undefined }));
+      });
+    });
+    const stat = await fs.stat(partialPath);
+    if (!stat.isFile() || stat.size <= 44) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE', options.context);
+    await fs.rename(partialPath, options.outputPath);
+  } catch (error) {
+    await fs.unlink(partialPath).catch(() => undefined);
+    await fs.unlink(options.outputPath).catch(() => undefined);
+    if (error instanceof AppFailure) throw error;
+    throw tempFailure(error);
+  }
+}
+
 async function recognizeWindow(options: {
   binary: string;
   modelFile: string;
+  vadFile: string;
   wavPath: string;
   workDir: string;
   language?: string;
@@ -582,16 +765,30 @@ async function recognizeWindow(options: {
   if (options.job.cancelled) throw appFailure('TRANSCRIPTION_CANCELLED', options.context);
   const outBase = path.join(options.workDir, `transcript-${options.identity}`);
   const jsonPath = `${outBase}.json`;
+  const windowWavPath = path.join(options.workDir, `audio-${options.identity}.wav`);
   await fs.unlink(jsonPath).catch(() => undefined);
+  await extractRecognitionWindow({
+    sourcePath: options.wavPath,
+    outputPath: windowWavPath,
+    windowStart: options.windowStart,
+    windowEnd: options.windowEnd,
+    context: options.context,
+    job: options.job,
+  });
   const args = [
     '-m', options.modelFile,
-    '-f', options.wavPath,
+    '-f', windowWavPath,
     '-t', String(Math.max(1, options.threads)),
-    '-ot', String(Math.round(options.windowStart * 1000)),
-    '-d', String(Math.round((options.windowEnd - options.windowStart) * 1000)),
     '-oj',
     '-of', outBase,
     '-l', options.language && options.language !== 'auto' ? options.language : 'auto',
+    '--vad', '--vad-model', options.vadFile,
+    '--vad-threshold', '0.50',
+    '--vad-min-speech-duration-ms', '120',
+    '--vad-min-silence-duration-ms', '300',
+    '--vad-speech-pad-ms', '80',
+    '--vad-max-speech-duration-s', '30',
+    '-mc', '0', '-sns', '-sow',
   ];
 
   try {
@@ -642,7 +839,11 @@ async function recognizeWindow(options: {
 
     if (options.job.cancelled) throw appFailure('TRANSCRIPTION_CANCELLED', options.context);
     try {
-      return parseWhisperJson(await fs.readFile(jsonPath, 'utf8'));
+      return offsetRecognitionWindowSegments(
+        parseWhisperJson(await fs.readFile(jsonPath, 'utf8')),
+        options.windowStart,
+        options.windowEnd,
+      );
     } catch (error) {
       throw appFailure('TRANSCRIPTION_RESULT_INVALID', options.context, {
         systemCode: processErrorCode(error), attempt: options.attempt,
@@ -650,12 +851,15 @@ async function recognizeWindow(options: {
     }
   } finally {
     await fs.unlink(jsonPath).catch(() => undefined);
+    await fs.unlink(windowWavPath).catch(() => undefined);
+    await fs.unlink(`${windowWavPath}.partial.wav`).catch(() => undefined);
   }
 }
 
 async function recognizeChunkWithRetry(options: {
   binary: string;
   modelFile: string;
+  vadFile: string;
   wavPath: string;
   workDir: string;
   language?: string;
@@ -875,8 +1079,10 @@ export function registerWhisperIpc(): void {
       const binary = whisperBinary();
       if (!(await fileExists(binary))) throw appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE');
       let modelFile: string;
+      let vadFile: string;
       try {
         modelFile = await ensureModel(model, win);
+        vadFile = await ensureVadModel(win, model);
       } catch (error) {
         throw modelFailure(error);
       }
@@ -905,7 +1111,7 @@ export function registerWhisperIpc(): void {
       const checkpoint: TranscriptionCheckpoint = validCheckpoint(rawCheckpoint, fingerprint, chunks)
         ? rawCheckpoint
         : {
-          schemaVersion: 1,
+          schemaVersion: 2,
           fingerprint,
           duration: audioDuration,
           model,
@@ -928,6 +1134,7 @@ export function registerWhisperIpc(): void {
         const segments = await recognizeChunkWithRetry({
           binary,
           modelFile,
+          vadFile,
           wavPath,
           workDir,
           language,

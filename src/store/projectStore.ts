@@ -468,7 +468,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
           : current.narrationWorkflow,
       });
     },
-    setTranscript: (segments) => commit({ ...get().project, transcript: segments, transcriptionVersion: 2 }),
+    setTranscript: (segments) => commit({ ...get().project, transcript: segments, transcriptionVersion: 4 }),
     setLanguages: (patch) => commit({ ...get().project, ...patch }),
     setDubbedVideo: (dubbedVideoPath) => commit({ ...get().project, dubbedVideoPath }),
     patchNarrationWorkflow: (patch) => {

@@ -102,8 +102,10 @@ export function parseTranslationJson(raw: string, original: TranscriptSegment[])
   const map = jsonObject(raw).translations;
   if (!map || typeof map !== 'object') throw new Error('AI không trả về bản dịch hợp lệ. Hãy thử lại.');
   const table = map as Record<string, unknown>;
-  return original.map((seg, index) => {
-    const translated = String(table[String(index)] ?? '').trim();
-    return { ...seg, text: translated || seg.text };
-  });
+  const translated = original.map((seg, index) => ({
+    ...seg,
+    text: String(table[String(index)] ?? '').trim(),
+  }));
+  if (translated.some((segment) => !segment.text)) throw new Error('TRANSLATION_RESULT_INCOMPLETE');
+  return translated;
 }

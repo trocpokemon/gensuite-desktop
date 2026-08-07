@@ -27,6 +27,8 @@ export interface ScriptScene {
 }
 
 export interface TranslateRequest {
+  /** Project identity used only for resumable local translation checkpoints. */
+  projectId?: string;
   /** Segments to translate, in order. Only their text is sent to the LLM. */
   segments: TranscriptSegment[];
   /** Target language label (e.g. 'vietnamese', 'english'). */

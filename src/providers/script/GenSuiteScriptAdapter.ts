@@ -2,7 +2,8 @@ import type { IScriptProvider, ContentRequest, RewriteRequest, StoryboardRequest
 import type { TranscriptSegment } from '../../shared/types';
 import { gensuiteFetch } from '../../lib/gensuiteAuth';
 import type { GenSuiteFeature } from '../../lib/gensuiteAuth';
-import { buildContentPrompt, buildRewritePrompt, buildStoryboardPrompt, buildTranslatePrompt, parseContentJson, parseStoryboardJson, parseTranslationJson } from './prompt';
+import { buildContentPrompt, buildRewritePrompt, buildStoryboardPrompt, parseContentJson, parseStoryboardJson } from './prompt';
+import { translateSegmentsReliably } from './translationReliability';
 
 // GenSuite paid script flow. Desktop authenticates with the signed-in account.
 // Script generation is the
@@ -48,7 +49,6 @@ export class GenSuiteScriptAdapter implements IScriptProvider {
   async rewriteSelection(req: RewriteRequest): Promise<string> { return parseContentJson(await this.call(buildRewritePrompt(req))); }
   async generateStoryboard(req: StoryboardRequest): Promise<ScriptScene[]> { return parseStoryboardJson(await this.call(buildStoryboardPrompt(req))); }
   async translateSegments(req: TranslateRequest): Promise<TranscriptSegment[]> {
-    if (!req.segments.length) return [];
-    return parseTranslationJson(await this.call(buildTranslatePrompt(req)), req.segments);
+    return await translateSegmentsReliably(req, this.engine, (prompt) => this.call(prompt));
   }
 }

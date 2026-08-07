@@ -2,6 +2,7 @@ export type AppErrorStage =
   | 'desktop'
   | 'source'
   | 'speech-recognition'
+  | 'translation'
   | 'voice'
   | 'video-preparation'
   | 'video-completion'
@@ -59,11 +60,14 @@ export const APP_ERROR_DEFINITIONS = {
   TRANSCRIPTION_CHUNK_FAILED: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
   TRANSCRIPTION_CHUNK_TIMEOUT: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
   TRANSCRIPTION_RESULT_INVALID: { stage: 'speech-recognition', cause: 'invalid-media', retryable: true },
+  TRANSCRIPTION_REPETITION_DETECTED: { stage: 'speech-recognition', cause: 'invalid-media', retryable: true },
   TRANSCRIPTION_NO_SPEECH: { stage: 'speech-recognition', cause: 'invalid-media', retryable: false },
   TRANSCRIPTION_TEMP_PERMISSION_DENIED: { stage: 'speech-recognition', cause: 'permission', retryable: true },
   TRANSCRIPTION_TEMP_STORAGE_FULL: { stage: 'speech-recognition', cause: 'storage-full', retryable: true },
   TRANSCRIPTION_TEMP_UNAVAILABLE: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
   TRANSCRIPTION_UNEXPECTED: { stage: 'speech-recognition', cause: 'unexpected', retryable: true },
+  TRANSLATION_RESULT_INCOMPLETE: { stage: 'translation', cause: 'processing-failed', retryable: true },
+  TRANSLATION_REPETITION_DETECTED: { stage: 'translation', cause: 'processing-failed', retryable: true },
   SUBTITLE_ALIGNMENT_INPUT_INVALID: { stage: 'voice', cause: 'missing-input', retryable: false },
   SUBTITLE_ALIGNMENT_AUDIO_UNAVAILABLE: { stage: 'voice', cause: 'file-not-found', retryable: true },
   SUBTITLE_ALIGNMENT_TIMEOUT: { stage: 'voice', cause: 'processing-failed', retryable: true },

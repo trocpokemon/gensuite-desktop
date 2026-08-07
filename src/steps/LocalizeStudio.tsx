@@ -7,6 +7,7 @@ import { VoiceConfigPanel } from '../components/VoiceConfigPanel';
 import { AppSelect } from '../components/AppSelect';
 import { SubtitleDesigner } from '../components/SubtitleDesigner';
 import { getTranscriptionProvider, type ITranscriptionProvider } from '../providers/transcription';
+import { clientAppError } from '../providers/clientAppError';
 import { getScriptProvider } from '../providers/script';
 import { getVoiceProvider } from '../providers/voice';
 import { missingKeyService, serviceLabel, errorMessage, loginRequiredPlatform, type VideoLoginPlatform } from '../providers/errors';
@@ -14,6 +15,7 @@ import type { FfmpegProgress, WhisperModelName } from '../shared/types';
 import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
 import { useEntitlementStore } from '../store/entitlementStore';
 import { probeUsableAudio } from '../providers/voice/audioUtils';
+import { transcriptHasAbnormalRepetition } from '../shared/transcriptQuality';
 
 interface Props {
   onOpenSettings: () => void;
@@ -84,27 +86,6 @@ const SETUP_STEPS: Array<{ id: LocalizeSetupStep; label: string; description: st
   { id: 'subtitle', label: 'Phụ đề', description: 'Chọn preset hiển thị', icon: Subtitles },
   { id: 'export', label: 'Kiểm tra & tạo', description: 'Âm thanh và tổng quan', icon: Play },
 ];
-
-function transcriptHasAbnormalRepetition(segments: Array<{ text: string }>): boolean {
-  if (segments.length < 8) return false;
-  const normalized = segments.map((segment) => segment.text.trim().toLocaleLowerCase().replace(/\s+/g, ' '));
-  const counts = new Map<string, number>();
-  let longestRun = 1;
-  let currentRun = 1;
-  for (let index = 0; index < normalized.length; index += 1) {
-    const text = normalized[index];
-    if (!text) continue;
-    counts.set(text, (counts.get(text) ?? 0) + 1);
-    if (index > 0 && text === normalized[index - 1]) {
-      currentRun += 1;
-      longestRun = Math.max(longestRun, currentRun);
-    } else {
-      currentRun = 1;
-    }
-  }
-  const mostRepeated = Math.max(0, ...counts.values());
-  return longestRun >= 6 || (mostRepeated >= 8 && mostRepeated / segments.length >= 0.4);
-}
 
 export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, onNavigationLockChange, onSourceReadyChange }: Props) {
   const project = useProjectStore((state) => state.project);
@@ -284,7 +265,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       && store.project.sourceVideoPath === input.sourcePath
       && store.project.sourceLanguage === selectedSourceLanguage
       && store.project.targetLanguage === targetLanguage
-      && store.project.transcriptionVersion === 2
+      && store.project.transcriptionVersion === 4
       && store.project.scenes.some((scene) => typeof scene.sourceStart === 'number' && typeof scene.sourceEnd === 'number');
     if (alreadyPrepared) {
       srcRef.current = input.sourcePath!;
@@ -310,14 +291,14 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       if (transcriptionProviderRef.current === transcriber) transcriptionProviderRef.current = null;
     }
     if (transcriptHasAbnormalRepetition(segments)) {
-      throw new Error('Kết quả nhận dạng bị lặp bất thường. Hãy chọn đúng ngôn ngữ gốc hoặc tăng chất lượng nhận dạng rồi thử lại.');
+      throw clientAppError('TRANSCRIPTION_REPETITION_DETECTED');
     }
     useProjectStore.getState().setTranscript(segments);
 
     setStage('translate');
     const translator = getScriptProvider(settings.scriptEngine, keys, settings.scriptModel, 'localize-cloud');
     const translated = await translator.translateSegments({
-      segments, targetLanguage, sourceLanguage: selectedSourceLanguage,
+      projectId, segments, targetLanguage, sourceLanguage: selectedSourceLanguage,
     });
     useProjectStore.getState().setLanguages({ sourceLanguage: selectedSourceLanguage, targetLanguage });
     useProjectStore.getState().buildScenesFromTranscript(translated);

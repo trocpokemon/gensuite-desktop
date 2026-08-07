@@ -13,7 +13,7 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   fileName: sourcePath,
 }).outputText + `
-module.exports.__transcriptionChunkingTest = { buildTranscriptionChunks, mergeTranscriptionChunks };
+module.exports.__transcriptionChunkingTest = { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments };
 `;
 
 const module = { exports: {} };
@@ -35,7 +35,7 @@ new Function('require', 'module', 'exports', compiled)((name) => {
   return requireNode(name);
 }, module, module.exports);
 
-const { buildTranscriptionChunks, mergeTranscriptionChunks } = module.exports.__transcriptionChunkingTest;
+const { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments } = module.exports.__transcriptionChunkingTest;
 const violations = [];
 const duration = 1_205;
 const chunks = buildTranscriptionChunks(duration);
@@ -63,7 +63,14 @@ if (!merged.some((segment) => segment.end > 1_200 && segment.text === 'Câu cu�
 if (merged.some((segment, index) => segment.id !== `seg_${index}`)) violations.push('ID sau khi ghép không liên tục.');
 if (!merged.every((segment, index) => index === 0 || segment.start >= merged[index - 1].start)) violations.push('Timeline sau khi ghép không tăng dần.');
 
-if (!/'-ot'[\s\S]*'-d'/u.test(source)) violations.push('Tiến trình nền chưa giới hạn nhận dạng theo từng cửa sổ thời gian.');
+const offsetSegments = offsetRecognitionWindowSegments([
+  { id: 'relative', start: 3, end: 5, text: 'Câu trong cửa sổ' },
+], 58, 122);
+if (offsetSegments[0]?.start !== 61 || offsetSegments[0]?.end !== 63) violations.push('Mốc tương đối chưa được đổi chính xác về timeline video.');
+if (!/extractRecognitionWindow/u.test(source) || !/'-ss'[\s\S]*'-t'/u.test(source) || !/'-f', windowWavPath/u.test(source)) {
+  violations.push('Tiến trình nền chưa tách file ngắn độc lập cho từng cửa sổ nhận dạng.');
+}
+if (/'-ot'/u.test(source)) violations.push('Nhận dạng vẫn dùng offset trực tiếp trên file dài, có thể làm sai mốc thời gian.');
 if (!/Promise<IpcResult<TranscriptSegment\[\]>>/u.test(source)) violations.push('IPC nhận dạng chưa trả lỗi có cấu trúc.');
 if (!/checkpoint-/u.test(source) || !/replaceJsonTransaction/u.test(source) || !/validCheckpoint/u.test(source)) violations.push('Nhận dạng video dài chưa lưu và đọc checkpoint theo từng phần.');
 if (!/whisper:cancel/u.test(source) || !/runningTranscriptions/u.test(source)) violations.push('Nhận dạng chưa hỗ trợ dừng an toàn hoặc chống chạy trùng dự án.');
@@ -71,7 +78,13 @@ if (!/const midpoint\s*=/u.test(source) || !/threads:\s*1/u.test(source)) violat
 if (!/modelIsUsable/u.test(source) || !/validateModelRuntime/u.test(source)) violations.push('Dữ liệu nhận dạng chưa được kiểm tra tính toàn vẹn trước khi chạy.');
 if (!/invokeStructured\('whisper:transcribe'/u.test(preloadSource)) violations.push('Bridge chưa kiểm tra payload nhận dạng.');
 if (!/if \(!result\.ok\) throw result\.error/u.test(adapterSource)) violations.push('Adapter chưa chuyển lỗi có cấu trúc lên giao diện.');
-if (!/transcriptionVersion === 2/u.test(studioSource)) violations.push('Dự án cũ vẫn có thể tái sử dụng dữ liệu nhận dạng thiếu.');
+if (!/transcriptionVersion === 4/u.test(studioSource)) violations.push('Dự án cũ vẫn có thể tái sử dụng dữ liệu nhận dạng thiếu.');
+if (!/--vad/u.test(source) || !/ggml-silero-v6\.2\.0\.bin/u.test(source) || !/VAD_MODEL_SHA256/u.test(source)) {
+  violations.push('Nhận dạng chưa lọc vùng có lời nói bằng dữ liệu đã xác minh.');
+}
+if (!/pipelineVersion:\s*4/u.test(source) || !/schemaVersion:\s*2/u.test(source)) {
+  violations.push('Checkpoint cũ chưa bị vô hiệu sau khi đổi bộ lọc nhận dạng.');
+}
 
 if (violations.length) {
   console.error(`Kiểm tra nhận dạng video dài thất bại:\n${violations.map((item) => `- ${item}`).join('\n')}`);
