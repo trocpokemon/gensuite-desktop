@@ -12,6 +12,12 @@ export interface VoiceResult {
   wordTimings?: SubtitleWordTiming[];
 }
 
+export interface VoiceSynthesisProgress {
+  completedChunks: number;
+  totalChunks: number;
+  phase: 'requesting' | 'waiting' | 'downloading' | 'assembling' | 'completed';
+}
+
 export interface VoiceRequest {
   projectId: string;
   /** Stable id for the segment/scene — used as the output filename. */
@@ -30,6 +36,8 @@ export interface VoiceRequest {
   pitch: number;
   volume: number;
   deliveryMode: 'STABLE' | 'BALANCED' | 'CREATIVE';
+  /** Optional renderer heartbeat used by long-video workflows. */
+  onProgress?: (progress: VoiceSynthesisProgress) => void;
 }
 
 // Abstraction the UI depends on. Concrete adapters (edge-tts, GenVoice,

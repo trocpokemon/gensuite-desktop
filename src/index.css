@@ -77,6 +77,20 @@ button {
   box-shadow: 0 12px 30px rgba(16, 185, 129, 0.23);
 }
 
+@keyframes validation-attention-shake {
+  0%, 100% { transform: translateX(0); }
+  18% { transform: translateX(-7px); }
+  36% { transform: translateX(6px); }
+  54% { transform: translateX(-4px); }
+  72% { transform: translateX(3px); }
+}
+
+.validation-attention {
+  border-color: rgba(248, 113, 113, 0.82) !important;
+  box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.12), 0 0 18px rgba(248, 113, 113, 0.12);
+  animation: validation-attention-shake 420ms cubic-bezier(.36,.07,.19,.97) both;
+}
+
 .audio-progress::-webkit-slider-thumb {
   width: 13px;
   height: 13px;

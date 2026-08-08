@@ -1,13 +1,42 @@
-import { useRef, useState } from 'react';
-import { AudioLines, Copy, Download, FileText, Film, FolderOpen, HardDrive, ImagePlus, Languages, Mic, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { User } from '@supabase/supabase-js';
+import { AudioLines, Copy, Download, FileText, Film, FolderOpen, HardDrive, ImagePlus, Languages, LogOut, Mic, Plus, Search, Sparkles, Trash2, UserRound } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
+import { useAuthStore } from '../store/authStore';
 import { localFileUrl } from '../shared/localFile';
 import type { ProjectSummary } from '../shared/types';
 import { QuickToolWorkspace, type QuickToolId } from './QuickToolWorkspace';
 
 const STEP_LABEL: Record<string, string> = {
-  topic: 'Chọn chủ đề', content: 'Viết nội dung', storyboard: 'Storyboard', voice: 'Giọng đọc', timeline: 'Xuất video', localize: 'Dịch & lồng tiếng', narrate: 'Thuyết minh video',
+  topic: 'Chọn chủ đề', content: 'Viết nội dung', storyboard: 'Storyboard', voice: 'Giọng đọc', timeline: 'Xuất video', localize: 'Dịch & lồng tiếng', narrate: 'Video Review',
 };
+
+const AVATAR_FIELDS = ['avatar_url', 'picture', 'avatarUrl', 'photo_url', 'photoURL'] as const;
+
+function readAvatarUrl(user: User | null): string {
+  const sources: Array<Record<string, unknown> | undefined> = [
+    user?.user_metadata,
+    ...(user?.identities?.map((identity) => identity.identity_data) ?? []),
+  ];
+  for (const source of sources) {
+    for (const field of AVATAR_FIELDS) {
+      const value = String(source?.[field] ?? '').trim();
+      if (/^https:\/\//i.test(value)) return value;
+    }
+  }
+  return '';
+}
+
+function HomeAccountAvatar({ url, email }: { url: string; email: string }) {
+  const [loadFailed, setLoadFailed] = useState(false);
+  useEffect(() => setLoadFailed(false), [url]);
+
+  if (url && !loadFailed) {
+    return <img src={url} alt="Ảnh đại diện tài khoản" loading="lazy" referrerPolicy="no-referrer" onError={() => setLoadFailed(true)} className="size-12 rounded-2xl object-cover ring-1 ring-white/15" />;
+  }
+  const initial = email.trim().charAt(0).toLocaleUpperCase('vi-VN');
+  return <span className="grid size-12 place-items-center rounded-2xl bg-gradient-to-br from-emerald-300/25 to-teal-500/10 text-sm font-black text-emerald-200 ring-1 ring-emerald-300/20">{initial || <UserRound size={19} />}</span>;
+}
 
 interface Props { onOpenSettings: () => void; }
 
@@ -19,9 +48,9 @@ const QUICK_TOOLS: Array<{ id: QuickToolId; title: string; description: string; 
   { id: 'image', title: 'Tạo ảnh', description: 'Tạo ảnh từ mô tả', icon: ImagePlus, color: 'text-fuchsia-300 bg-fuchsia-400/10' },
 ];
 
-function HeroBadges({ isNew = false }: { isNew?: boolean }) {
+function HeroBadges({ isDemo = false }: { isDemo?: boolean }) {
   return <span className="absolute right-4 top-4 flex items-center gap-1.5">
-    {isNew && <span className="rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-[10px] font-bold text-amber-100">Mới</span>}
+    {isDemo && <span className="rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-[10px] font-bold text-amber-100">Demo</span>}
     <span className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-bold text-emerald-200">Miễn Phí</span>
   </span>;
 }
@@ -49,6 +78,9 @@ function ProjectThumbnail({ project }: { project: ProjectSummary }) {
 }
 
 export function ProjectHome({ onOpenSettings }: Props) {
+  const authUser = useAuthStore((state) => state.user);
+  const authEmail = useAuthStore((state) => state.email);
+  const signOut = useAuthStore((state) => state.signOut);
   const projects = useProjectStore((state) => state.projects);
   const createProject = useProjectStore((state) => state.createProject);
   const createLocalizeProject = useProjectStore((state) => state.createLocalizeProject);
@@ -60,6 +92,7 @@ export function ProjectHome({ onOpenSettings }: Props) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [quickTool, setQuickTool] = useState<QuickToolId | null>(null);
+  const avatarUrl = useMemo(() => readAvatarUrl(authUser), [authUser]);
 
   const visible = projects.filter((project) =>
     `${project.name} ${project.topicName}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
@@ -74,25 +107,30 @@ export function ProjectHome({ onOpenSettings }: Props) {
   return (
     <main className="min-h-0 flex-1 overflow-y-auto px-10 py-10">
       <div className="mx-auto max-w-6xl">
-        <header className="mb-8">
-          <div>
+        <header className="mb-8 flex flex-col items-start justify-between gap-5 sm:flex-row">
+          <div className="min-w-0">
             <div className="mb-2 text-xs font-bold uppercase tracking-[0.18em] text-emerald-400">GenSuite Studio</div>
             <h1 className="text-4xl font-bold tracking-[-0.05em]">Bạn muốn làm gì hôm nay?</h1>
             <p className="mt-3 text-sm text-text/50">Chọn một quy trình để bắt đầu, hoặc mở lại một dự án bên dưới.</p>
           </div>
+          {authEmail && (
+            <section aria-label="Thông tin tài khoản" className="flex min-h-[92px] w-full max-w-[320px] shrink-0 items-center gap-3.5 px-1 py-2">
+              <div className="relative shrink-0">
+                <HomeAccountAvatar url={avatarUrl} email={authEmail} />
+                <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-[#17191a] bg-emerald-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-white/25">Tài khoản</div>
+                <div className="mt-1.5 truncate text-sm font-semibold tracking-[-0.01em] text-white/80" title={authEmail}>{authEmail}</div>
+              </div>
+              <button type="button" onClick={() => void signOut()} title="Đăng xuất" aria-label={`Đăng xuất khỏi ${authEmail}`} className="grid size-9 shrink-0 place-items-center rounded-xl text-white/25 transition hover:bg-white/[0.07] hover:text-white/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 active:bg-white/10">
+                <LogOut size={15} />
+              </button>
+            </section>
+          )}
         </header>
 
         <div className="mb-7 grid grid-cols-1 gap-4 md:grid-cols-3">
-          <button onClick={() => void createNarrationProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-amber-300/20 bg-gradient-to-br from-amber-300/[0.13] via-orange-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-amber-300/45">
-            <HeroBadges isNew />
-            <div className="mb-4 inline-flex rounded-xl bg-amber-300/15 p-3 text-amber-200"><AudioLines size={24} /></div>
-            <h2 className="text-lg font-bold text-white">Thuyết minh video</h2>
-            <p className="mt-1.5 text-sm leading-5 text-white/50">Đưa video có sẵn vào, tự hiểu diễn biến, viết lời và tạo giọng khớp với từng cảnh.</p>
-            <span className="mt-4 inline-flex items-center gap-1.5 text-xs font-bold text-amber-200">
-              <Film size={14} /> Chọn video cần thuyết minh
-            </span>
-          </button>
-
           <button onClick={() => void createLocalizeProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-400/[0.12] via-indigo-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-sky-400/40">
             <HeroBadges />
             <div className="mb-4 inline-flex rounded-xl bg-sky-400/15 p-3 text-sky-300"><Languages size={24} /></div>
@@ -103,8 +141,18 @@ export function ProjectHome({ onOpenSettings }: Props) {
             </span>
           </button>
 
+          <button onClick={() => void createNarrationProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-amber-300/20 bg-gradient-to-br from-amber-300/[0.13] via-orange-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-amber-300/45">
+            <HeroBadges isDemo />
+            <div className="mb-4 inline-flex rounded-xl bg-amber-300/15 p-3 text-amber-200"><AudioLines size={24} /></div>
+            <h2 className="text-lg font-bold text-white">Video Review</h2>
+            <p className="mt-1.5 text-sm leading-5 text-white/50">Đưa video có sẵn vào, tự phân tích nội dung, viết lời review và tạo giọng khớp với từng cảnh.</p>
+            <span className="mt-4 inline-flex items-center gap-1.5 text-xs font-bold text-amber-200">
+              <Film size={14} /> Chọn video cần review
+            </span>
+          </button>
+
           <button onClick={() => setCreating(true)} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-emerald-400/[0.12] via-teal-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-emerald-400/40">
-            <HeroBadges isNew />
+            <HeroBadges isDemo />
             <div className="mb-4 inline-flex rounded-xl bg-emerald-400/15 p-3 text-emerald-300"><Sparkles size={24} /></div>
             <h2 className="text-lg font-bold text-white">Tạo dự án nội dung</h2>
             <p className="mt-1.5 text-sm leading-5 text-white/50">Từ chủ đề đến video hoàn chỉnh: viết kịch bản, storyboard, lồng giọng và xuất video.</p>

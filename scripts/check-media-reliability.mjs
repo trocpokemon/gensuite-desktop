@@ -10,9 +10,10 @@ async function compile(file) {
   }).outputText;
 }
 
-function evaluate(source) {
+function evaluate(source, dependencies = {}) {
   const module = { exports: {} };
   new Function('require', 'module', 'exports', source)((name) => {
+    if (Object.prototype.hasOwnProperty.call(dependencies, name)) return dependencies[name];
     throw new Error(`Unexpected runtime dependency: ${name}`);
   }, module, module.exports);
   return module.exports;
@@ -28,7 +29,12 @@ globalThis.localStorage = {
 const voicePath = path.resolve('src/providers/voice/voiceReliability.ts');
 const subtitlePath = path.resolve('src/shared/subtitleAlignment.ts');
 const voice = evaluate(await compile(voicePath));
-const subtitle = evaluate(await compile(subtitlePath));
+const subtitle = evaluate(await compile(subtitlePath), {
+  '../providers/clientAppError': {
+    clientAppError: (code, context) => ({ kind: 'app-error-v1', code, context }),
+    normalizedClientAppError: (_error, code, context) => ({ kind: 'app-error-v1', code, context }),
+  },
+});
 const violations = [];
 
 const naturalText = Array.from({ length: 100 }, (_, index) => `Câu kiểm tra ${index + 1}, cần được giữ nguyên nội dung.`).join(' ');

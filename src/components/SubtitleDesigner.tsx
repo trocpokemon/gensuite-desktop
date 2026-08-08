@@ -19,6 +19,7 @@ interface Props {
   captions?: Caption[];
   reviewLoading?: boolean;
   reviewProgress?: number;
+  reviewLabel?: string;
 }
 
 const FONTS = ['Arial', 'Segoe UI', 'Arial Black', 'Tahoma', 'Verdana', 'Georgia', 'Times New Roman', 'Microsoft YaHei', 'Malgun Gothic', 'Yu Gothic'];
@@ -60,7 +61,7 @@ function ColorField({ label, value, onChange }: { label: string; value: string; 
   return <label className="flex items-center justify-between rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2"><span className="text-[10px] font-semibold text-white/45">{label}</span><input type="color" value={value} onChange={(event) => onChange(event.target.value)} className="h-7 w-9 cursor-pointer rounded border-0 bg-transparent" /></label>;
 }
 
-export function SubtitleDesigner({ config, onChange, ratio, onRatioChange, backgroundPath, backgroundIsVideo, captions = [], reviewLoading, reviewProgress }: Props) {
+export function SubtitleDesigner({ config, onChange, ratio, onRatioChange, backgroundPath, backgroundIsVideo, captions = [], reviewLoading, reviewProgress, reviewLabel }: Props) {
   const preferences = useSettingsStore((state) => state.keys);
   const savePreferences = useSettingsStore((state) => state.save);
   const [editMode, setEditMode] = useState<SubtitleEditMode>('subtitle');
@@ -220,7 +221,7 @@ export function SubtitleDesigner({ config, onChange, ratio, onRatioChange, backg
 
     <main ref={canvasRef} className="relative row-start-2 min-h-0 overflow-auto bg-[#09090a] [background-image:radial-gradient(circle_at_center,rgba(255,255,255,.035)_0,transparent_58%)]">
       <div className="flex min-h-full min-w-full items-center justify-center p-8">
-        <SubtitleStylePreview ratio={ratio} backgroundPath={backgroundPath} backgroundIsVideo={backgroundIsVideo} captions={captions} config={config} onChange={onChange} loading={reviewLoading} loadingProgress={reviewProgress} editMode={editMode} onEditModeChange={setEditMode} showToolbar={false} zoom={zoom} viewportWidth={canvasSize.width} viewportHeight={canvasSize.height} seekTime={seekTime} onPlaybackTimeChange={(time, total) => { setCurrentTime(time); setDuration(total); }} selectedCoverId={selectedCover?.id} onSelectedCoverIdChange={setSelectedCoverId} />
+        <SubtitleStylePreview ratio={ratio} backgroundPath={backgroundPath} backgroundIsVideo={backgroundIsVideo} captions={captions} config={config} onChange={onChange} loading={reviewLoading} loadingProgress={reviewProgress} loadingLabel={reviewLabel} editMode={editMode} onEditModeChange={setEditMode} showToolbar={false} zoom={zoom} viewportWidth={canvasSize.width} viewportHeight={canvasSize.height} seekTime={seekTime} onPlaybackTimeChange={(time, total) => { setCurrentTime(time); setDuration(total); }} selectedCoverId={selectedCover?.id} onSelectedCoverIdChange={setSelectedCoverId} />
       </div>
     </main>
 

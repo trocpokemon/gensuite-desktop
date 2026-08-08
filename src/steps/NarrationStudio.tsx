@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, ArrowLeft, Captions, Check, CheckCircle2, ChevronRight, Clock3, Download, FileVideo, Film,
-  FolderOpen, Link2, Loader2, Mic2, Music, Upload, X,
+  FolderOpen, Layers3, Link2, Loader2, Mic2, Music, Upload, X,
 } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
@@ -129,6 +129,10 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
   const [voiceProgress, setVoiceProgress] = useState({ done: 0, total: 0, fitting: false });
   const [renderKind, setRenderKind] = useState<'preview' | 'final' | null>(null);
   const [renderPercent, setRenderPercent] = useState(0);
+  const [capCutBusy, setCapCutBusy] = useState(false);
+  const [capCutDraftsDirectory, setCapCutDraftsDirectory] = useState('');
+  const [capCutResult, setCapCutResult] = useState<{ draftPath: string; projectName: string } | null>(null);
+  const [capCutError, setCapCutError] = useState('');
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [analysisProgress, setAnalysisProgress] = useState(0);
   const [analysisPhase, setAnalysisPhase] = useState<NarrationProgressPhase>('preparing');
@@ -154,7 +158,7 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
     || project.narrationWorkflow?.targetAudience !== narrationAudience
     || project.narrationWorkflow?.density !== narrationDensity
   );
-  const running = sourceBusy || analysisBusy || voiceBusy || Boolean(renderKind);
+  const running = sourceBusy || analysisBusy || voiceBusy || capCutBusy || Boolean(renderKind);
 
   useEffect(() => {
     onNavigationLockChange(running);
@@ -528,6 +532,83 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
     }
   };
 
+  const chooseCapCutDraftsDirectory = async () => {
+    if (running) return;
+    clearNotice();
+    setCapCutError('');
+    try {
+      const capCutBridge = window.gensuite?.capcut;
+      if (!capCutBridge) {
+        setCapCutError('Kết nối xuất dự án chưa sẵn sàng. Hãy khởi động lại GenSuite rồi thử lại.');
+        return;
+      }
+      const result = await capCutBridge.selectDraftsDirectory();
+      if (!result.ok) {
+        setCapCutError(errorMessage(result.error));
+        return;
+      }
+      if (result.value) setCapCutDraftsDirectory(result.value);
+    } catch (err) {
+      setCapCutError(errorMessage(err));
+    }
+  };
+
+  const createCapCutDraft = async () => {
+    if (running) return;
+    clearNotice();
+    setCapCutError('');
+    const currentProject = useProjectStore.getState().project;
+    if (!currentProject.sourceVideoPath) {
+      setCapCutError('Không còn tìm thấy video nguồn. Hãy chọn lại video rồi thử lại.');
+      return;
+    }
+    const incompleteScene = currentProject.scenes.find((scene) => (
+      !scene.audioPath
+      || typeof scene.sourceStart !== 'number'
+      || typeof scene.sourceEnd !== 'number'
+      || typeof scene.audioDuration !== 'number'
+    ));
+    if (!currentProject.scenes.length || incompleteScene) {
+      setCapCutError('Một số đoạn chưa có đủ giọng đọc hoặc mốc thời gian. Hãy hoàn tất bước Giọng đọc rồi thử lại.');
+      return;
+    }
+    setCapCutBusy(true);
+    setCapCutResult(null);
+    try {
+      const capCutBridge = window.gensuite?.capcut;
+      if (!capCutBridge) {
+        setCapCutError('Kết nối xuất dự án chưa sẵn sàng. Hãy khởi động lại GenSuite rồi thử lại.');
+        return;
+      }
+      const storedDurationSec = (currentProject.narrationWorkflow?.sourceDurationMs ?? 0) / 1000;
+      const result = await capCutBridge.exportDraft({
+        projectId: currentProject.id,
+        projectName: currentProject.name,
+        sourceVideoPath: currentProject.sourceVideoPath,
+        sourceDurationSec: storedDurationSec > 0 ? storedDurationSec : undefined,
+        segments: currentProject.scenes.map((scene) => ({
+          audioPath: scene.audioPath as string,
+          sourceStart: scene.sourceStart as number,
+          sourceEnd: scene.sourceEnd as number,
+          text: scene.narration,
+          audioDuration: scene.audioDuration as number,
+        })),
+        subtitles: sub.enabled,
+        subtitleConfig: sub.enabled ? sub : undefined,
+        originalAudioVolume: currentProject.settings.originalAudioVolume,
+        musicPath: music.enabled ? music.audioPath : undefined,
+        musicVolume: music.volume,
+        draftsDirectory: capCutDraftsDirectory || undefined,
+      });
+      if (!result.ok) throw result.error;
+      setCapCutResult(result.value);
+    } catch (err) {
+      setCapCutError(errorMessage(err));
+    } finally {
+      setCapCutBusy(false);
+    }
+  };
+
   const stage = project.narrationWorkflow?.stage;
   const currentStepIndex = SETUP_STEPS.findIndex((item) => item.id === setupStep);
   const stepReady = setupStep === 'source'
@@ -558,7 +639,7 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
     <div className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">
       <header className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between gap-5 pb-4">
         <div className="min-w-0">
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-400/75">Thuyết minh video</div>
+          <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-400/75">Video Review</div>
           <h1 className="truncate text-2xl font-bold tracking-[-0.04em]">Biến hình ảnh thành câu chuyện</h1>
           <p className="mt-1 text-xs text-white/40">Hoàn thành 4 bước, sau đó ứng dụng tự xử lý phần còn lại.</p>
         </div>
@@ -631,13 +712,23 @@ export function NarrationStudio({ onOpenSettings, setupStep, onSetupStepChange, 
           </div>
           <div className="flex min-h-72 flex-col justify-center rounded-xl border border-white/[0.07] bg-black/40 p-3">{previewUrl ? <video src={previewUrl} controls preload="metadata" className="max-h-[420px] w-full rounded-lg object-contain" /> : <div className="text-center text-sm text-white/30">Bản xem trước sẽ xuất hiện ở đây.</div>}</div>
         </div>
+        <div className="mt-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.045] p-4">
+          <div className="flex flex-wrap items-center gap-4">
+            <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-emerald-400/10 text-emerald-300"><Layers3 size={19} /></span>
+            <div className="min-w-0 flex-1"><p className="text-sm font-bold text-white/85">Tiếp tục chỉnh sửa trong CapCut</p><p className="mt-1 text-xs leading-5 text-white/40">Video gốc, giọng thuyết minh, nhạc nền và phụ đề được tách thành từng track để bạn chỉnh trực tiếp.</p></div>
+            <div className="flex shrink-0 flex-wrap gap-2"><button type="button" onClick={() => void chooseCapCutDraftsDirectory()} disabled={running} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3 py-2.5 text-xs font-bold text-white/55 transition hover:bg-white/[0.04] hover:text-white disabled:opacity-40"><FolderOpen size={14} /> {capCutDraftsDirectory ? 'Đổi thư mục' : 'Chọn thư mục'}</button><button type="button" onClick={() => void createCapCutDraft()} disabled={running} className="primary-action inline-flex min-w-40 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-bold disabled:opacity-40">{capCutBusy ? <Loader2 size={15} className="animate-spin" /> : <Layers3 size={15} />}{capCutBusy ? 'Đang tạo dự án…' : 'Tạo dự án CapCut'}</button></div>
+          </div>
+          {capCutError && <div role="alert" className="mt-3 flex items-start gap-2 rounded-xl border border-red-400/20 bg-red-400/[0.07] px-4 py-3 text-xs leading-5 text-red-100/80"><AlertTriangle size={15} className="mt-0.5 shrink-0 text-red-300" /><span>{capCutError}</span></div>}
+          {capCutDraftsDirectory && !capCutResult && <p className="mt-3 text-[10px] text-emerald-200/45">Đã chọn thư mục dự án. GenSuite sẽ tạo một dự án mới, không ghi đè dự án hiện có.</p>}
+          {capCutResult && <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-emerald-300/20 bg-black/15 px-4 py-3"><CheckCircle2 size={16} className="text-emerald-300" /><div className="min-w-0 flex-1"><p className="truncate text-xs font-bold text-emerald-100">Dự án đã sẵn sàng: {capCutResult.projectName}</p><p className="mt-0.5 text-[10px] text-white/35">Mở lại CapCut để thấy dự án và tiếp tục chỉnh sửa.</p></div><button type="button" onClick={() => window.gensuite.shell.showItemInFolder(capCutResult.draftPath)} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-[10px] font-bold text-white/60 hover:bg-white/[0.04] hover:text-white"><FolderOpen size={13} /> Mở thư mục</button></div>}
+        </div>
         {renderKind && <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${Math.max(4, renderPercent)}%` }} /></div>}
         {stage === 'complete' && project.dubbedVideoPath && <div className="mt-5 rounded-xl border border-emerald-400/25 bg-emerald-400/[0.07] p-4"><div className="flex items-center justify-between gap-4"><span className="flex items-center gap-2 text-sm font-bold text-emerald-200"><CheckCircle2 size={17} /> Video đã hoàn thành</span><button onClick={() => window.gensuite.shell.showItemInFolder(project.dubbedVideoPath!)} className="flex items-center gap-2 rounded-lg border border-emerald-300/20 px-3 py-2 text-xs font-bold text-emerald-200"><FolderOpen size={14} /> Mở vị trí file</button></div>{outputUrl && <video src={outputUrl} controls preload="metadata" className="mt-4 max-h-[520px] w-full rounded-lg bg-black object-contain" />}</div>}
       </section>}
       </div>
 
       <footer className="mx-auto mt-4 flex w-full max-w-5xl shrink-0 items-center gap-3 rounded-2xl border border-white/[0.08] bg-[#151516]/95 p-3 shadow-2xl backdrop-blur-xl">
-        {running ? <div className="min-w-0 flex-1 px-2"><p className="flex items-center gap-2 truncate text-xs font-semibold text-emerald-200"><Loader2 size={15} className="shrink-0 animate-spin" />{sourceBusy ? `Đang chuẩn bị video${downloadProgress ? ` ${Math.round(downloadProgress)}%` : ''}` : analysisBusy ? PROGRESS_LABELS[analysisPhase] : voiceBusy ? voiceProgress.fitting ? 'Đang tự điều chỉnh lời' : `Đang tạo giọng ${voiceProgress.done}/${voiceProgress.total}` : renderKind === 'preview' ? `Đang tạo bản xem trước ${Math.round(renderPercent)}%` : `Đang hoàn thiện ${Math.round(renderPercent)}%`}</p><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${sourceBusy ? downloadProgress || 18 : analysisBusy ? analysisProgress : voiceBusy && voiceProgress.total ? voiceProgress.done / voiceProgress.total * 100 : renderPercent || 18}%` }} /></div></div> : <div className="min-w-0 flex-1 px-2"><p className="truncate text-xs font-semibold text-white/60">Bước {currentStepIndex + 1}/4 · {SETUP_STEPS[currentStepIndex].label}</p><p className="mt-0.5 truncate text-[10px] text-white/25">{project.sourceVideoPath ? setupStep === 'source' ? sourceName(project.sourceVideoPath) : setupStep === 'script' ? `${project.scenes.length} đoạn lời` : setupStep === 'voice' ? allVoiced ? 'Giọng đọc đã sẵn sàng' : 'Chọn giọng phù hợp để tiếp tục' : previewUrl ? 'Bản xem trước đã sẵn sàng' : 'Kiểm tra âm thanh trước khi tạo' : 'Hãy chọn video để bắt đầu'}</p></div>}
+        {running ? <div className="min-w-0 flex-1 px-2"><p className="flex items-center gap-2 truncate text-xs font-semibold text-emerald-200"><Loader2 size={15} className="shrink-0 animate-spin" />{sourceBusy ? `Đang chuẩn bị video${downloadProgress ? ` ${Math.round(downloadProgress)}%` : ''}` : analysisBusy ? PROGRESS_LABELS[analysisPhase] : voiceBusy ? voiceProgress.fitting ? 'Đang tự điều chỉnh lời' : `Đang tạo giọng ${voiceProgress.done}/${voiceProgress.total}` : capCutBusy ? 'Đang tạo dự án chỉnh sửa…' : renderKind === 'preview' ? `Đang tạo bản xem trước ${Math.round(renderPercent)}%` : `Đang hoàn thiện ${Math.round(renderPercent)}%`}</p><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${sourceBusy ? downloadProgress || 18 : analysisBusy ? analysisProgress : voiceBusy && voiceProgress.total ? voiceProgress.done / voiceProgress.total * 100 : renderPercent || 18}%` }} /></div></div> : <div className="min-w-0 flex-1 px-2"><p className="truncate text-xs font-semibold text-white/60">Bước {currentStepIndex + 1}/4 · {SETUP_STEPS[currentStepIndex].label}</p><p className="mt-0.5 truncate text-[10px] text-white/25">{project.sourceVideoPath ? setupStep === 'source' ? sourceName(project.sourceVideoPath) : setupStep === 'script' ? `${project.scenes.length} đoạn lời` : setupStep === 'voice' ? allVoiced ? 'Giọng đọc đã sẵn sàng' : 'Chọn giọng phù hợp để tiếp tục' : previewUrl ? 'Bản xem trước đã sẵn sàng' : 'Kiểm tra âm thanh trước khi tạo' : 'Hãy chọn video để bắt đầu'}</p></div>}
         {currentStepIndex > 0 && !running && <button onClick={goBack} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-xs font-bold text-white/55 hover:text-white"><ArrowLeft size={14} /> Quay lại</button>}
         {setupStep !== 'export' ? <button onClick={() => void goNext()} disabled={running || !stepReady} className="primary-action inline-flex min-w-36 items-center justify-center gap-2 rounded-xl px-5 py-3 text-xs font-bold disabled:opacity-40">{setupStep === 'source' ? hasAnalysis && !outputChoiceChanged ? 'Tiếp tục' : 'Phân tích & viết lời' : setupStep === 'voice' && !allVoiced ? 'Tạo giọng' : 'Tiếp tục'} <ChevronRight size={14} /></button> : <button onClick={() => void renderVideo(previewUrl ? 'final' : 'preview')} disabled={running || !allVoiced || stage === 'complete'} className="primary-action inline-flex min-w-40 items-center justify-center gap-2 rounded-xl px-5 py-3 text-xs font-bold disabled:opacity-40">{stage === 'complete' ? <><Check size={14} /> Đã hoàn tất</> : previewUrl ? <><Film size={14} /> Tạo video</> : <><Film size={14} /> Tạo bản xem trước</>}</button>}
       </footer>

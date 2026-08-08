@@ -111,13 +111,25 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
   TRANSCRIPTION_TEMP_STORAGE_FULL: () => 'Vùng lưu tạm không đủ dung lượng để nhận dạng. Hãy giải phóng dung lượng trên ổ hệ thống rồi thử lại.',
   TRANSCRIPTION_TEMP_UNAVAILABLE: () => 'Không thể tạo dữ liệu tạm để nhận dạng. Hãy khởi động lại ứng dụng rồi thử lại.',
   TRANSCRIPTION_UNEXPECTED: () => 'Nhận dạng lời thoại dừng ngoài dự kiến. Hãy thử lại hoặc gửi mã chẩn đoán để được hỗ trợ.',
+  TRANSLATION_INPUT_REQUIRED: () => 'Không có lời thoại để dịch. Hãy nhận dạng lại video rồi thử lại.',
+  TRANSLATION_INPUT_TOO_LARGE: () => 'Nội dung cần dịch vượt giới hạn của một lần xử lý. Tiến độ đã được giữ; hãy thử lại để tiếp tục.',
+  TRANSLATION_ACCESS_DENIED: () => 'Chưa có quyền sử dụng nguồn dịch đã chọn. Hãy kiểm tra tài khoản hoặc cấu hình rồi thử lại.',
+  TRANSLATION_AUTH_REQUIRED: () => 'Phiên đăng nhập đã hết hạn trong khi dịch. Hãy đăng nhập lại rồi tiếp tục.',
+  TRANSLATION_UPGRADE_REQUIRED: () => 'Gói tài khoản hiện tại chưa hỗ trợ nguồn dịch đã chọn. Hãy nâng cấp hoặc đổi cách dịch.',
+  TRANSLATION_CREDITS_INSUFFICIENT: () => 'Tài khoản không đủ credits để dịch nội dung này.',
+  TRANSLATION_RATE_LIMITED: () => 'Nguồn dịch đang giới hạn số yêu cầu. Tiến độ đã được giữ; hãy chờ một lúc rồi thử lại.',
+  TRANSLATION_SERVICE_UNAVAILABLE: () => 'Nguồn dịch hiện không phản hồi ổn định. Tiến độ đã được giữ; hãy kiểm tra mạng rồi thử lại.',
+  TRANSLATION_REQUEST_TIMEOUT: () => 'Dịch lời thoại không có phản hồi trong thời gian cho phép. Tiến độ đã được giữ; hãy thử lại.',
+  TRANSLATION_RESULT_INVALID: () => 'Kết quả dịch không đúng định dạng cần thiết nên ứng dụng đã dừng an toàn. Hãy thử lại.',
   TRANSLATION_RESULT_INCOMPLETE: () => 'Bản dịch chưa trả về đủ các câu nên ứng dụng đã dừng trước khi tạo giọng. Hãy thử lại.',
   TRANSLATION_REPETITION_DETECTED: () => 'Bản dịch có nhiều câu bị lặp bất thường nên ứng dụng đã dừng trước khi tạo giọng. Hãy thử lại.',
+  TRANSLATION_UNEXPECTED: () => 'Dịch lời thoại dừng ngoài dự kiến. Tiến độ trước đó vẫn được giữ; hãy thử lại.',
   SUBTITLE_ALIGNMENT_INPUT_INVALID: () => 'Thiếu dữ liệu để đồng bộ phụ đề với giọng đọc.',
   SUBTITLE_ALIGNMENT_AUDIO_UNAVAILABLE: (error) => `Không tìm thấy âm thanh${segmentLabel(error)} để đồng bộ phụ đề. Hãy tạo lại giọng cho câu này.`,
   SUBTITLE_ALIGNMENT_TIMEOUT: (error) => `Đồng bộ phụ đề${segmentLabel(error)} mất nhiều thời gian hơn dự kiến. Ứng dụng có thể dùng thời gian ước lượng để tiếp tục.`,
   SUBTITLE_ALIGNMENT_FAILED: (error) => `Chưa thể đồng bộ chính xác phụ đề${segmentLabel(error)}. Ứng dụng có thể dùng thời gian ước lượng để tiếp tục.`,
   SUBTITLE_ALIGNMENT_RESULT_INVALID: (error) => `Không xác định được nhịp lời đọc${segmentLabel(error)}. Ứng dụng có thể dùng thời gian ước lượng để tiếp tục.`,
+  SUBTITLE_ALIGNMENT_UNEXPECTED: (error) => `Căn phụ đề${segmentLabel(error)} dừng ngoài dự kiến. Ứng dụng có thể dùng thời gian ước lượng để tiếp tục.`,
   VIDEO_SOURCE_REQUIRED: () => 'Cần chọn video nguồn trước khi hoàn thiện.',
   VIDEO_SEGMENTS_EMPTY: () => 'Không có đoạn lời thoại nào để hoàn thiện video.',
   VIDEO_SOURCE_UNAVAILABLE: () => 'Video nguồn không còn khả dụng. Hãy chọn lại video nguồn.',
@@ -148,11 +160,25 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
   OUTPUT_STORAGE_FULL: () => 'Nơi lưu video không đủ dung lượng trống. Hãy giải phóng dung lượng hoặc chọn nơi lưu khác.',
   OUTPUT_WRITE_FAILED: () => 'Không thể ghi video vào nơi lưu đã chọn. Hãy chọn thư mục khác rồi thử lại.',
   OUTPUT_RECOVERY_FAILED: () => 'Không thể khôi phục an toàn video cũ sau khi thao tác lưu bị gián đoạn. Hãy giữ nguyên thư mục lưu và gửi mã chẩn đoán để được hỗ trợ.',
+  CAPCUT_EXPORT_INPUT_INVALID: () => 'Dự án chưa đủ video, giọng đọc hoặc mốc thời gian để tạo bản chỉnh sửa. Hãy hoàn tất các bước trước rồi thử lại.',
+  CAPCUT_DRAFT_DIRECTORY_UNAVAILABLE: () => 'Chưa tìm thấy thư mục dự án CapCut. Hãy mở CapCut ít nhất một lần hoặc chọn đúng thư mục dự án rồi thử lại.',
+  CAPCUT_EDITOR_BUSY: () => 'CapCut đang mở nên chưa thể ghi dự án an toàn. Hãy đóng CapCut rồi thử lại.',
+  CAPCUT_EXPORT_PERMISSION_DENIED: () => 'Ứng dụng không có quyền tạo dự án tại thư mục đã chọn. Hãy cấp quyền hoặc chọn thư mục khác.',
+  CAPCUT_EXPORT_STORAGE_FULL: () => 'Không đủ dung lượng để tạo dự án chỉnh sửa. Hãy giải phóng dung lượng rồi thử lại.',
+  CAPCUT_EXPORT_COMPONENT_UNAVAILABLE: () => 'Thành phần tạo dự án chỉnh sửa không khả dụng. Hãy cập nhật hoặc cài đặt lại ứng dụng.',
+  CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE: () => 'Chưa có dữ liệu dự án tương thích với CapCut đang cài. Hãy mở CapCut, tạo một dự án trống, đóng CapCut rồi thử lại.',
+  CAPCUT_EXPORT_COMPATIBILITY_FAILED: () => 'Dự án tạo ra chưa đạt kiểm tra tương thích nên chưa được lưu. Hãy mở CapCut, tạo một dự án trống, đóng CapCut rồi thử lại.',
+  CAPCUT_EXPORT_TIMEOUT: () => 'Tạo dự án chỉnh sửa không có tiến triển trong thời gian dài nên đã được dừng an toàn. Hãy kiểm tra dung lượng rồi thử lại.',
+  CAPCUT_EXPORT_FAILED: () => 'Chưa thể tạo dự án chỉnh sửa từ dữ liệu hiện tại. Dữ liệu gốc vẫn được giữ; hãy thử lại.',
+  CAPCUT_EXPORT_RECOVERY_FAILED: () => 'Không thể dọn hoặc khôi phục an toàn dữ liệu dự án sau khi thao tác bị gián đoạn. Hãy giữ nguyên thư mục và gửi mã chẩn đoán để được hỗ trợ.',
   TEMP_STORAGE_PERMISSION_DENIED: () => 'Ứng dụng không có quyền tạo dữ liệu tạm để hoàn thiện video. Hãy kiểm tra quyền thư mục tạm rồi thử lại.',
   TEMP_STORAGE_FULL: () => 'Vùng lưu tạm không đủ dung lượng để hoàn thiện video. Hãy giải phóng dung lượng trên ổ hệ thống rồi thử lại.',
   TEMP_STORAGE_UNAVAILABLE: () => 'Không thể tạo dữ liệu tạm để hoàn thiện video. Hãy khởi động lại ứng dụng rồi thử lại.',
   VOICE_INPUT_INVALID: () => 'Nội dung hoặc giọng đã chọn chưa hợp lệ. Hãy kiểm tra lại rồi tạo giọng.',
   VOICE_TEXT_TOO_LONG: () => 'Nội dung vượt giới hạn cho một lượt tạo giọng. Hãy chia thành các đoạn ngắn hơn.',
+  VOICE_AUTH_REQUIRED: () => 'Phiên đăng nhập đã hết hạn trong khi tạo voice. Hãy đăng nhập lại rồi tiếp tục.',
+  VOICE_UPGRADE_REQUIRED: () => 'Gói tài khoản hiện tại chưa hỗ trợ nguồn voice đã chọn. Hãy nâng cấp hoặc chọn nguồn khác.',
+  VOICE_CREDITS_INSUFFICIENT: () => 'Tài khoản không đủ credits để tạo giọng cho nội dung này.',
   VOICE_CANCELLED: () => 'Đã hủy tạo giọng.',
   VOICE_JOB_CONFLICT: () => 'Một lượt tạo giọng cho nội dung này đang chạy. Hãy chờ hoàn tất hoặc hủy lượt trước rồi thử lại.',
   VOICE_SERVICE_UNAVAILABLE: (error) => `Nguồn tạo giọng hiện không phản hồi${chunkLabel(error)}. Hãy kiểm tra mạng và thử lại sau.`,
@@ -274,8 +300,11 @@ function isSafeLegacyUserMessage(message: string): boolean {
 }
 
 export function errorMessage(err: unknown): string {
+  if (isPublicAppError(err)) {
+    notifyIfInsufficientCredits(err);
+    return structuredErrorMessage(err);
+  }
   if (notifyIfInsufficientCredits(err)) return 'Tài khoản không đủ credits để thực hiện thao tác này.';
-  if (isPublicAppError(err)) return structuredErrorMessage(err);
   const msg = unwrapIpcMessage(rawErrorMessage(err));
   if (msg.includes(AUTH_REQUIRED)) {
     return 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại để tiếp tục.';

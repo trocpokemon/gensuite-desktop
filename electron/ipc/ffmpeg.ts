@@ -619,6 +619,7 @@ const REDUB_BATCH_ARG_BUDGET = 12_000;
 const REDUB_BATCH_MAX_SPAN_SEC = 240;
 const REDUB_INPUT_VALIDATION_PERCENT = 10;
 const REDUB_AUDIO_PREP_PERCENT = 35;
+const REDUB_ENCODING_COMPLETE_PERCENT = 94;
 const REDUB_TIMING_TOLERANCE_SEC = 1;
 
 type PreparedRedubSegment = RedubSegment & {
@@ -1627,7 +1628,7 @@ export function registerFfmpegIpc(): void {
           ],
           onProgress: (seconds) => {
             const ratio = Math.min(1, seconds / totalDurationSec);
-            const percent = Math.round(startPercent + ratio * (100 - startPercent));
+            const percent = Math.round(startPercent + ratio * (REDUB_ENCODING_COMPLETE_PERCENT - startPercent));
             emitFfmpegProgress(win, {
               projectId,
               timeSec: Math.min(seconds, totalDurationSec),
@@ -1740,6 +1741,13 @@ export function registerFfmpegIpc(): void {
       }
 
       activeStage = 'committing-output';
+      emitFfmpegProgress(win, {
+        projectId,
+        timeSec: totalDurationSec,
+        totalSec: totalDurationSec,
+        percent: 97,
+        phase: 'saving',
+      });
       const targetExists = await fs.access(outPath).then(() => true).catch(() => false);
       if (targetExists) {
         backupOutputPath = `${outPath}.gensuite-backup-${Date.now()}`;

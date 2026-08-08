@@ -52,6 +52,10 @@ const DEFAULT_SETTINGS: ProjectSettings = {
   localizeTargetLanguageConfirmed: false,
   localizeAccuracyConfirmed: false,
   localizeVoiceProviderConfirmed: false,
+  localizeSourceInputMode: 'link',
+  localizeSourceUrl: '',
+  localizePreparedSourceMode: undefined,
+  localizePreparedSourceUrl: '',
   tone: 'Kể chuyện truyền cảm',
   voiceId: '',
   transcriptionEngine: 'local',
@@ -59,6 +63,7 @@ const DEFAULT_SETTINGS: ProjectSettings = {
   subtitle: { ...DEFAULT_SUBTITLE },
   originalAudioVolume: 8,
   localizeOutputDirectory: '',
+  capcutDraftsDirectory: '',
   music: { ...DEFAULT_MUSIC },
   voiceConfigs: {
     edgetts: { voiceId: DEFAULT_EDGE_VOICE, modelId: '', language: 'vi-VN', speed: 1, temperature: 1, stability: 0.5, similarityBoost: 0.75, style: 0, useSpeakerBoost: true, pitch: 0, volume: 100, deliveryMode: 'BALANCED' },
@@ -163,6 +168,7 @@ function normalizeProject(raw: ProjectState): ProjectState {
       })(),
       originalAudioVolume: raw.settings?.originalAudioVolume ?? DEFAULT_SETTINGS.originalAudioVolume,
       localizeOutputDirectory: raw.settings?.localizeOutputDirectory ?? DEFAULT_SETTINGS.localizeOutputDirectory,
+      capcutDraftsDirectory: raw.settings?.capcutDraftsDirectory ?? DEFAULT_SETTINGS.capcutDraftsDirectory,
       localizeAspectRatio: raw.settings?.localizeAspectRatio ?? DEFAULT_SETTINGS.localizeAspectRatio,
       narrationLanguage: raw.settings?.narrationLanguage ?? DEFAULT_SETTINGS.narrationLanguage,
       narrationAudience: raw.settings?.narrationAudience ?? DEFAULT_SETTINGS.narrationAudience,
@@ -173,6 +179,16 @@ function normalizeProject(raw: ProjectState): ProjectState {
       localizeTargetLanguageConfirmed: raw.settings?.localizeTargetLanguageConfirmed ?? raw.kind === 'localize',
       localizeAccuracyConfirmed: raw.settings?.localizeAccuracyConfirmed ?? raw.kind === 'localize',
       localizeVoiceProviderConfirmed: raw.settings?.localizeVoiceProviderConfirmed ?? raw.kind === 'localize',
+      localizeSourceInputMode: raw.settings?.localizeSourceInputMode ?? (() => {
+        const sourceName = raw.sourceVideoPath?.replace(/\\/g, '/').split('/').pop() ?? '';
+        return /^source-\d{12,}\.[^.]+$/i.test(sourceName) ? 'file' : 'link';
+      })(),
+      localizeSourceUrl: raw.settings?.localizeSourceUrl ?? '',
+      localizePreparedSourceMode: raw.settings?.localizePreparedSourceMode ?? (raw.sourceVideoPath ? (() => {
+        const sourceName = raw.sourceVideoPath?.replace(/\\/g, '/').split('/').pop() ?? '';
+        return /^source-\d{12,}\.[^.]+$/i.test(sourceName) ? 'file' : 'link';
+      })() : undefined),
+      localizePreparedSourceUrl: raw.settings?.localizePreparedSourceUrl ?? raw.settings?.localizeSourceUrl ?? '',
       music: { ...DEFAULT_MUSIC, ...(raw.settings?.music ?? {}) },
       // Move projects to the new preferred free source once. After migration,
       // an explicit legacy selection is preserved on future loads.
@@ -206,7 +222,7 @@ function summary(project: ProjectState): ProjectSummary {
     currentStep: project.currentStep,
     status: project.status,
     topicName: project.kind === 'narrate'
-      ? 'Thuyết minh video'
+      ? 'Video Review'
       : project.kind === 'localize'
         ? 'Dịch & lồng tiếng'
         : project.topic?.name ?? 'Chưa chọn chủ đề',
@@ -264,6 +280,7 @@ interface ProjectStore {
   setLanguages: (patch: { sourceLanguage?: string; targetLanguage?: string }) => void;
   buildScenesFromTranscript: (segments: TranscriptSegment[]) => void;
   setDubbedVideo: (path: string) => void;
+  setCapCutDraft: (result: { draftPath: string; projectName: string } | null) => void;
   patchNarrationWorkflow: (patch: Partial<NarrationWorkflowState>) => void;
 }
 
@@ -315,6 +332,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
           localizeTargetLanguageConfirmed: false,
           localizeAccuracyConfirmed: false,
           localizeVoiceProviderConfirmed: false,
+          localizeSourceInputMode: 'link',
+          localizeSourceUrl: '',
+          localizePreparedSourceMode: undefined,
+          localizePreparedSourceUrl: '',
         },
       };
       await window.gensuite.project.save(project);
@@ -323,7 +344,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
     },
     createNarrationProject: async (name) => {
       const project: ProjectState = {
-        ...newProject(name?.trim() || 'Thuyết minh video', true),
+        ...newProject(name?.trim() || 'Video Review', true),
         kind: 'narrate',
         currentStep: 'narrate',
         narrationWorkflow: newNarrationWorkflow(),
@@ -437,16 +458,33 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
       commit({
         ...project,
         scenes,
+        capcutDraftPath: undefined,
+        capcutDraftName: undefined,
         status: scenes.length ? 'storyboard-ready' : project.status,
         storyboardSourceContent: scenes.length ? project.script.approvedContent : undefined,
         storyboardTopicId: scenes.length ? project.topic?.id : undefined,
       });
     },
-    updateScene: (id, patch) => commit({
-      ...get().project,
-      scenes: get().project.scenes.map((scene) => scene.id === id ? { ...scene, ...patch } : scene),
-    }),
-    patchSettings: (patch) => commit({ ...get().project, settings: { ...get().project.settings, ...patch } }),
+    updateScene: (id, patch) => {
+      const project = get().project;
+      const invalidatesDraft = ['audioPath', 'audioDuration', 'narration', 'sourceStart', 'sourceEnd']
+        .some((key) => Object.prototype.hasOwnProperty.call(patch, key));
+      commit({
+        ...project,
+        scenes: project.scenes.map((scene) => scene.id === id ? { ...scene, ...patch } : scene),
+        ...(invalidatesDraft ? { capcutDraftPath: undefined, capcutDraftName: undefined } : {}),
+      });
+    },
+    patchSettings: (patch) => {
+      const project = get().project;
+      const invalidatesDraft = Object.prototype.hasOwnProperty.call(patch, 'originalAudioVolume')
+        || Object.prototype.hasOwnProperty.call(patch, 'capcutDraftsDirectory');
+      commit({
+        ...project,
+        settings: { ...project.settings, ...patch },
+        ...(invalidatesDraft ? { capcutDraftPath: undefined, capcutDraftName: undefined } : {}),
+      });
+    },
     setScriptEngine: (scriptEngine) => commit({ ...get().project, settings: { ...get().project.settings, scriptEngine } }),
     setScriptModel: (scriptModel) => commit({ ...get().project, settings: { ...get().project.settings, scriptModel } }),
     setMediaEngine: (mediaEngine) => commit({ ...get().project, settings: { ...get().project.settings, mediaEngine } }),
@@ -462,15 +500,45 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
       commit({
         ...current,
         sourceVideoPath,
-        ...(changed ? { transcript: undefined, transcriptionVersion: undefined, scenes: [], dubbedVideoPath: undefined } : {}),
+        ...(changed ? { transcript: undefined, transcriptionVersion: undefined, scenes: [], dubbedVideoPath: undefined, capcutDraftPath: undefined, capcutDraftName: undefined } : {}),
         narrationWorkflow: current.kind === 'narrate'
           ? newNarrationWorkflow('source-ready')
           : current.narrationWorkflow,
       });
     },
-    setTranscript: (segments) => commit({ ...get().project, transcript: segments, transcriptionVersion: 4 }),
-    setLanguages: (patch) => commit({ ...get().project, ...patch }),
+    setTranscript: (segments) => commit({
+      ...get().project,
+      transcript: segments,
+      transcriptionVersion: 4,
+      capcutDraftPath: undefined,
+      capcutDraftName: undefined,
+    }),
+    setLanguages: (patch) => {
+      const project = get().project;
+      const sourceChanged = patch.sourceLanguage !== undefined && patch.sourceLanguage !== project.sourceLanguage;
+      const targetChanged = patch.targetLanguage !== undefined && patch.targetLanguage !== project.targetLanguage;
+      commit({
+        ...project,
+        ...patch,
+        ...(sourceChanged ? {
+          transcript: undefined,
+          transcriptionVersion: undefined,
+          scenes: [],
+          capcutDraftPath: undefined,
+          capcutDraftName: undefined,
+        } : targetChanged ? {
+          scenes: [],
+          capcutDraftPath: undefined,
+          capcutDraftName: undefined,
+        } : {}),
+      });
+    },
     setDubbedVideo: (dubbedVideoPath) => commit({ ...get().project, dubbedVideoPath }),
+    setCapCutDraft: (result) => commit({
+      ...get().project,
+      capcutDraftPath: result?.draftPath,
+      capcutDraftName: result?.projectName,
+    }),
     patchNarrationWorkflow: (patch) => {
       const project = get().project;
       commit({
@@ -498,7 +566,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
           sourceEnd: seg.end,
           visualType: 'upload',
         }));
-      get().setScenes(scenes);
+      const project = get().project;
+      commit({
+        ...project,
+        scenes,
+        status: scenes.length ? 'storyboard-ready' : project.status,
+        capcutDraftPath: undefined,
+        capcutDraftName: undefined,
+      });
     },
   };
 });

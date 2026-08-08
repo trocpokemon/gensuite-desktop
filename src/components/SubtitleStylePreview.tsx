@@ -16,6 +16,7 @@ interface Props {
   captions?: TimedPreviewCaption[];
   loading?: boolean;
   loadingProgress?: number;
+  loadingLabel?: string;
   editMode?: SubtitleEditMode;
   onEditModeChange?: (mode: SubtitleEditMode) => void;
   showToolbar?: boolean;
@@ -58,7 +59,7 @@ function clock(seconds: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(Math.floor(safe % 60)).padStart(2, '0')}`;
 }
 
-export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo, config, onChange, captions = [], loading = false, loadingProgress = 0, editMode: controlledEditMode, onEditModeChange, showToolbar = true, zoom = 1, viewportWidth = 0, viewportHeight = 0, seekTime, onPlaybackTimeChange, selectedCoverId, onSelectedCoverIdChange }: Props) {
+export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo, config, onChange, captions = [], loading = false, loadingProgress = 0, loadingLabel = 'Đang chuẩn bị video review…', editMode: controlledEditMode, onEditModeChange, showToolbar = true, zoom = 1, viewportWidth = 0, viewportHeight = 0, seekTime, onPlaybackTimeChange, selectedCoverId, onSelectedCoverIdChange }: Props) {
   const fullscreenRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -355,7 +356,7 @@ export function SubtitleStylePreview({ ratio, backgroundPath, backgroundIsVideo,
             <button type="button" onClick={() => setEditMode('cover')} className={`flex items-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-semibold ${editMode === 'cover' ? 'bg-emerald-400 text-black' : 'text-white/70 hover:bg-white/10'}`}><ScanLine size={13} /> Vùng che</button>
           </div>}
           {covers.some((layer) => coverIsActive(layer, currentTime) && layer.mode === 'restore') && <span className="absolute right-2 top-2 z-30 rounded bg-black/65 px-2 py-1 text-[9px] text-white/65">Bản xem trước gần đúng</span>}
-          {loading && <div className="absolute inset-0 z-50 grid place-items-center bg-[#111722]/95 px-8 text-center"><div className="w-full max-w-xs"><Loader2 size={24} className="mx-auto animate-spin text-emerald-300" /><p className="mt-3 text-sm font-bold text-white/75">Đang tải video review… {Math.round(clamp(loadingProgress, 0, 100))}%</p><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${clamp(loadingProgress, 0, 100)}%` }} /></div></div></div>}
+          {loading && <div className="absolute inset-0 z-50 grid place-items-center bg-[#111722]/95 px-8 text-center"><div className="w-full max-w-xs"><Loader2 size={24} className="mx-auto animate-spin text-emerald-300" /><p className="mt-3 text-sm font-bold text-white/75">{loadingLabel}</p><p className="mt-1 text-xs font-semibold tabular-nums text-emerald-300">{Math.round(clamp(loadingProgress, 0, 100))}%</p><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${clamp(loadingProgress, 0, 100)}%` }} /></div></div></div>}
           {!backgroundUrl && !loading && <div className="absolute inset-0 z-40 grid place-items-center bg-[#111722] px-8 text-center"><div><p className="text-sm font-bold text-white/70">Chưa có video nguồn để review</p><p className="mt-2 text-xs leading-5 text-white/35">Quay lại bước Video & ngôn ngữ, chọn video rồi mở lại bước Phụ đề.</p></div></div>}
           {backgroundUrl && backgroundIsVideo && <div onPointerDown={(event) => event.stopPropagation()} className="absolute inset-x-0 bottom-0 z-40 flex items-center gap-2 bg-gradient-to-t from-black/90 via-black/55 to-transparent px-3 pb-2 pt-8 opacity-90 transition hover:opacity-100">
             <button type="button" onClick={togglePlayback} aria-label={playing ? 'Tạm dừng' : 'Phát'} className="grid size-8 shrink-0 place-items-center rounded-full text-white hover:bg-white/15">{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button>

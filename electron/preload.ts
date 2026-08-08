@@ -38,6 +38,8 @@ import type {
   NarrationAnalyzeArgs,
   NarrationProgress,
   NarrationRewriteArgs,
+  CapCutDraftExportArgs,
+  CapCutDraftExportResult,
 } from '../src/shared/types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -135,6 +137,13 @@ function isCapCutTtsPreviewResult(value: unknown): value is CapCutTtsPreviewResu
     && value.audioBase64.length <= 70 * 1024 * 1024
     && value.audioBase64.length % 4 === 0
     && /^[A-Za-z0-9+/]+={0,2}$/.test(value.audioBase64);
+}
+
+function isCapCutDraftExportResult(value: unknown): value is CapCutDraftExportResult {
+  return isRecord(value)
+    && Object.keys(value).length === 2
+    && typeof value.draftPath === 'string' && value.draftPath.trim().length > 0
+    && typeof value.projectName === 'string' && value.projectName.trim().length > 0;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -239,6 +248,18 @@ const bridge: GensuiteBridge = {
       ipcRenderer.on('ffmpeg:progress', listener);
       return () => ipcRenderer.removeListener('ffmpeg:progress', listener);
     },
+  },
+  capcut: {
+    exportDraft: (args: CapCutDraftExportArgs) => invokeStructured(
+      'capcut:exportDraft',
+      args,
+      isCapCutDraftExportResult,
+    ),
+    selectDraftsDirectory: () => invokeStructured(
+      'capcut:selectDraftsDirectory',
+      undefined,
+      (value): value is string | null => value === null || (typeof value === 'string' && value.trim().length > 0),
+    ),
   },
   narration: {
     analyze: (args: NarrationAnalyzeArgs) => ipcRenderer.invoke('narration:analyze', args),

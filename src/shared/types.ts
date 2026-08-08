@@ -151,6 +151,39 @@ export interface NarrationRewriteResult {
   text: string;
 }
 
+/** One editable voice-over clip written to a desktop-editor project timeline. */
+export interface CapCutDraftSegment {
+  audioPath: string;
+  sourceStart: number;
+  sourceEnd: number;
+  text: string;
+  audioDuration: number;
+}
+
+/** Renderer-to-main request for creating an editable CapCut project. */
+export interface CapCutDraftExportArgs {
+  projectId: string;
+  projectName: string;
+  sourceVideoPath: string;
+  /** Optional for projects created before source duration was persisted. The main process probes the source again. */
+  sourceDurationSec?: number;
+  segments: CapCutDraftSegment[];
+  subtitles: boolean;
+  /** Target language used to group editable native captions in the desktop editor. */
+  captionLanguage?: string;
+  subtitleConfig?: SubtitleConfig;
+  originalAudioVolume: number;
+  musicPath?: string;
+  musicVolume?: number;
+  /** Optional override for CapCut's project-store directory. */
+  draftsDirectory?: string;
+}
+
+export interface CapCutDraftExportResult {
+  draftPath: string;
+  projectName: string;
+}
+
 /** GGML model sizes for local whisper.cpp. Larger = more accurate, slower, bigger download. */
 export type WhisperModelName = 'tiny' | 'base' | 'small' | 'medium';
 
@@ -360,6 +393,14 @@ export interface ProjectSettings {
   localizeTargetLanguageConfirmed?: boolean;
   localizeAccuracyConfirmed?: boolean;
   localizeVoiceProviderConfirmed?: boolean;
+  /** Source choice shown in the localize setup UI; independent from the cached local file. */
+  localizeSourceInputMode?: 'link' | 'file';
+  /** Link entered by the user, retained when switching tabs or reopening the project. */
+  localizeSourceUrl?: string;
+  /** How the currently cached source video was actually obtained. */
+  localizePreparedSourceMode?: 'link' | 'file';
+  /** Link corresponding to the currently cached source video. */
+  localizePreparedSourceUrl?: string;
   tone: string;
   voiceId: string;
   voiceConfigs: Record<VoiceEngine, VoiceConfig>;
@@ -368,6 +409,8 @@ export interface ProjectSettings {
   originalAudioVolume: number;
   /** Optional user-selected folder for localized video exports. */
   localizeOutputDirectory: string;
+  /** Optional CapCut project-store folder used by the localization workflow. */
+  capcutDraftsDirectory: string;
   music: MusicConfig;
   /** Transcription engine for localize projects (local whisper.cpp vs cloud GenSuite STT). */
   transcriptionEngine: TranscriptionEngine;
@@ -430,6 +473,9 @@ export interface ProjectState {
   transcriptionVersion?: number;
   /** Localize projects: absolute path of the finished re-dubbed video. */
   dubbedVideoPath?: string;
+  /** Localize projects: most recently generated editable CapCut draft. */
+  capcutDraftPath?: string;
+  capcutDraftName?: string;
   /** Silent-video narration workflow checkpoint and manifest references. */
   narrationWorkflow?: NarrationWorkflowState;
   /** Project-level character references reused across AI image scenes. */
@@ -605,7 +651,7 @@ export interface FfmpegProgress {
   totalSec?: number;
   /** Monotonic overall progress for multi-stage completion. */
   percent?: number;
-  phase?: 'preparing' | 'mixing-audio' | 'encoding' | 'complete';
+  phase?: 'preparing' | 'mixing-audio' | 'encoding' | 'saving' | 'complete';
   groupNumber?: number;
   groupCount?: number;
 }
@@ -822,6 +868,12 @@ export interface GensuiteBridge {
     /** Re-dub: keep the source video's visuals, replace its audio with the translated lines. Returns the output path or null if cancelled. */
     redub(args: RedubArgs): Promise<IpcResult<string | null>>;
     onProgress(cb: (p: FfmpegProgress) => void): () => void;
+  };
+  capcut: {
+    /** Create a real editable project with separate video, narration, music and subtitle tracks. */
+    exportDraft(args: CapCutDraftExportArgs): Promise<IpcResult<CapCutDraftExportResult>>;
+    /** Choose the project-store directory when it cannot be detected automatically. */
+    selectDraftsDirectory(): Promise<IpcResult<string | null>>;
   };
   narration: {
     /** Analyze an imported video and produce an editable, time-bounded narration draft. */

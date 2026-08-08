@@ -24,7 +24,7 @@ function rawMessage(error: unknown): string {
 
 export function isInsufficientCreditsError(error: unknown): boolean {
   const message = rawMessage(error);
-  return /INSUFFICIENT_CREDITS|not enough credits|insufficient credits|không đủ credits|hết credits/i.test(message);
+  return /INSUFFICIENT_CREDITS|CREDITS_INSUFFICIENT|not enough credits|insufficient credits|không đủ credits|hết credits/i.test(message);
 }
 
 export function notifyIfInsufficientCredits(error: unknown): boolean {

@@ -35,6 +35,17 @@ export interface TranslateRequest {
   targetLanguage: string;
   /** Optional source-language hint; omit to let the model infer it. */
   sourceLanguage?: string;
+  /** Renderer-only progress heartbeat. It is never included in prompts or sent
+   * across the desktop bridge. */
+  onProgress?: (progress: TranslationProgress) => void;
+}
+
+export interface TranslationProgress {
+  completedSegments: number;
+  totalSegments: number;
+  batchNumber: number;
+  batchCount: number;
+  phase: 'requesting' | 'validating' | 'completed';
 }
 
 export interface IScriptProvider {

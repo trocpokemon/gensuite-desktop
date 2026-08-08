@@ -57,8 +57,10 @@ if (quality.transcriptHasAbnormalRepetition(collapsed) !== true
 }
 
 let callCount = 0;
+const progressEvents = [];
 const translated = await reliability.translateSegmentsReliably({
   projectId: 'quality-test', segments: source, sourceLanguage: 'zh', targetLanguage: 'vi',
+  onProgress: (progress) => progressEvents.push(progress),
 }, 'test', async (translationPrompt) => {
   callCount += 1;
   const lines = translationPrompt.split(/\r?\n/).filter((line) => /^\d+\.\s/u.test(line));
@@ -74,6 +76,11 @@ if (callCount <= 1 || reliability.findTranslationCollapseRuns(source, translated
   violations.push('Bản dịch lặp chưa được tự động dịch lại theo từng câu.');
 }
 if (memory.size) violations.push('Checkpoint dịch chưa được dọn sau khi hoàn tất.');
+if (!progressEvents.some((event) => event.phase === 'requesting')
+  || progressEvents.at(-1)?.phase !== 'completed'
+  || progressEvents.at(-1)?.completedSegments !== source.length) {
+  violations.push('Dịch video không phát heartbeat và tiến độ hoàn tất theo số câu.');
+}
 
 let incompleteRejected = false;
 try { prompt.parseTranslationJson('{"translations":{"0":"Một"}}', source.slice(0, 2)); }

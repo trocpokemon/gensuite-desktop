@@ -1,4 +1,6 @@
+import type { PublicAppError } from './appErrors';
 import type { Scene, SubtitleWordTiming, WhisperModelName } from './types';
+import { clientAppError, normalizedClientAppError } from '../providers/clientAppError';
 
 // Caption alignment operates on clean, generated speech whose exact script is
 // already known. Reusing the much heavier source-transcription model here makes
@@ -17,6 +19,7 @@ export function hasFreshSubtitleTiming(scene: Scene): boolean {
 export interface SubtitleAlignmentOutcome {
   words: SubtitleWordTiming[];
   quality: 'exact' | 'aligned' | 'estimated';
+  warning?: PublicAppError;
 }
 
 function timingWords(text: string): string[] {
@@ -68,15 +71,30 @@ export async function alignSceneSubtitle(
   if (!scene.audioPath || !scene.narration.trim()) {
     return { words: estimateSubtitleTiming(scene.narration, scene.audioDuration ?? 0), quality: 'estimated' };
   }
-  const result = await window.gensuite.whisper.align({
-    projectId,
-    audioPath: scene.audioPath,
-    text: scene.narration,
-    model: CAPTION_ALIGNMENT_MODEL,
-    language,
-    segmentNumber,
-    segmentCount,
-  });
+  let result;
+  try {
+    result = await window.gensuite.whisper.align({
+      projectId,
+      audioPath: scene.audioPath,
+      text: scene.narration,
+      model: CAPTION_ALIGNMENT_MODEL,
+      language,
+      segmentNumber,
+      segmentCount,
+    });
+  } catch (error) {
+    return {
+      words: estimateSubtitleTiming(scene.narration, scene.audioDuration ?? 0),
+      quality: 'estimated',
+      warning: normalizedClientAppError(error, 'SUBTITLE_ALIGNMENT_UNEXPECTED', segmentNumber && segmentCount ? { segmentNumber, segmentCount } : undefined),
+    };
+  }
   if (result.ok && result.value.length) return { words: result.value, quality: 'aligned' };
-  return { words: estimateSubtitleTiming(scene.narration, scene.audioDuration ?? 0), quality: 'estimated' };
+  return {
+    words: estimateSubtitleTiming(scene.narration, scene.audioDuration ?? 0),
+    quality: 'estimated',
+    warning: result.ok
+      ? clientAppError('SUBTITLE_ALIGNMENT_RESULT_INVALID', segmentNumber && segmentCount ? { segmentNumber, segmentCount } : undefined)
+      : result.error,
+  };
 }

@@ -56,7 +56,7 @@ async function readJson(response: Response, context?: AppErrorContext): Promise<
   const data = await response.json().catch(() => null);
   if (response.status === 401 || data?.error === 'INVALID_API_KEY' || data?.error === 'AUTH_REQUIRED') throw new Error('AUTH_REQUIRED:gensuite');
   if (data?.error === 'FEATURE_UPGRADE_REQUIRED') throw new Error('UPGRADE_REQUIRED:basic');
-  if (response.status === 402 || data?.error === 'INSUFFICIENT_CREDITS') throw new Error('INSUFFICIENT_CREDITS');
+  if (response.status === 402 || data?.error === 'INSUFFICIENT_CREDITS') throw clientAppError('VOICE_CREDITS_INSUFFICIENT');
   if (!response.ok) {
     if (response.status === 429) throw clientAppError('VOICE_RATE_LIMITED', context);
     if (response.status === 409) throw clientAppError('VOICE_JOB_CONFLICT', context);
@@ -340,12 +340,18 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
     }
   }
 
-  private async poll(jobId: string, signal: AbortSignal, context: AppErrorContext): Promise<any> {
+  private async poll(
+    jobId: string,
+    signal: AbortSignal,
+    context: AppErrorContext,
+    heartbeat?: () => void,
+  ): Promise<any> {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     let transientFailures = 0;
     while (Date.now() < deadline) {
       if (signal.aborted) throw clientAppError('VOICE_CANCELLED', context);
       await delay(POLL_INTERVAL_MS, signal);
+      heartbeat?.();
       try {
         const job = await this.requestJson(`${BASE_URL}/tts/${encodeURIComponent(jobId)}`, {}, signal, context);
         const status = String(job?.status || '').toLowerCase();
@@ -383,6 +389,10 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
     }
     saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
     const partPaths: string[] = [];
+    const report = (completedChunks: number, phase: Parameters<NonNullable<VoiceRequest['onProgress']>>[0]['phase']) => {
+      req.onProgress?.({ completedChunks, totalChunks: chunks.length, phase });
+    };
+    report(0, 'requesting');
 
     try {
       for (let index = 0; index < chunks.length; index += 1) {
@@ -392,6 +402,7 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
           const existing = await window.gensuite.audio.probe({ audioPath: part.audioPath });
           if (existing.ok) {
             partPaths.push(existing.value.audioPath);
+            report(index + 1, 'requesting');
             continue;
           }
           part.status = 'pending';
@@ -401,6 +412,7 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
 
         let job: any = null;
         if (!part.jobId) {
+          report(index, 'requesting');
           const body: Record<string, unknown> = {
             engine: this.engine,
             model: req.modelId,
@@ -438,8 +450,10 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
 
         this.jobId = part.jobId || null;
         if (!job || String(job.status || '').toLowerCase() !== 'done') {
-          job = await this.poll(part.jobId as string, signal, context);
+          report(index, 'waiting');
+          job = await this.poll(part.jobId as string, signal, context, () => report(index, 'waiting'));
         }
+        report(index, 'downloading');
         const downloaded = await window.gensuite.audio.download({
           projectId: req.projectId,
           segmentId: `${req.segmentId}-${requestKey}-${index + 1}`,
@@ -453,14 +467,17 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
         checkpoint.createdAt = Date.now();
         saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
         partPaths.push(downloaded.value.audioPath);
+        report(index + 1, 'requesting');
       }
 
+      report(chunks.length, 'assembling');
       const assembled = await window.gensuite.audio.assemble({
         projectId: req.projectId,
         segmentId: req.segmentId,
         partPaths,
       });
       if (!assembled.ok) throw assembled.error;
+      report(chunks.length, 'completed');
       return assembled.value;
     } finally {
       this.controller = null;

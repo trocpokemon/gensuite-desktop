@@ -36,6 +36,10 @@ export class EdgeTtsAdapter implements IVoiceProvider {
     const partPaths: string[] = [];
     const wordTimings: SubtitleWordTiming[] = [];
     let offset = 0;
+    const report = (completedChunks: number, phase: Parameters<NonNullable<VoiceRequest['onProgress']>>[0]['phase']) => {
+      req.onProgress?.({ completedChunks, totalChunks: chunks.length, phase });
+    };
+    report(0, 'requesting');
     try {
       for (let index = 0; index < chunks.length; index += 1) {
         const part = checkpoint.parts[index];
@@ -49,6 +53,7 @@ export class EdgeTtsAdapter implements IVoiceProvider {
             }
             offset += duration;
             partPaths.push(existing.value.audioPath);
+            report(index + 1, 'requesting');
             continue;
           }
           part.status = 'pending';
@@ -59,6 +64,7 @@ export class EdgeTtsAdapter implements IVoiceProvider {
 
         let result: Awaited<ReturnType<typeof window.gensuite.edgetts.synthesize>> | null = null;
         for (let attempt = 1; attempt <= 3; attempt += 1) {
+          report(index, 'requesting');
           const jobId = `${req.segmentId}_${requestKey}_${index + 1}_${Date.now()}`;
           this.jobId = jobId;
           result = await window.gensuite.edgetts.synthesize({
@@ -88,10 +94,13 @@ export class EdgeTtsAdapter implements IVoiceProvider {
         }
         offset += result.value.durationSec;
         partPaths.push(result.value.audioPath);
+        report(index + 1, 'requesting');
       }
 
+      report(chunks.length, 'assembling');
       const assembled = await window.gensuite.audio.assemble({ projectId: req.projectId, segmentId: req.segmentId, partPaths });
       if (!assembled.ok) throw assembled.error;
+      report(chunks.length, 'completed');
       return {
         audioPath: assembled.value.audioPath,
         durationSec: assembled.value.durationSec,

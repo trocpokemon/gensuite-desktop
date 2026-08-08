@@ -13,7 +13,7 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   fileName: sourcePath,
 }).outputText + `
-module.exports.__transcriptionChunkingTest = { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments };
+module.exports.__transcriptionChunkingTest = { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine };
 `;
 
 const module = { exports: {} };
@@ -35,10 +35,17 @@ new Function('require', 'module', 'exports', compiled)((name) => {
   return requireNode(name);
 }, module, module.exports);
 
-const { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments } = module.exports.__transcriptionChunkingTest;
+const { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine } = module.exports.__transcriptionChunkingTest;
 const violations = [];
 const duration = 1_205;
 const chunks = buildTranscriptionChunks(duration);
+
+if (recognitionProgressFromLine('[00:00:10.000 --> 00:00:20.000] sample', 40) !== 50) {
+  violations.push('Tiến độ bên trong một phần nhận dạng không được tính theo mốc âm thanh thực tế.');
+}
+if (!/onProgress:\s*\(chunkPercent\)/u.test(source) || !/recognitionProgressFromLine\(row/u.test(source)) {
+  violations.push('Nhận dạng vẫn chỉ cập nhật sau khi xong cả phần thay vì phát phần trăm liên tục.');
+}
 
 if (chunks.length !== 21) violations.push(`Video 1.205 giây tạo ${chunks.length} phần thay vì 21.`);
 if (chunks[0]?.coreStart !== 0 || chunks[0]?.windowStart !== 0) violations.push('Phần đầu không bắt đầu tại 0 giây.');

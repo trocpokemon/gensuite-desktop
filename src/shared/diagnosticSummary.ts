@@ -49,3 +49,20 @@ export async function diagnosticSummary(): Promise<string> {
     recentErrors: loadRecords(),
   }, null, 2);
 }
+
+/** A compact support payload for one specific failure. Unlike the diagnostics
+ * summary in Settings, this intentionally excludes all previous failures. */
+export function diagnosticSummaryForError(error: PublicAppError, occurredAt: string): string {
+  return JSON.stringify({
+    appVersion: __APP_VERSION__,
+    occurredAt,
+    error: {
+      code: error.code,
+      stage: error.stage,
+      cause: error.cause,
+      retryable: error.retryable,
+      diagnosticId: error.diagnosticId,
+      context: error.context ? { ...error.context } : undefined,
+    },
+  }, null, 2);
+}

@@ -17,6 +17,7 @@ import { registerYtdlpIpc } from './ipc/ytdlp';
 import { registerWhisperIpc } from './ipc/whisper';
 import { registerFilesIpc } from './ipc/files';
 import { registerNarrationIpc } from './ipc/narration';
+import { registerCapCutDraftIpc } from './ipc/capcut';
 import { registerUpdater, startUpdateChecks } from './updater';
 import { isPublicAppError } from '../src/shared/appErrors';
 
@@ -153,6 +154,7 @@ function registerIpc(): void {
   registerWhisperIpc();
   registerFilesIpc();
   registerNarrationIpc();
+  registerCapCutDraftIpc();
 }
 
 function registerProjectFileProtocol(): void {

@@ -761,6 +761,7 @@ async function recognizeWindow(options: {
   identity: string;
   attempt: number;
   job: RecognitionJob;
+  onProgress?: (percent: number) => void;
 }): Promise<TranscriptSegment[]> {
   if (options.job.cancelled) throw appFailure('TRANSCRIPTION_CANCELLED', options.context);
   const outBase = path.join(options.workDir, `transcript-${options.identity}`);
@@ -798,6 +799,7 @@ async function recognizeWindow(options: {
       let diagnosticOutput = '';
       let stalled = false;
       let settled = false;
+      let progressRemainder = '';
       let timer: NodeJS.Timeout;
       const finish = (error?: AppFailure) => {
         if (settled) return;
@@ -815,7 +817,14 @@ async function recognizeWindow(options: {
       };
       const consume = (data: unknown) => {
         armTimer();
-        diagnosticOutput = `${diagnosticOutput}${String(data)}`.slice(-8192);
+        const text = String(data);
+        diagnosticOutput = `${diagnosticOutput}${text}`.slice(-8192);
+        const rows = `${progressRemainder}${text}`.split(/\r\n|\r|\n/);
+        progressRemainder = rows.pop()?.slice(-512) ?? '';
+        for (const row of rows) {
+          const progress = recognitionProgressFromLine(row, options.windowEnd - options.windowStart);
+          if (progress !== null) options.onProgress?.(progress);
+        }
       };
       armTimer();
       child.stdout?.on('data', consume);
@@ -869,6 +878,7 @@ async function recognizeChunkWithRetry(options: {
   duration: number;
   model: WhisperModelName;
   job: RecognitionJob;
+  onProgress?: (percent: number) => void;
 }): Promise<TranscriptSegment[]> {
   const context = { chunkNumber: options.chunkIndex + 1, chunkCount: options.chunkCount };
   const primaryThreads = recognitionThreads(options.model);
@@ -1144,6 +1154,15 @@ export function registerWhisperIpc(): void {
           duration: audioDuration,
           model,
           job: recognitionJob,
+          onProgress: (chunkPercent) => {
+            const percent = Math.max(1, Math.min(99, Math.round(
+              ((index + chunkPercent / 100) / chunks.length) * 99,
+            )));
+            emit(win, {
+              phase: 'transcribing', percent, model,
+              chunkNumber: index + 1, chunkCount: chunks.length,
+            });
+          },
         });
         const row = { index, chunk, segments };
         completed.set(index, row);

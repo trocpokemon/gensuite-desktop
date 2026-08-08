@@ -1,21 +1,25 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, Check, ChevronRight, FileVideo, FolderOpen, KeyRound, Layers3, Loader2, Link2, LogIn, Play, RotateCcw, SlidersHorizontal, Subtitles, Trash2, Upload, Volume2, Wand2, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ArrowLeft, CheckCircle2, ChevronDown, ClipboardCopy, FileVideo, FolderOpen, KeyRound, Layers3, Link2, Loader2, LogIn, Play, RotateCcw, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import { AppSelect } from '../components/AppSelect';
+import { EngineToggle } from '../components/EngineToggle';
+import { PipelineProgressPanel, type PipelineProgressStep } from '../components/PipelineProgressPanel';
+import { VoiceConfigPanel } from '../components/VoiceConfigPanel';
+import { getScriptProvider } from '../providers/script';
+import { clientAppError, normalizedClientAppError } from '../providers/clientAppError';
+import { errorMessage, loginRequiredPlatform, missingKeyService, type VideoLoginPlatform } from '../providers/errors';
+import { getTranscriptionProvider, type ITranscriptionProvider } from '../providers/transcription';
+import { getVoiceProvider, type IVoiceProvider } from '../providers/voice';
+import { probeUsableAudio } from '../providers/voice/audioUtils';
+import { capCutVoiceById } from '../providers/voice/capcutTtsCatalog';
+import { EDGE_TTS_FALLBACK_VOICES, edgeVoiceName } from '../providers/voice/edgeTtsCatalog';
+import type { AppErrorCode, AppErrorContext, PublicAppError } from '../shared/appErrors';
+import { diagnosticSummaryForError, rememberDiagnostic } from '../shared/diagnosticSummary';
+import { transcriptHasAbnormalRepetition } from '../shared/transcriptQuality';
+import type { ProjectState, TranscriptSegment, WhisperModelName } from '../shared/types';
+import { useEntitlementStore } from '../store/entitlementStore';
+import { isInsufficientCreditsError } from '../store/creditPromptStore';
 import { useProjectStore } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
-import { EngineToggle } from '../components/EngineToggle';
-import { VoiceConfigPanel } from '../components/VoiceConfigPanel';
-import { AppSelect } from '../components/AppSelect';
-import { SubtitleDesigner } from '../components/SubtitleDesigner';
-import { getTranscriptionProvider, type ITranscriptionProvider } from '../providers/transcription';
-import { clientAppError } from '../providers/clientAppError';
-import { getScriptProvider } from '../providers/script';
-import { getVoiceProvider } from '../providers/voice';
-import { missingKeyService, serviceLabel, errorMessage, loginRequiredPlatform, type VideoLoginPlatform } from '../providers/errors';
-import type { FfmpegProgress, WhisperModelName } from '../shared/types';
-import { alignSceneSubtitle, hasFreshSubtitleTiming } from '../shared/subtitleAlignment';
-import { useEntitlementStore } from '../store/entitlementStore';
-import { probeUsableAudio } from '../providers/voice/audioUtils';
-import { transcriptHasAbnormalRepetition } from '../shared/transcriptQuality';
 
 interface Props {
   onOpenSettings: () => void;
@@ -25,365 +29,448 @@ interface Props {
   onSourceReadyChange?: (ready: boolean) => void;
 }
 
-// Target languages offered for the re-dub. Values are the labels sent to the LLM
-// translation prompt; keep them human-readable since the prompt embeds them.
-const TARGET_LANGUAGES: Array<[string, string]> = [
-  ['vietnamese', 'Tiếng Việt'], ['english', 'English'], ['chinese', 'Chinese (Mandarin)'],
-  ['japanese', 'Japanese'], ['korean', 'Korean'], ['french', 'French'], ['german', 'German'],
-  ['spanish', 'Spanish'], ['portuguese', 'Portuguese'], ['italian', 'Italian'], ['russian', 'Russian'],
-  ['thai', 'Thai'], ['indonesian', 'Indonesian'], ['hindi', 'Hindi'], ['arabic', 'Arabic'],
-];
-
-// A source language is mandatory so speech recognition never silently guesses
-// the wrong language for an entire video.
-const SOURCE_LANGUAGES: Array<[string, string]> = [
-  ['vi', 'Tiếng Việt'], ['en', 'English'], ['zh', 'Chinese'],
-  ['ja', 'Japanese'], ['ko', 'Korean'], ['fr', 'French'], ['de', 'German'], ['es', 'Spanish'],
-  ['ru', 'Russian'], ['th', 'Thai'], ['hi', 'Hindi'], ['ar', 'Arabic'],
-];
-
-const WHISPER_MODELS: Array<[WhisperModelName, string]> = [
-  ['tiny', 'Nhanh nhất'],
-  ['base', 'Cân bằng · Khuyến nghị'],
-  ['small', 'Chính xác hơn'],
-  ['medium', 'Chính xác cao nhất'],
-];
-
-const SOURCE_LANGUAGE_OPTIONS = [
-  { value: '', label: 'Chọn ngôn ngữ gốc', disabled: true },
-  ...SOURCE_LANGUAGES.map(([value, label]) => ({ value, label })),
-];
-const TARGET_LANGUAGE_OPTIONS = [
-  { value: '', label: 'Chọn ngôn ngữ đích', disabled: true },
-  ...TARGET_LANGUAGES.map(([value, label]) => ({ value, label })),
-];
-const ACCURACY_OPTIONS = [
-  { value: '', label: 'Chọn độ chính xác', disabled: true },
-  ...WHISPER_MODELS.map(([value, label]) => ({ value, label })),
-];
-
-// The paid translation flow uses GenSuite's Gemini model; free uses Google AI Studio directly.
-const GENSUITE_TRANSLATE_MODEL = 'google-ai-studio/gemini-3.1-flash-lite';
-
-type Stage = 'idle' | 'download' | 'transcribe' | 'translate' | 'voice' | 'voice-error' | 'align' | 'merge' | 'done' | 'error';
-export type LocalizeSetupStep = 'source' | 'voice' | 'subtitle' | 'export';
-type TaskMode = 'single' | 'batch';
-type BatchStatus = 'queued' | 'processing' | 'done' | 'error';
-
-interface BatchItem {
-  id: string;
-  kind: 'file' | 'url';
-  value: string;
-  label: string;
-  status: BatchStatus;
-  resultPath?: string;
-  error?: string;
+export type LocalizeSetupStep = 'source' | 'process';
+type Stage = 'idle' | 'download' | 'recognition' | 'translation' | 'voice' | 'capcut' | 'done' | 'error';
+type PipelineStageId = 'download' | 'recognition' | 'translation' | 'voice' | 'capcut';
+type SourceInputMode = 'link' | 'file';
+interface PipelineFailureSnapshot {
+  error: PublicAppError;
+  occurredAt: string;
 }
 
-const SETUP_STEPS: Array<{ id: LocalizeSetupStep; label: string; description: string; icon: typeof FileVideo }> = [
-  { id: 'source', label: 'Video & ngôn ngữ', description: 'Chọn nguồn và ngôn ngữ', icon: FileVideo },
-  { id: 'voice', label: 'Giọng đọc', description: 'Chọn chất giọng phù hợp', icon: Wand2 },
-  { id: 'subtitle', label: 'Phụ đề', description: 'Chọn preset hiển thị', icon: Subtitles },
-  { id: 'export', label: 'Kiểm tra & tạo', description: 'Âm thanh và tổng quan', icon: Play },
+const SOURCE_LANGUAGES = [
+  ['vi', 'Tiếng Việt'], ['en', 'English'], ['zh', 'Chinese'], ['ja', 'Japanese'], ['ko', 'Korean'],
+  ['fr', 'French'], ['de', 'German'], ['es', 'Spanish'], ['ru', 'Russian'], ['th', 'Thai'], ['hi', 'Hindi'], ['ar', 'Arabic'],
+] as const;
+const TARGET_LANGUAGES = [
+  ['vietnamese', 'Tiếng Việt'], ['english', 'English'], ['chinese', 'Chinese (Mandarin)'], ['japanese', 'Japanese'],
+  ['korean', 'Korean'], ['french', 'French'], ['german', 'German'], ['spanish', 'Spanish'], ['portuguese', 'Portuguese'],
+  ['italian', 'Italian'], ['russian', 'Russian'], ['thai', 'Thai'], ['indonesian', 'Indonesian'], ['hindi', 'Hindi'], ['arabic', 'Arabic'],
+] as const;
+const ACCURACY_LEVELS: Array<[WhisperModelName, string]> = [
+  ['tiny', 'Nhanh nhất'], ['base', 'Cân bằng · Khuyến nghị'], ['small', 'Chính xác hơn'], ['medium', 'Chính xác cao nhất'],
 ];
+const SOURCE_OPTIONS = [{ value: '', label: 'Chọn ngôn ngữ gốc', disabled: true }, ...SOURCE_LANGUAGES.map(([value, label]) => ({ value, label }))];
+const TARGET_OPTIONS = [{ value: '', label: 'Chọn ngôn ngữ đích', disabled: true }, ...TARGET_LANGUAGES.map(([value, label]) => ({ value, label }))];
+const ACCURACY_OPTIONS = [{ value: '', label: 'Chọn độ chính xác', disabled: true }, ...ACCURACY_LEVELS.map(([value, label]) => ({ value, label }))];
+const GENSUITE_TRANSLATE_MODEL = 'google-ai-studio/gemini-3.1-flash-lite';
+
+const PIPELINE_DEFINITIONS: Array<Pick<PipelineProgressStep, 'id' | 'label'>> = [
+  { id: 'download', label: 'Tải video' },
+  { id: 'recognition', label: 'Nhận dạng' },
+  { id: 'translation', label: 'Dịch' },
+  { id: 'voice', label: 'Tạo voice' },
+  { id: 'capcut', label: 'Dự án CapCut' },
+];
+const PIPELINE_FALLBACK_CODES: Record<PipelineStageId, AppErrorCode> = {
+  download: 'VIDEO_SOURCE_UNREADABLE',
+  recognition: 'TRANSCRIPTION_UNEXPECTED',
+  translation: 'TRANSLATION_UNEXPECTED',
+  voice: 'VOICE_UNEXPECTED',
+  capcut: 'CAPCUT_EXPORT_FAILED',
+};
+
+function initialPipelineProgress(): PipelineProgressStep[] {
+  return PIPELINE_DEFINITIONS.map((step) => ({ ...step, status: 'pending', percent: 0 }));
+}
+
+const VOICE_ENGINE_LABELS: Record<ProjectState['settings']['voiceEngine'], string> = {
+  capcuttts: 'GenVoice Free TTS 2',
+  edgetts: 'GenVoice Free TTS 1',
+  genvoice: 'GenVoice',
+  elevenlabs: 'ElevenLabs',
+  minimax: 'MiniMax',
+};
+
+function languageLabel(value: string): string {
+  return [...SOURCE_LANGUAGES, ...TARGET_LANGUAGES].find(([id]) => id === value)?.[1] ?? value;
+}
+
+function friendlyVoiceLabel(project: ProjectState): string {
+  if (!project.settings.localizeVoiceProviderConfirmed) return 'Chưa chọn giọng';
+  const engine = project.settings.voiceEngine;
+  const voiceId = project.settings.voiceConfigs[engine].voiceId;
+  if (engine === 'capcuttts') return capCutVoiceById(voiceId)?.name || VOICE_ENGINE_LABELS[engine];
+  if (engine === 'edgetts') {
+    const voice = EDGE_TTS_FALLBACK_VOICES.find((item) => item.shortName === voiceId);
+    return voice ? edgeVoiceName(voice) : VOICE_ENGINE_LABELS[engine];
+  }
+  return VOICE_ENGINE_LABELS[engine];
+}
+
+function videoPlatformFromUrl(value: string): VideoLoginPlatform | null {
+  try {
+    const host = new URL(value).hostname.replace(/^www\./, '');
+    if (host === 'douyin.com' || host.endsWith('.douyin.com')) return 'douyin';
+    if (host === 'tiktok.com' || host.endsWith('.tiktok.com')) return 'tiktok';
+  } catch {
+    // Invalid URLs are handled by the downloader's structured source error.
+  }
+  return null;
+}
+
+function validScenes(project: ProjectState) {
+  return project.scenes.filter((scene) => typeof scene.sourceStart === 'number' && typeof scene.sourceEnd === 'number' && scene.sourceEnd > scene.sourceStart && scene.narration.trim());
+}
+
+function restorePipelineProgress(project: ProjectState): PipelineProgressStep[] {
+  const scenes = validScenes(project);
+  const recognized = project.transcriptionVersion === 4 && Boolean(project.transcript?.length);
+  const translated = recognized && scenes.length > 0;
+  const voiceCount = scenes.filter((scene) => Boolean(scene.audioPath)).length;
+  const voicePercent = scenes.length ? Math.round((voiceCount / scenes.length) * 100) : 0;
+  return PIPELINE_DEFINITIONS.map((definition): PipelineProgressStep => {
+    if (definition.id === 'download') return project.sourceVideoPath
+      ? { ...definition, status: 'completed', percent: 100, detail: 'Video đã sẵn sàng' }
+      : { ...definition, status: 'pending', percent: 0 };
+    if (definition.id === 'recognition') return recognized
+      ? { ...definition, status: 'completed', percent: 100, detail: `${project.transcript?.length ?? 0} đoạn đã lưu` }
+      : { ...definition, status: 'pending', percent: 0 };
+    if (definition.id === 'translation') return translated
+      ? { ...definition, status: 'completed', percent: 100, detail: `${scenes.length} câu đã dịch` }
+      : { ...definition, status: 'pending', percent: 0, detail: recognized ? 'Có thể tiếp tục' : undefined };
+    if (definition.id === 'voice') return translated && voiceCount === scenes.length
+      ? { ...definition, status: 'completed', percent: 100, detail: `${voiceCount} câu đã tạo` }
+      : { ...definition, status: 'pending', percent: voicePercent, detail: voiceCount ? `Đã lưu ${voiceCount}/${scenes.length} câu · Có thể tiếp tục` : undefined };
+    return project.capcutDraftPath
+      ? { ...definition, status: 'completed', percent: 100, detail: 'Dự án đã sẵn sàng' }
+      : { ...definition, status: 'pending', percent: 0 };
+  });
+}
+
+function normalizePipelineError(error: unknown, stage: PipelineStageId, context?: AppErrorContext): PublicAppError {
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  if (raw.includes('AUTH_REQUIRED:gensuite')) return clientAppError(stage === 'voice' ? 'VOICE_AUTH_REQUIRED' : stage === 'translation' ? 'TRANSLATION_AUTH_REQUIRED' : 'TRANSCRIPTION_ACCESS_DENIED', context);
+  if (raw.includes('UPGRADE_REQUIRED:basic')) return clientAppError(stage === 'voice' ? 'VOICE_UPGRADE_REQUIRED' : stage === 'translation' ? 'TRANSLATION_UPGRADE_REQUIRED' : 'TRANSCRIPTION_ACCESS_DENIED', context);
+  if (missingKeyService(error)) return clientAppError(stage === 'voice' ? 'VOICE_SERVICE_ACCESS_DENIED' : stage === 'translation' ? 'TRANSLATION_ACCESS_DENIED' : 'TRANSCRIPTION_ACCESS_DENIED', context);
+  if (isInsufficientCreditsError(error) && (stage === 'translation' || stage === 'voice')) return clientAppError(stage === 'translation' ? 'TRANSLATION_CREDITS_INSUFFICIENT' : 'VOICE_CREDITS_INSUFFICIENT', context);
+  return normalizedClientAppError(error, PIPELINE_FALLBACK_CODES[stage], context);
+}
 
 export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, onNavigationLockChange, onSourceReadyChange }: Props) {
   const project = useProjectStore((state) => state.project);
-  const setWhisperModel = useProjectStore((state) => state.setWhisperModel);
-  const setScriptEngine = useProjectStore((state) => state.setScriptEngine);
-  const setScriptModel = useProjectStore((state) => state.setScriptModel);
-  const setSourceVideo = useProjectStore((state) => state.setSourceVideo);
-  const setLanguages = useProjectStore((state) => state.setLanguages);
-  const patchSettings = useProjectStore((state) => state.patchSettings);
   const keys = useSettingsStore((state) => state.keys);
   const entitlementStatus = useEntitlementStore((state) => state.status);
   const canUseCloud = useEntitlementStore((state) => state.features.localizeCloud);
   const refreshEntitlements = useEntitlementStore((state) => state.load);
-
-  const whisperModel = project.settings.whisperModel;
-  const scriptEngine = project.settings.scriptEngine;
-  const sub = project.settings.subtitle;
-  const sourcePath = project.sourceVideoPath;
-
-  const [url, setUrl] = useState('');
-  const [taskMode, setTaskMode] = useState<TaskMode>('single');
-  const [batchUrlInput, setBatchUrlInput] = useState('');
-  const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
-  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
-  const [sourceLanguage, setSourceLanguage] = useState(project.sourceLanguage && project.sourceLanguage !== 'auto' ? project.sourceLanguage : 'vi');
-  const [targetLanguage, setTargetLanguage] = useState(project.targetLanguage || 'vietnamese');
-  const selectedSourceLanguage = SOURCE_LANGUAGES.some(([value]) => value === sourceLanguage) ? sourceLanguage : 'vi';
-
+  const [url, setUrl] = useState(project.settings.localizeSourceUrl ?? '');
+  const [sourceInputMode, setSourceInputMode] = useState<SourceInputMode>(project.settings.localizeSourceInputMode ?? 'link');
+  const [sourceLanguage, setSourceLanguage] = useState(project.sourceLanguage ?? 'vi');
+  const [targetLanguage, setTargetLanguage] = useState(project.targetLanguage ?? 'vietnamese');
   const [stage, setStage] = useState<Stage>('idle');
+  const [pipelineProgress, setPipelineProgress] = useState<PipelineProgressStep[]>(() => restorePipelineProgress(project));
+  const [lastActivityAt, setLastActivityAt] = useState(Date.now());
+  const [activityClock, setActivityClock] = useState(Date.now());
   const [downloadPercent, setDownloadPercent] = useState(0);
-  const [downloadPhase, setDownloadPhase] = useState('');
-  const [transcribePhase, setTranscribePhase] = useState('');
-  const [modelPercent, setModelPercent] = useState<number | null>(null);
-  const [transcribePercent, setTranscribePercent] = useState<number | null>(null);
-  const [voiceProgress, setVoiceProgress] = useState({ done: 0, total: 0 });
-  const [voiceErrorMsg, setVoiceErrorMsg] = useState('');
-  const [mergePercent, setMergePercent] = useState(0);
-  const [mergePhase, setMergePhase] = useState<FfmpegProgress['phase']>('preparing');
-  const [mergeGroup, setMergeGroup] = useState({ current: 0, total: 0 });
-  const [alignmentProgress, setAlignmentProgress] = useState({ done: 0, total: 0 });
-  const [resultPath, setResultPath] = useState('');
-  const [missingKey, setMissingKey] = useState<string | null>(null);
+  const [downloadLabel, setDownloadLabel] = useState('');
   const [error, setError] = useState('');
+  const [missingKey, setMissingKey] = useState<string | null>(null);
+  const [validationAttempt, setValidationAttempt] = useState(0);
+  const [detailsOpen, setDetailsOpen] = useState(true);
+  const [diagnosticCopyState, setDiagnosticCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
+  const [pipelineFailure, setPipelineFailure] = useState<PipelineFailureSnapshot | null>(null);
   const [videoLoginPlatform, setVideoLoginPlatform] = useState<VideoLoginPlatform | null>(null);
   const [videoLoginBusy, setVideoLoginBusy] = useState(false);
   const [videoSessionCleared, setVideoSessionCleared] = useState(false);
+  const studioRef = useRef<HTMLDivElement | null>(null);
+  const activeStageRef = useRef<PipelineStageId | null>(null);
+  const transcriberRef = useRef<ITranscriptionProvider | null>(null);
+  const voiceRef = useRef<IVoiceProvider | null>(null);
+  const restoredProjectIdRef = useRef(project.id);
+  const running = !['idle', 'done', 'error'].includes(stage);
+  const sourceName = project.sourceVideoPath?.replace(/\\/g, '/').split('/').pop() ?? '';
 
-  const running = stage !== 'idle' && stage !== 'done' && stage !== 'error' && stage !== 'voice-error';
-  const runningRef = useRef(running);
-  runningRef.current = running;
-  const reviewPreparingRef = useRef(false);
-  const transcriptionProviderRef = useRef<ITranscriptionProvider | null>(null);
+  const touchStage = useCallback((id: PipelineStageId, percent: number, detail?: string) => {
+    activeStageRef.current = id;
+    setLastActivityAt(Date.now());
+    setPipelineProgress((current) => current.map((step) => step.id === id
+      ? { ...step, status: 'active', percent: Math.max(step.status === 'active' ? step.percent : 0, Math.min(99, Math.max(0, percent))), detail }
+      : step));
+  }, []);
+  const completeStage = useCallback((id: PipelineStageId, detail = 'Hoàn tất') => {
+    if (activeStageRef.current === id) activeStageRef.current = null;
+    setLastActivityAt(Date.now());
+    setPipelineProgress((current) => current.map((step) => step.id === id ? { ...step, status: 'completed', percent: 100, detail } : step));
+  }, []);
+  const failStage = useCallback((id: PipelineStageId, detail: string) => {
+    if (activeStageRef.current === id) activeStageRef.current = null;
+    setPipelineProgress((current) => current.map((step) => step.id === id ? { ...step, status: 'error', detail } : step));
+  }, []);
 
   useEffect(() => {
-    onNavigationLockChange?.(running);
-    return () => onNavigationLockChange?.(false);
-  }, [running, onNavigationLockChange]);
+    if (restoredProjectIdRef.current === project.id) return;
+    restoredProjectIdRef.current = project.id;
+    setUrl(project.settings.localizeSourceUrl ?? '');
+    setSourceInputMode(project.settings.localizeSourceInputMode ?? 'link');
+    setSourceLanguage(project.sourceLanguage ?? 'vi');
+    setTargetLanguage(project.targetLanguage ?? 'vietnamese');
+    setPipelineProgress(restorePipelineProgress(project));
+    setDetailsOpen(true);
+    setDiagnosticCopyState('idle');
+    setPipelineFailure(null);
+    setStage('idle');
+    setError('');
+    setVideoLoginPlatform(null);
+    setVideoSessionCleared(false);
+  }, [project]);
+  useEffect(() => { onSourceReadyChange?.(Boolean(project.sourceVideoPath)); }, [onSourceReadyChange, project.sourceVideoPath]);
+  useEffect(() => { onNavigationLockChange?.(running); return () => onNavigationLockChange?.(false); }, [onNavigationLockChange, running]);
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => setActivityClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+  useEffect(() => window.gensuite.ytdlp.onProgress((progress) => {
+    if (progress.projectId !== project.id) return;
+    const percent = Math.max(0, Math.min(99, progress.percent ?? 0));
+    setDownloadPercent(percent);
+    setDownloadLabel(progress.phase === 'merging' ? 'Đang hoàn thiện video tải về' : 'Đang tải video');
+    if (activeStageRef.current === 'download') touchStage('download', percent, `${Math.round(percent)}%`);
+  }), [project.id, touchStage]);
+  useEffect(() => window.gensuite.whisper.onProgress((progress) => {
+    if (activeStageRef.current !== 'recognition') return;
+    const percent = progress.phase === 'extracting' ? 2 : progress.phase === 'downloading-model' ? Math.min(10, (progress.percent ?? 0) / 10) : Math.max(10, progress.percent ?? 10);
+    const detail = progress.phase === 'extracting' ? 'Đang chuẩn bị âm thanh'
+      : progress.phase === 'downloading-model' ? 'Đang chuẩn bị dữ liệu nhận dạng'
+        : progress.chunkNumber && progress.chunkCount ? `Đang xử lý phần ${progress.chunkNumber}/${progress.chunkCount}` : 'Đang nhận dạng lời thoại';
+    touchStage('recognition', percent, detail);
+  }), [touchStage]);
 
-  // Source path is captured once at the start of a run so the voice/merge steps
-  // (and any retry of a failed scene) can reuse it without re-downloading.
-  const srcRef = useRef('');
+  const reportFailure = useCallback((failure: unknown, fallback: PipelineStageId) => {
+    const normalized = normalizePipelineError(failure, activeStageRef.current ?? fallback);
+    rememberDiagnostic(normalized);
+    setPipelineFailure({ error: normalized, occurredAt: new Date().toISOString() });
+    const storedUrl = useProjectStore.getState().project.settings.localizeSourceUrl ?? '';
+    const loginPlatform = loginRequiredPlatform(failure)
+      ?? (normalized.code === 'VIDEO_SOURCE_UNREADABLE' ? videoPlatformFromUrl(storedUrl) : null);
+    if (loginPlatform) {
+      const platformName = loginPlatform === 'douyin' ? 'Douyin' : 'TikTok';
+      const message = `${platformName} cần xác nhận quyền truy cập video. Mã chẩn đoán: ${normalized.diagnosticId}.`;
+      setVideoLoginPlatform(loginPlatform);
+      setVideoSessionCleared(false);
+      failStage(activeStageRef.current ?? fallback, message);
+      setError('');
+      setStage('error');
+      return normalized;
+    }
+    const message = errorMessage(normalized);
+    failStage(activeStageRef.current ?? fallback, message);
+    setError(message);
+    setStage('error');
+    return normalized;
+  }, [failStage]);
 
-  useEffect(() => window.gensuite.ytdlp.onProgress((p) => {
-    if (p.projectId !== project.id) return;
-    setDownloadPercent(p.percent);
-    setDownloadPhase(p.phase ?? '');
-  }), [project.id]);
-
-  useEffect(() => window.gensuite.whisper.onProgress((p) => {
-    setTranscribePhase(p.phase);
-    setModelPercent(p.phase === 'downloading-model' && typeof p.percent === 'number' ? p.percent : null);
-    setTranscribePercent(p.phase === 'transcribing' && typeof p.percent === 'number' ? p.percent : null);
-  }), []);
-
-  useEffect(() => window.gensuite.ffmpeg.onProgress((p) => {
-    if (p.projectId !== project.id) return;
-    setMergePhase(p.phase);
-    setMergeGroup({ current: p.groupNumber ?? 0, total: p.groupCount ?? 0 });
-    const nextPercent = typeof p.percent === 'number'
-      ? p.percent
-      : p.totalSec && p.totalSec > 0 ? (p.timeSec / p.totalSec) * 100 : 0;
-    setMergePercent((current) => Math.max(current, Math.min(100, Math.round(nextPercent))));
-  }), [project.id]);
-
-  const sourceName = sourcePath ? sourcePath.replace(/\\/g, '/').split('/').pop() : '';
+  const copyFailureDiagnostics = async () => {
+    if (!pipelineFailure) return;
+    try {
+      await navigator.clipboard.writeText(diagnosticSummaryForError(pipelineFailure.error, pipelineFailure.occurredAt));
+      setDiagnosticCopyState('copied');
+    } catch {
+      setDiagnosticCopyState('error');
+    }
+  };
 
   const importFile = async () => {
     if (running) return;
     setError('');
     try {
-      const filePath = await window.gensuite.ytdlp.import(project.id);
-      if (filePath) {
-        setSourceVideo(filePath);
-        setUrl('');
-      }
-    } catch (err) {
-      setError(errorMessage(err));
+      const path = await window.gensuite.ytdlp.import(project.id);
+      if (!path) return;
+      useProjectStore.getState().setSourceVideo(path);
+      useProjectStore.getState().patchSettings({ localizeSourceInputMode: 'file', localizePreparedSourceMode: 'file' });
+      setSourceInputMode('file');
+      setPipelineProgress(restorePipelineProgress(useProjectStore.getState().project));
+    } catch (failure) {
+      setError(errorMessage(normalizedClientAppError(failure, 'VIDEO_SOURCE_UNREADABLE')));
     }
   };
 
-  const importBatchFiles = async () => {
-    if (running) return;
-    setError('');
-    try {
-      const filePaths = await window.gensuite.ytdlp.importMany(project.id);
-      if (!filePaths.length) return;
-      setBatchItems((current) => [
-        ...current,
-        ...filePaths.map((filePath, index): BatchItem => ({
-          id: `file-${Date.now()}-${index}`,
-          kind: 'file',
-          value: filePath,
-          label: filePath.replace(/\\/g, '/').split('/').pop() || `Video ${current.length + index + 1}`,
-          status: 'queued',
-        })),
-      ]);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  };
-
-  const addBatchLinks = () => {
-    const links = batchUrlInput.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-    if (!links.length) return;
-    setBatchItems((current) => {
-      const existing = new Set(current.map((item) => item.value));
-      const additions = links.filter((link) => !existing.has(link)).map((link, index): BatchItem => ({
-        id: `url-${Date.now()}-${index}`,
-        kind: 'url',
-        value: link,
-        label: `Video từ liên kết ${current.filter((item) => item.kind === 'url').length + index + 1}`,
-        status: 'queued',
-      }));
-      return [...current, ...additions];
-    });
-    setBatchUrlInput('');
-  };
-
-  const removeBatchItem = (id: string) => {
-    if (running) return;
-    setBatchItems((current) => current.filter((item) => item.id !== id));
-  };
-
-  // Free translation = Google AI Studio (gemini engine); paid = GenSuite with the
-  // Gemini model id. The toggle owns both scriptEngine and scriptModel.
   const setTranslatePaid = (paid: boolean) => {
     if (paid && (entitlementStatus !== 'ready' || !canUseCloud)) {
       setError(entitlementStatus === 'ready' ? 'Xử lý trực tuyến trong quy trình này cần gói Basic trở lên.' : 'Đang kiểm tra quyền tài khoản. Vui lòng thử lại sau.');
       return;
     }
-    setError('');
-    if (paid) { setScriptEngine('gensuite'); setScriptModel(GENSUITE_TRANSLATE_MODEL); }
-    else { setScriptEngine('gemini'); setScriptModel(''); }
-  };
-
-  useEffect(() => {
-    if (entitlementStatus === 'ready' && !canUseCloud && scriptEngine === 'gensuite') setTranslatePaid(false);
-  }, [canUseCloud, entitlementStatus, scriptEngine]);
-
-  const resetRunProgress = () => {
-    setResultPath('');
-    setDownloadPercent(0);
-    setMergePercent(0);
-    setMergePhase('preparing');
-    setMergeGroup({ current: 0, total: 0 });
-    setVoiceProgress({ done: 0, total: 0 });
-    setAlignmentProgress({ done: 0, total: 0 });
-  };
-
-  const prepareSourceText = async (input: { sourcePath?: string; url?: string }): Promise<string> => {
     const store = useProjectStore.getState();
-    const settings = store.project.settings;
-    const projectId = store.project.id;
-
-    const alreadyPrepared = !input.url
-      && input.sourcePath
-      && store.project.sourceVideoPath === input.sourcePath
-      && store.project.sourceLanguage === selectedSourceLanguage
-      && store.project.targetLanguage === targetLanguage
-      && store.project.transcriptionVersion === 4
-      && store.project.scenes.some((scene) => typeof scene.sourceStart === 'number' && typeof scene.sourceEnd === 'number');
-    if (alreadyPrepared) {
-      srcRef.current = input.sourcePath!;
-      return input.sourcePath!;
-    }
-
-    setStage('download');
-    let src = input.sourcePath || '';
-    if (input.url) src = await window.gensuite.ytdlp.download({ projectId, url: input.url });
-    if (!src) throw new Error('Không tìm thấy video nguồn để xử lý.');
-    useProjectStore.getState().setSourceVideo(src);
-    if (input.url) setUrl('');
-
-    setStage('transcribe');
-    const transcriber = getTranscriptionProvider(settings.transcriptionEngine, keys, 'localize-cloud');
-    transcriptionProviderRef.current = transcriber;
-    let segments;
-    try {
-      segments = await transcriber.transcribe({
-        projectId, sourcePath: src, model: settings.whisperModel, language: selectedSourceLanguage,
-      });
-    } finally {
-      if (transcriptionProviderRef.current === transcriber) transcriptionProviderRef.current = null;
-    }
-    if (transcriptHasAbnormalRepetition(segments)) {
-      throw clientAppError('TRANSCRIPTION_REPETITION_DETECTED');
-    }
-    useProjectStore.getState().setTranscript(segments);
-
-    setStage('translate');
-    const translator = getScriptProvider(settings.scriptEngine, keys, settings.scriptModel, 'localize-cloud');
-    const translated = await translator.translateSegments({
-      projectId, segments, targetLanguage, sourceLanguage: selectedSourceLanguage,
-    });
-    useProjectStore.getState().setLanguages({ sourceLanguage: selectedSourceLanguage, targetLanguage });
-    useProjectStore.getState().buildScenesFromTranscript(translated);
-
-    srcRef.current = src;
-    return src;
-  };
-
-  const processSource = async (input: { sourcePath?: string; url?: string; automaticOutputName?: string; batch?: boolean }): Promise<string | null> => {
-    await prepareSourceText(input);
-    return await voiceAndMerge({
-      batch: input.batch,
-      automaticOutputName: input.automaticOutputName,
-    });
-  };
-
-  const prepareRun = () => {
-    onSetupStepChange('export');
+    store.setScriptEngine(paid ? 'gensuite' : 'gemini');
+    store.setScriptModel(paid ? GENSUITE_TRANSLATE_MODEL : '');
     setError('');
+  };
+
+  const ensureSourceVideo = async (): Promise<string> => {
+    const current = useProjectStore.getState().project;
+    const requestedUrl = url.trim();
+    const preparedForSelectedMode = current.sourceVideoPath
+      && current.settings.localizePreparedSourceMode === sourceInputMode
+      && (sourceInputMode === 'file' || !requestedUrl || requestedUrl === current.settings.localizePreparedSourceUrl);
+    if (preparedForSelectedMode && current.sourceVideoPath) {
+      completeStage('download', 'Video đã sẵn sàng');
+      return current.sourceVideoPath;
+    }
+    if (!url.trim()) throw clientAppError('VIDEO_SOURCE_REQUIRED');
+    setStage('download');
+    setDownloadPercent(0);
+    setDownloadLabel('Đang chuẩn bị tải video');
+    touchStage('download', 0, 'Đang chuẩn bị');
+    const path = await window.gensuite.ytdlp.download({ projectId: current.id, url: url.trim() });
+    if (!path) throw clientAppError('VIDEO_SOURCE_UNREADABLE');
+    useProjectStore.getState().setSourceVideo(path);
+    useProjectStore.getState().patchSettings({ localizePreparedSourceMode: 'link', localizeSourceInputMode: 'link', localizeSourceUrl: requestedUrl, localizePreparedSourceUrl: requestedUrl });
+    completeStage('download', 'Video đã tải xong');
+    return path;
+  };
+
+  const recognizeAndTranslate = async (sourcePath: string) => {
+    let current = useProjectStore.getState().project;
+    const scenes = validScenes(current);
+    const cached = current.transcriptionVersion === 4 && Boolean(current.transcript?.length) && scenes.length > 0
+      && current.sourceLanguage === sourceLanguage && current.targetLanguage === targetLanguage;
+    if (cached) {
+      completeStage('recognition', 'Đã có dữ liệu nhận dạng');
+      completeStage('translation', 'Đã có bản dịch');
+      return;
+    }
+    let segments = current.transcript;
+    if (!(current.transcriptionVersion === 4 && segments?.length && current.sourceLanguage === sourceLanguage)) {
+      setStage('recognition');
+      touchStage('recognition', 0, 'Đang bắt đầu nhận dạng');
+      const transcriber = getTranscriptionProvider(current.settings.transcriptionEngine, keys, 'localize-cloud');
+      transcriberRef.current = transcriber;
+      try {
+        segments = await transcriber.transcribe({ projectId: current.id, sourcePath, model: current.settings.whisperModel, language: sourceLanguage });
+      } finally {
+        if (transcriberRef.current === transcriber) transcriberRef.current = null;
+      }
+      if (!segments.length) throw clientAppError('TRANSCRIPTION_NO_SPEECH');
+      if (transcriptHasAbnormalRepetition(segments)) throw clientAppError('TRANSCRIPTION_REPETITION_DETECTED');
+      useProjectStore.getState().setTranscript(segments);
+      completeStage('recognition', `${segments.length} đoạn đã nhận dạng`);
+    } else {
+      completeStage('recognition', 'Đã có dữ liệu nhận dạng');
+    }
+    if (!segments?.length) throw clientAppError('TRANSLATION_INPUT_REQUIRED');
+    current = useProjectStore.getState().project;
+    setStage('translation');
+    touchStage('translation', 0, 'Đang chuẩn bị bản dịch');
+    const translator = getScriptProvider(current.settings.scriptEngine, keys, current.settings.scriptModel, 'localize-cloud');
+    let translated: TranscriptSegment[];
+    try {
+      translated = await translator.translateSegments({
+        projectId: current.id, segments, targetLanguage, sourceLanguage,
+        onProgress: (progress) => touchStage('translation', progress.totalSegments ? (progress.completedSegments / progress.totalSegments) * 100 : 0,
+          progress.phase === 'validating' ? 'Đang kiểm tra bản dịch' : `Đang dịch nhóm ${Math.max(1, progress.batchNumber)}/${Math.max(1, progress.batchCount)}`),
+      });
+    } catch (failure) {
+      const service = missingKeyService(failure);
+      if (service) setMissingKey(service);
+      throw failure;
+    }
+    useProjectStore.getState().setLanguages({ sourceLanguage, targetLanguage });
+    useProjectStore.getState().buildScenesFromTranscript(translated);
+    completeStage('translation', `${translated.length} câu đã dịch`);
+  };
+
+  const createVoices = async () => {
+    const current = useProjectStore.getState().project;
+    const scenes = validScenes(current);
+    if (!scenes.length) throw clientAppError('VIDEO_SEGMENTS_EMPTY');
+    setStage('voice');
+    touchStage('voice', 0, 'Đang chuẩn bị tạo voice');
+    const provider = getVoiceProvider(current.settings.voiceEngine, keys, 'localize-cloud');
+    voiceRef.current = provider;
+    const config = current.settings.voiceConfigs[current.settings.voiceEngine];
+    for (let index = 0; index < scenes.length; index += 1) {
+      let scene = useProjectStore.getState().project.scenes.find((item) => item.id === scenes[index].id) ?? scenes[index];
+      if (scene.audioPath) {
+        const usable = await probeUsableAudio(scene.audioPath);
+        if (usable) {
+          if (Math.abs((scene.audioDuration ?? 0) - usable.durationSec) > 0.1) useProjectStore.getState().updateScene(scene.id, { audioDuration: usable.durationSec });
+          touchStage('voice', ((index + 1) / scenes.length) * 100, `Đã tạo ${index + 1}/${scenes.length} câu`);
+          continue;
+        }
+        useProjectStore.getState().updateScene(scene.id, { audioPath: undefined, audioDuration: undefined });
+        scene = { ...scene, audioPath: undefined, audioDuration: undefined };
+      }
+      try {
+        const result = await provider.synthesize({
+          projectId: current.id, segmentId: scene.id, text: scene.narration, voiceId: config.voiceId, modelId: config.modelId,
+          language: config.language, speed: config.speed, temperature: config.temperature, stability: config.stability,
+          similarityBoost: config.similarityBoost, style: config.style, useSpeakerBoost: config.useSpeakerBoost,
+          pitch: config.pitch, volume: config.volume, deliveryMode: config.deliveryMode,
+          onProgress: (progress) => touchStage('voice', ((index + (progress.totalChunks ? progress.completedChunks / progress.totalChunks : 0)) / scenes.length) * 100,
+            `Đang tạo câu ${index + 1}/${scenes.length}`),
+        });
+        useProjectStore.getState().updateScene(scene.id, { audioPath: result.audioPath, audioDuration: result.durationSec });
+      } catch (failure) {
+        throw normalizePipelineError(failure, 'voice', { segmentNumber: index + 1, segmentCount: scenes.length });
+      }
+      touchStage('voice', ((index + 1) / scenes.length) * 100, `Đã tạo ${index + 1}/${scenes.length} câu`);
+    }
+    voiceRef.current = null;
+    completeStage('voice', `${scenes.length} câu đã tạo`);
+  };
+
+  const createCapCutDraft = async () => {
+    const current = useProjectStore.getState().project;
+    const scenes = validScenes(current);
+    if (!current.sourceVideoPath || !scenes.length || scenes.some((scene) => !scene.audioPath || !scene.audioDuration)) throw clientAppError('CAPCUT_EXPORT_INPUT_INVALID');
+    setStage('capcut');
+    touchStage('capcut', 10, 'Đang chuẩn bị các track chỉnh sửa');
+    const result = await window.gensuite.capcut.exportDraft({
+      projectId: current.id,
+      projectName: current.name,
+      sourceVideoPath: current.sourceVideoPath,
+      segments: scenes.map((scene) => ({
+        audioPath: scene.audioPath as string,
+        sourceStart: scene.sourceStart as number,
+        sourceEnd: scene.sourceEnd as number,
+        text: scene.narration,
+        audioDuration: scene.audioDuration as number,
+      })),
+      // Plain editable captions only. Styling and effects belong in CapCut.
+      subtitles: true,
+      captionLanguage: current.targetLanguage,
+      originalAudioVolume: 0,
+      draftsDirectory: current.settings.capcutDraftsDirectory || undefined,
+    });
+    if (!result.ok) throw result.error;
+    useProjectStore.getState().setCapCutDraft(result.value);
+    completeStage('capcut', 'Dự án đã sẵn sàng');
+    setStage('done');
+    void refreshEntitlements();
+  };
+
+  const runPipeline = async (downloadFirst = false, transitionStarted = false) => {
+    if (running && !transitionStarted) return;
+    setError('');
+    setDiagnosticCopyState('idle');
+    setPipelineFailure(null);
     setMissingKey(null);
     setVideoLoginPlatform(null);
     setVideoSessionCleared(false);
-    resetRunProgress();
-  };
-
-  const run = async () => {
-    if (running) return;
-    if (taskMode === 'batch') {
-      await runBatch();
-      return;
-    }
-    prepareRun();
+    if (downloadFirst) setPipelineProgress(initialPipelineProgress());
     try {
-      await processSource({ sourcePath: url.trim() ? undefined : sourcePath, url: url.trim() || undefined });
-    } catch (err) {
-      const service = missingKeyService(err);
-      const loginPlatform = loginRequiredPlatform(err);
-      if (service) setMissingKey(service);
-      else if (loginPlatform) setVideoLoginPlatform(loginPlatform);
-      else setError(errorMessage(err));
-      setStage('error');
+      const sourcePath = await ensureSourceVideo();
+      await recognizeAndTranslate(sourcePath);
+      await createVoices();
+      await createCapCutDraft();
+    } catch (failure) {
+      reportFailure(failure, activeStageRef.current ?? 'download');
     }
   };
 
-  const runBatch = async () => {
-    if (running || !batchItems.length) return;
-    prepareRun();
-    const queue = batchItems.filter((item) => item.status !== 'done');
-    let completed = batchItems.filter((item) => item.status === 'done').length;
-    let failed = 0;
+  const chooseCapCutDirectory = async () => {
+    if (running) return;
+    setError('');
+    const result = await window.gensuite.capcut.selectDraftsDirectory();
+    if (!result.ok) { setError(errorMessage(result.error)); return; }
+    if (result.value) useProjectStore.getState().patchSettings({ capcutDraftsDirectory: result.value });
+  };
 
-    for (const item of queue) {
-      setActiveBatchId(item.id);
-      resetRunProgress();
-      setBatchItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'processing', error: undefined } : entry));
-      try {
-        const cleanLabel = item.label.replace(/\.[^.]+$/, '').replace(/-\d{10,}-\d+$/, '');
-        const out = await processSource({
-          sourcePath: item.kind === 'file' ? item.value : undefined,
-          url: item.kind === 'url' ? item.value : undefined,
-          automaticOutputName: `${cleanLabel}-long-tieng`,
-          batch: true,
-        });
-        if (!out) throw new Error('Video chưa được lưu thành công.');
-        completed += 1;
-        setBatchItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'done', resultPath: out } : entry));
-      } catch (err) {
-        failed += 1;
-        const message = errorMessage(err);
-        setBatchItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, status: 'error', error: message } : entry));
-        const service = missingKeyService(err);
-        const loginPlatform = loginRequiredPlatform(err);
-        if (service || loginPlatform) {
-          if (service) setMissingKey(service);
-          if (loginPlatform) setVideoLoginPlatform(loginPlatform);
-          setError('Hàng đợi đã tạm dừng. Hãy hoàn tất cấu hình cần thiết rồi chạy lại các video chưa xong.');
-          break;
-        }
-      }
-    }
-
-    setActiveBatchId(null);
-    if (completed > 0) setResultPath(`${completed} video đã hoàn thành${failed ? ` · ${failed} video lỗi` : ''}`);
-    setStage(completed > 0 ? 'done' : 'error');
-    if (!completed && failed) setError('Chưa có video nào hoàn thành. Bạn có thể xem lỗi tại từng mục và chạy lại.');
+  const cancelCurrent = async () => {
+    if (stage === 'recognition') {
+      transcriberRef.current?.cancel?.();
+      await window.gensuite.whisper.cancel(project.id).catch(() => false);
+    } else if (stage === 'voice') voiceRef.current?.cancel?.();
   };
 
   const loginVideoPlatform = async () => {
@@ -394,19 +481,17 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     setError('');
     setVideoSessionCleared(false);
     try {
-      const sessionReady = platform === 'douyin'
+      const ready = platform === 'douyin'
         ? await window.gensuite.ytdlp.loginDouyin()
         : await window.gensuite.ytdlp.loginTikTok();
-      if (!sessionReady) {
-        setError(platform === 'douyin'
-          ? 'Douyin chưa cấp được phiên khách. Vui lòng thử lại sau.'
-          : 'Chưa hoàn tất đăng nhập TikTok. Hãy thử lại khi bạn sẵn sàng.');
+      if (!ready) {
+        setError(`Chưa hoàn tất xác nhận quyền truy cập ${platformName}. Vui lòng thử lại.`);
         return;
       }
       setVideoLoginPlatform(null);
-      await run();
+      await runPipeline(false);
     } catch {
-      setError(`Không thể mở cửa sổ đăng nhập ${platformName}. Vui lòng thử lại.`);
+      setError(`Không thể mở cửa sổ xác nhận ${platformName}. Vui lòng thử lại.`);
     } finally {
       setVideoLoginBusy(false);
     }
@@ -415,7 +500,6 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
   const clearVideoPlatformSession = async () => {
     if (!videoLoginPlatform || videoLoginBusy || running) return;
     const platform = videoLoginPlatform;
-    const platformName = platform === 'douyin' ? 'Douyin' : 'TikTok';
     setVideoLoginBusy(true);
     setError('');
     try {
@@ -423,364 +507,149 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       else await window.gensuite.ytdlp.clearTikTokSession();
       setVideoSessionCleared(true);
     } catch {
-      setError(`Không thể xóa phiên ${platformName}. Vui lòng thử lại.`);
+      setError('Không thể xóa phiên truy cập cũ. Vui lòng thử lại.');
     } finally {
       setVideoLoginBusy(false);
     }
   };
 
-  // Voice every scene, then merge. Scenes that already have an audioPath are
-  // skipped, so this doubles as the resume path: after a scene fails (e.g. edge-tts
-  // rate-limit), "Thử lại" re-runs this and only the unfinished scenes are voiced.
-  const voiceAndMerge = async (options?: { batch?: boolean; automaticOutputName?: string }): Promise<string | null> => {
-    const store = useProjectStore.getState();
-    const settings = store.project.settings;
-    const projectId = store.project.id;
-    const src = srcRef.current;
-
-    // 4 · Voice each scene sequentially (cloud jobs and edge-tts both dislike
-    // being hammered in parallel). A failure parks the run at 'voice-error'
-    // rather than discarding the scenes already voiced.
-    setStage('voice');
-    setVoiceErrorMsg('');
-    const scenes = useProjectStore.getState().project.scenes;
-    const voice = getVoiceProvider(settings.voiceEngine, keys, 'localize-cloud');
-    const cfg = settings.voiceConfigs[settings.voiceEngine];
-    const doneCount = () => useProjectStore.getState().project.scenes.filter((s) => s.audioPath).length;
-    setVoiceProgress({ done: doneCount(), total: scenes.length });
-    for (let i = 0; i < scenes.length; i += 1) {
-      let scene = useProjectStore.getState().project.scenes.find((item) => item.id === scenes[i].id) ?? scenes[i];
-      if (scene.audioPath) {
-        const existing = await probeUsableAudio(scene.audioPath);
-        if (existing) {
-          if (Math.abs((scene.audioDuration ?? 0) - existing.durationSec) > 0.1) {
-            useProjectStore.getState().updateScene(scene.id, { audioDuration: existing.durationSec });
-          }
-          continue;
-        }
-        useProjectStore.getState().updateScene(scene.id, {
-          audioPath: undefined, audioDuration: undefined, subtitleWords: undefined,
-          subtitleTimingText: undefined, subtitleTimingAudioPath: undefined, subtitleTimingQuality: undefined,
-        });
-        scene = { ...scene, audioPath: undefined, audioDuration: undefined };
-      }
-      try {
-        const result = await voice.synthesize({
-          projectId, segmentId: scene.id, text: scene.narration,
-          voiceId: cfg.voiceId, modelId: cfg.modelId, language: cfg.language,
-          speed: cfg.speed, temperature: cfg.temperature, stability: cfg.stability,
-          similarityBoost: cfg.similarityBoost, style: cfg.style, useSpeakerBoost: cfg.useSpeakerBoost,
-          pitch: cfg.pitch, volume: cfg.volume, deliveryMode: cfg.deliveryMode,
-        });
-        useProjectStore.getState().updateScene(scene.id, {
-          audioPath: result.audioPath,
-          audioDuration: result.durationSec,
-          subtitleWords: result.wordTimings,
-          subtitleTimingText: result.wordTimings?.length ? scene.narration : undefined,
-          subtitleTimingAudioPath: result.wordTimings?.length ? result.audioPath : undefined,
-          subtitleTimingQuality: result.wordTimings?.length ? 'exact' : undefined,
-        });
-        setVoiceProgress({ done: doneCount(), total: scenes.length });
-      } catch (err) {
-        if (options?.batch) throw err;
-        const service = missingKeyService(err);
-        if (service) { setMissingKey(service); setStage('error'); return null; }
-        setVoiceErrorMsg(errorMessage(err));
-        setVoiceProgress({ done: doneCount(), total: scenes.length });
-        setStage('voice-error');
-        return null;
-      }
-    }
-
-    // 5 · Measure word timing from the generated voice before burning captions.
-    let finalScenes = useProjectStore.getState().project.scenes;
-    if (settings.subtitle.enabled) {
-      setStage('align');
-      setAlignmentProgress({ done: 0, total: finalScenes.length });
-      for (let index = 0; index < finalScenes.length; index += 1) {
-        const scene = finalScenes[index];
-        const alignment = await alignSceneSubtitle(scene, projectId, targetLanguage, index + 1, finalScenes.length);
-        if (!hasFreshSubtitleTiming(scene)) {
-          useProjectStore.getState().updateScene(scene.id, {
-            subtitleWords: alignment.words,
-            subtitleTimingText: scene.narration,
-            subtitleTimingAudioPath: scene.audioPath,
-            subtitleTimingQuality: alignment.quality,
-          });
-        }
-        setAlignmentProgress({ done: index + 1, total: finalScenes.length });
-      }
-      finalScenes = useProjectStore.getState().project.scenes;
-    }
-
-    // 6 · Merge the dubbed lines back over the original video.
-    setStage('merge');
-    const redubSegments = finalScenes
-      .filter((s) => s.audioPath && typeof s.sourceStart === 'number' && typeof s.sourceEnd === 'number')
-      .map((s) => ({
-        audioPath: s.audioPath as string,
-        sourceStart: s.sourceStart as number,
-        sourceEnd: s.sourceEnd as number,
-        text: s.narration,
-        wordTimings: s.subtitleWords,
-        audioDuration: s.audioDuration,
-      }));
-    if (!redubSegments.length) throw new Error('Không có câu thoại nào để lồng tiếng.');
-    const completion = await window.gensuite.ffmpeg.redub({
-      projectId, sourceVideoPath: src, segments: redubSegments,
-      subtitles: settings.subtitle.enabled,
-      subtitleConfig: settings.subtitle,
-      outputAspectRatio: settings.localizeAspectRatio,
-      originalAudioVolume: settings.originalAudioVolume,
-      outputDirectory: settings.localizeOutputDirectory || undefined,
-      automaticOutputName: options?.automaticOutputName,
-      revealOutput: options?.batch ? false : undefined,
-    });
-    if (!completion.ok) throw completion.error;
-    const out = completion.value;
-    if (!out) { setStage('idle'); return null; } // save dialog cancelled
-    useProjectStore.getState().setDubbedVideo(out);
-    setResultPath(out);
-    setStage('done');
-    void refreshEntitlements();
-    return out;
-  };
-
-  // Retry after a scene failed mid-voicing: continue from where it stopped.
-  const retryVoice = async () => {
-    setError('');
-    setMissingKey(null);
-    try {
-      await voiceAndMerge();
-    } catch (err) {
-      const service = missingKeyService(err);
-      if (service) setMissingKey(service);
-      else setError(errorMessage(err));
-      setStage('error');
-    }
-  };
-
-  const cancelRecognition = async () => {
-    if (stage !== 'transcribe') return;
-    transcriptionProviderRef.current?.cancel?.();
-    await window.gensuite.whisper.cancel(project.id).catch(() => false);
-  };
-
-  const stageLabel = (): string => {
-    switch (stage) {
-      case 'download': return downloadPhase === 'preparing' ? 'Đang chuẩn bị và xác nhận quyền truy cập…'
-        : downloadPhase === 'merging' ? 'Đang ghép video tải về…'
-        : `Đang tải video ${Math.round(downloadPercent)}%`;
-      case 'transcribe':
-        return transcribePhase === 'extracting' ? 'Đang trích âm thanh…'
-          : transcribePhase === 'downloading-model' ? `Đang chuẩn bị dữ liệu nhận dạng${modelPercent !== null ? ` ${modelPercent}%` : '…'}`
-          : transcribePhase === 'transcribing' ? `Đang nhận dạng lời thoại${transcribePercent !== null ? ` ${transcribePercent}%` : '…'}` : 'Đang nhận dạng…';
-      case 'translate': return 'Đang dịch lời thoại…';
-      case 'voice': return `Đang lồng tiếng ${voiceProgress.done}/${voiceProgress.total}…`;
-      case 'align': return `Đang căn phụ đề với lời đọc ${alignmentProgress.done}/${alignmentProgress.total}…`;
-      case 'merge': return mergePhase === 'preparing'
-        ? `Đang kiểm tra dữ liệu đầu vào ${mergePercent}%`
-        : mergePhase === 'mixing-audio'
-        ? `Đang chuẩn bị giọng đọc${mergeGroup.total ? ` ${mergeGroup.current}/${mergeGroup.total}` : ''} · ${mergePercent}%`
-        : `Đang hoàn thiện video ${mergePercent}%`;
-      default: return '';
-    }
-  };
-
-  const sourceUrlReady = (() => {
-    if (!url.trim()) return false;
-    try {
-      const parsed = new URL(url.trim());
-      return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-    } catch {
-      return false;
-    }
-  })();
-  const sourceReady = taskMode === 'batch' ? batchItems.length > 0 : Boolean(sourceUrlReady || sourcePath);
-  useEffect(() => {
-    onSourceReadyChange?.(sourceReady);
-  }, [sourceReady, onSourceReadyChange]);
-  const completedBatchCount = batchItems.filter((item) => item.status === 'done').length;
-  const remainingBatchCount = batchItems.length - completedBatchCount;
+  const sourceChoicesReady = Boolean(project.settings.localizeSourceLanguageConfirmed && project.settings.localizeTargetLanguageConfirmed && project.settings.localizeAccuracyConfirmed);
   const voiceConfig = project.settings.voiceConfigs[project.settings.voiceEngine];
-  const currentStepIndex = SETUP_STEPS.findIndex((item) => item.id === setupStep);
-  const sourceLanguageLabel = SOURCE_LANGUAGES.find(([value]) => value === selectedSourceLanguage)?.[1] ?? selectedSourceLanguage;
-  const targetLanguageLabel = TARGET_LANGUAGES.find(([value]) => value === targetLanguage)?.[1] ?? targetLanguage;
-  const reviewPreparationActive = setupStep === 'subtitle' && (['download', 'transcribe', 'translate'] as Stage[]).includes(stage);
-  const sourceChoicesConfirmed = Boolean(
-    project.settings.localizeSourceLanguageConfirmed
-    && project.settings.localizeTargetLanguageConfirmed
-    && project.settings.localizeAccuracyConfirmed,
-  );
-  const stepReady = (id: LocalizeSetupStep) => id === 'source'
-    ? sourceReady && sourceChoicesConfirmed
-    : id === 'voice'
-      ? Boolean(project.settings.localizeVoiceProviderConfirmed && voiceConfig.voiceId)
-      : true;
-  const prepareSubtitleReview = async (): Promise<boolean> => {
-    if (taskMode !== 'single') return true;
-    if (reviewPreparingRef.current) return false;
-    if (!sourceReady) {
-      onSetupStepChange('source');
-      setError('Hãy chọn video nguồn trước khi mở review phụ đề.');
-      return false;
+  const validationVisible = validationAttempt > 0;
+  const sourcePreparedForMode = Boolean(project.sourceVideoPath
+    && project.settings.localizePreparedSourceMode === sourceInputMode
+    && (sourceInputMode === 'file' || !url.trim() || url.trim() === project.settings.localizePreparedSourceUrl));
+  const sourceSelectionChanged = sourceInputMode === 'link'
+    && Boolean(url.trim())
+    && url.trim() !== (project.settings.localizePreparedSourceUrl ?? '');
+  const replacingExistingSource = sourceSelectionChanged && Boolean(project.sourceVideoPath);
+  const sourceInputMissing = sourceInputMode === 'link' ? !url.trim() && !sourcePreparedForMode : !sourcePreparedForMode;
+  const missingVideo = validationVisible && sourceInputMissing;
+  const missingSourceLanguage = validationVisible && !project.settings.localizeSourceLanguageConfirmed;
+  const missingTargetLanguage = validationVisible && !project.settings.localizeTargetLanguageConfirmed;
+  const missingAccuracy = validationVisible && !project.settings.localizeAccuracyConfirmed;
+  const missingVoiceProvider = validationVisible && !project.settings.localizeVoiceProviderConfirmed;
+  const missingVoice = validationVisible && Boolean(project.settings.localizeVoiceProviderConfirmed) && !voiceConfig.voiceId;
+  const startValidationMissing = sourceInputMissing
+    || !sourceChoicesReady || !project.settings.localizeVoiceProviderConfirmed || !voiceConfig.voiceId;
+  const startFromSetup = () => {
+    if (running) return;
+    if (startValidationMissing) {
+      setValidationAttempt((current) => current + 1);
+      setError('Vui lòng hoàn tất các mục bắt buộc được đánh dấu bên dưới.');
+      window.setTimeout(() => {
+        const invalid = studioRef.current?.querySelector<HTMLElement>('[data-validation-error="true"]');
+        invalid?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 0);
+      return;
     }
-    const current = useProjectStore.getState().project;
-    const reviewReady = Boolean(
-      current.sourceVideoPath
-      && current.sourceLanguage === selectedSourceLanguage
-      && current.targetLanguage === targetLanguage
-      && current.scenes.some((scene) => typeof scene.sourceStart === 'number' && typeof scene.sourceEnd === 'number'),
-    );
-    if (reviewReady) return true;
-    {
-      reviewPreparingRef.current = true;
-      setError('');
-      setMissingKey(null);
-      try {
-        await prepareSourceText({ sourcePath: url.trim() ? undefined : sourcePath, url: url.trim() || undefined });
-        setStage('idle');
-      } catch (err) {
-        const service = missingKeyService(err);
-        const loginPlatform = loginRequiredPlatform(err);
-        if (service) setMissingKey(service);
-        else if (loginPlatform) setVideoLoginPlatform(loginPlatform);
-        else setError(errorMessage(err));
-        setStage('error');
-        return false;
-      } finally {
-        reviewPreparingRef.current = false;
-      }
-    }
-    return true;
+    setError('');
+    setPipelineProgress(initialPipelineProgress());
+    setStage('download');
+    touchStage('download', 0, 'Đang chuẩn bị tải video');
+    onSetupStepChange('process');
+    // Let the process screen paint before starting any disk or network work.
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => void runPipeline(true, true));
+    });
   };
-  const goNext = async () => {
-    const next = SETUP_STEPS[currentStepIndex + 1];
-    if (!next) return;
-    onSetupStepChange(next.id);
-    if (next.id === 'subtitle') await prepareSubtitleReview();
-  };
-  const goBack = () => {
-    const previous = SETUP_STEPS[currentStepIndex - 1];
-    if (previous) onSetupStepChange(previous.id);
-  };
-  const chooseOutputDirectory = async () => {
-    const directory = await window.gensuite.shell.selectDirectory(project.settings.localizeOutputDirectory || undefined);
-    if (directory) patchSettings({ localizeOutputDirectory: directory });
-  };
+  const activeStep = pipelineProgress.find((step) => step.status === 'active');
+  const failedStep = pipelineProgress.find((step) => step.status === 'error');
+  const capcutReady = Boolean(project.capcutDraftPath
+    && pipelineProgress.find((step) => step.id === 'capcut')?.status === 'completed');
+  const inactivitySeconds = running ? Math.max(0, Math.floor((activityClock - lastActivityAt) / 1000)) : 0;
 
-  useEffect(() => {
-    if (setupStep !== 'subtitle' || taskMode !== 'single' || !sourceReady || stage !== 'idle' || reviewPreparingRef.current) return;
-    const current = useProjectStore.getState().project;
-    const ready = Boolean(
-      current.sourceVideoPath
-      && current.sourceLanguage === selectedSourceLanguage
-      && current.targetLanguage === targetLanguage
-      && current.scenes.some((scene) => typeof scene.sourceStart === 'number' && typeof scene.sourceEnd === 'number'),
-    );
-    if (!ready) void prepareSubtitleReview();
-  }, [setupStep, taskMode, sourceReady, stage, sourcePath, selectedSourceLanguage, targetLanguage]);
-
-  return (
-    <div className="flex h-full min-h-0 overflow-hidden">
-      <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${setupStep === 'subtitle' ? 'p-2' : 'px-6 py-5'}`}>
-      {setupStep !== 'subtitle' && <header className="mx-auto flex w-full max-w-5xl shrink-0 items-center justify-between gap-5 pb-4">
-        <div className="min-w-0">
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.18em] text-emerald-400/75">Bản địa hóa video</div>
-          <h1 className="truncate text-2xl font-bold tracking-[-0.04em]">Tạo bản lồng tiếng</h1>
-          <p className="mt-1 text-xs text-white/40">Hoàn thành 4 bước, sau đó GenSuite tự xử lý phần còn lại.</p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">{reviewPreparationActive && <div className="hidden min-w-48 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] px-3 py-2 md:block"><div className="flex items-center justify-between gap-3 text-[10px] font-semibold text-emerald-100"><span className="flex items-center gap-1.5"><Loader2 size={12} className="animate-spin" />{stageLabel()}</span>{stage === 'download' && <span className="text-emerald-300">{Math.round(downloadPercent)}%</span>}</div><div className="mt-1.5 h-1 overflow-hidden rounded-full bg-white/10"><div className={`h-full rounded-full bg-emerald-400 transition-all ${stage !== 'download' && !(stage === 'transcribe' && transcribePercent !== null) ? 'animate-pulse' : ''}`} style={{ width: stage === 'download' ? `${downloadPercent}%` : stage === 'transcribe' ? `${transcribePercent ?? 1}%` : '84%' }} /></div></div>}<div className="flex items-center rounded-xl border border-white/[0.08] bg-white/[0.025] p-1 text-xs">
-          <button type="button" disabled={running} onClick={() => setTaskMode('single')} className={`flex items-center gap-2 rounded-lg px-3 py-2 font-bold transition disabled:cursor-default ${taskMode === 'single' ? 'bg-white/[0.08] text-white' : 'text-white/35 hover:text-white/65'}`}><FileVideo size={14} /> 1 video</button>
-          <button type="button" disabled={running} onClick={() => setTaskMode('batch')} className={`flex items-center gap-2 rounded-lg px-3 py-2 font-bold transition disabled:cursor-default ${taskMode === 'batch' ? 'bg-emerald-400/15 text-emerald-200' : 'text-white/35 hover:text-white/65'}`}><Layers3 size={14} /> Hàng loạt{batchItems.length ? ` (${batchItems.length})` : ''}</button>
-        </div></div>
-      </header>}
-
-        <section className={`mx-auto min-h-0 w-full flex-1 ${setupStep === 'subtitle' ? 'max-w-none overflow-hidden' : 'workspace-panel max-w-5xl overflow-y-auto rounded-2xl p-5'}`}>
-          {missingKey && <div className="mb-4 flex items-center justify-between rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-xs"><span className="flex items-center gap-2"><KeyRound size={15} /> Thiếu API key cho {serviceLabel(missingKey)}.</span><button onClick={onOpenSettings} className="rounded-lg bg-amber-300 px-3 py-2 font-bold text-black">Mở Cài đặt</button></div>}
-          {error && <p className="mb-4 rounded-xl border border-red-400/20 bg-red-400/5 p-3 text-xs text-red-300">{error}</p>}
-          {videoLoginPlatform && <div className="mb-4 rounded-xl border border-amber-400/25 bg-amber-400/10 p-4 text-xs text-amber-100"><p className="flex items-center gap-2 font-bold"><LogIn size={15} /> Cần xác nhận quyền truy cập video</p><p className="mt-2 leading-5 text-amber-100/65">Mở cửa sổ xác nhận, hoàn tất thao tác rồi quay lại đây. Ứng dụng không đọc thông tin đăng nhập của bạn.</p>{videoSessionCleared && <p className="mt-2 text-emerald-300">Đã xóa phiên cũ.</p>}<div className="mt-3 flex gap-2"><button onClick={() => void loginVideoPlatform()} disabled={videoLoginBusy} className="inline-flex items-center gap-2 rounded-lg bg-amber-300 px-3 py-2 font-bold text-black disabled:opacity-50">{videoLoginBusy ? <Loader2 size={13} className="animate-spin" /> : <LogIn size={13} />} Mở cửa sổ xác nhận</button><button onClick={() => void clearVideoPlatformSession()} disabled={videoLoginBusy} className="inline-flex items-center gap-2 rounded-lg border border-amber-200/20 px-3 py-2 text-amber-100/70"><Trash2 size={13} /> Xóa phiên cũ</button></div></div>}
-
-          {setupStep === 'source' && <div className="mx-auto max-w-3xl">
-            <div className="mb-5"><div className="flex items-center gap-2 text-base font-bold"><FileVideo size={18} className="text-emerald-300" /> Chọn video và ngôn ngữ</div><p className="mt-1 text-xs text-white/35">Đây là thông tin tối thiểu để nhận dạng và dịch chính xác.</p></div>
-            <div className="mb-2 text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Video nguồn <span className="text-emerald-300">*</span></div>
-            {taskMode === 'single' ? <div className="rounded-2xl border border-white/[0.07] bg-black/15 p-4">
-              <div className="field-surface flex items-center gap-3 rounded-xl px-4 py-3"><Link2 size={16} className="text-white/30" /><input value={url} onChange={(event) => setUrl(event.target.value)} disabled={running} placeholder="Dán liên kết video…" className="min-w-0 flex-1 bg-transparent text-sm outline-none" /></div>
-              <div className="my-3 flex items-center gap-3 text-[10px] uppercase tracking-wider text-white/20"><span className="h-px flex-1 bg-white/[0.07]" />hoặc<span className="h-px flex-1 bg-white/[0.07]" /></div>
-              <button onClick={importFile} disabled={running} className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-sm font-semibold text-white/65 hover:border-emerald-400/30 hover:text-white"><Upload size={15} /> Chọn file trên máy</button>
-              {sourceName && !url.trim() && <p className="mt-3 flex items-center gap-2 truncate text-xs text-emerald-300"><Check size={14} /> {sourceName}</p>}
-            </div> : <div className="rounded-2xl border border-white/[0.07] bg-black/15 p-4">
-              <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-                <textarea value={batchUrlInput} onChange={(event) => setBatchUrlInput(event.target.value)} disabled={running} rows={3} placeholder={'Dán nhiều liên kết, mỗi dòng một video…'} className="field-surface min-h-24 resize-none rounded-xl px-4 py-3 text-sm leading-6 outline-none" />
-                <div className="flex gap-2 md:w-40 md:flex-col">
-                  <button type="button" onClick={addBatchLinks} disabled={running || !batchUrlInput.trim()} className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-white/10 px-3 py-2 text-xs font-bold text-white/60 hover:text-white disabled:opacity-35"><Link2 size={14} /> Thêm liên kết</button>
-                  <button type="button" onClick={importBatchFiles} disabled={running} className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.06] px-3 py-2 text-xs font-bold text-emerald-200"><Upload size={14} /> Chọn nhiều file</button>
-                </div>
-              </div>
-              <div className="mt-4 flex items-center justify-between"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/30">Hàng đợi · {batchItems.length} video</span>{batchItems.length > 0 && !running && <button type="button" onClick={() => setBatchItems([])} className="text-[10px] font-bold text-white/30 hover:text-red-300">Xóa danh sách</button>}</div>
-              <div className="mt-2 max-h-56 space-y-2 overflow-y-auto pr-1">
-                {!batchItems.length && <div className="grid min-h-20 place-items-center rounded-xl border border-dashed border-white/[0.08] text-xs text-white/25">Chưa có video trong hàng đợi</div>}
-                {batchItems.map((item, index) => <div key={item.id} className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 ${item.status === 'processing' ? 'border-emerald-400/30 bg-emerald-400/[0.06]' : item.status === 'error' ? 'border-red-400/20 bg-red-400/[0.04]' : 'border-white/[0.06] bg-white/[0.02]'}`}>
-                  <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[10px] font-black ${item.status === 'done' ? 'bg-emerald-400 text-black' : item.status === 'processing' ? 'bg-emerald-400/15 text-emerald-300' : item.status === 'error' ? 'bg-red-400/10 text-red-300' : 'bg-white/[0.05] text-white/35'}`}>{item.status === 'done' ? <Check size={13} /> : item.status === 'processing' ? <Loader2 size={13} className="animate-spin" /> : index + 1}</span>
-                  <button type="button" disabled={!item.resultPath} onClick={() => item.resultPath && window.gensuite.shell.showItemInFolder(item.resultPath)} className="min-w-0 flex-1 text-left disabled:cursor-default"><span className="block truncate text-xs font-semibold text-white/70">{item.label}</span><span className={`mt-0.5 block truncate text-[10px] ${item.status === 'error' ? 'text-red-300/70' : 'text-white/25'}`}>{item.status === 'queued' ? 'Đang chờ' : item.status === 'processing' ? stageLabel() : item.status === 'done' ? 'Hoàn thành · Bấm để mở vị trí tệp' : item.error}</span></button>
-                  {!running && <button type="button" onClick={() => removeBatchItem(item.id)} className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-white/25 hover:bg-white/[0.05] hover:text-white"><X size={13} /></button>}
-                </div>)}
-              </div>
-              <p className="mt-3 text-[10px] leading-4 text-white/25">Các video dùng chung cấu hình bên dưới và được xử lý lần lượt để giữ máy ổn định.</p>
-            </div>}
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Ngôn ngữ gốc <span className="text-emerald-300">*</span></span><AppSelect value={project.settings.localizeSourceLanguageConfirmed ? selectedSourceLanguage : ''} options={SOURCE_LANGUAGE_OPTIONS} onChange={(value) => { setSourceLanguage(value); setLanguages({ sourceLanguage: value }); patchSettings({ localizeSourceLanguageConfirmed: true }); }} disabled={running} ariaLabel="Ngôn ngữ gốc" className="rounded-xl px-3 py-3 text-sm" /></label>
-              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Dịch sang <span className="text-emerald-300">*</span></span><AppSelect value={project.settings.localizeTargetLanguageConfirmed ? targetLanguage : ''} options={TARGET_LANGUAGE_OPTIONS} onChange={(value) => { setTargetLanguage(value); setLanguages({ targetLanguage: value }); patchSettings({ localizeTargetLanguageConfirmed: true }); }} disabled={running} ariaLabel="Ngôn ngữ đích" className="rounded-xl px-3 py-3 text-sm" /></label>
-              <label className="space-y-1.5"><span className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Độ chính xác <span className="text-emerald-300">*</span></span><AppSelect value={project.settings.localizeAccuracyConfirmed ? whisperModel : ''} options={ACCURACY_OPTIONS} onChange={(value) => { setWhisperModel(value as WhisperModelName); patchSettings({ localizeAccuracyConfirmed: true }); }} disabled={running} ariaLabel="Độ chính xác" className="rounded-xl px-3 py-3 text-sm" /></label>
-            </div>
-            <div className="mt-4 rounded-2xl border border-white/[0.07] p-4"><EngineToggle<'free' | 'paid'> label="Cách dịch" value={scriptEngine === 'gensuite' ? 'paid' : 'free'} options={[{ value: 'free', label: 'Dùng khóa riêng', hint: 'Dùng khóa dịch thuật bạn đã cấu hình', badge: 'free' }, { value: 'paid', label: 'Dùng credits', hint: canUseCloud ? 'Trừ credits trong tài khoản' : 'Cần gói Basic trở lên', premium: true, badge: 'cloud', disabled: entitlementStatus !== 'ready' || !canUseCloud }]} onChange={(value) => setTranslatePaid(value === 'paid')} /></div>
-          </div>}
-
-          {setupStep === 'voice' && <div className="flex min-h-full flex-col">
-            <div className="mb-4"><div className="flex items-center gap-2 text-base font-bold"><Wand2 size={18} className="text-emerald-300" /> Chọn giọng đọc</div><p className="mt-1 text-xs text-white/35">Nghe thử và chọn một giọng phù hợp với ngôn ngữ đích.</p></div>
-            <div className="relative min-h-[480px] flex-1 overflow-hidden rounded-2xl border border-white/[0.07] bg-[#0f0f10]"><VoiceConfigPanel feature="localize-cloud" onMissingKey={setMissingKey} /></div>
-          </div>}
-
-          {setupStep === 'subtitle' && <div className="h-full min-h-0">
-            <SubtitleDesigner
-              config={sub}
-              onChange={(next) => patchSettings({ subtitle: next })}
-              ratio={project.settings.localizeAspectRatio}
-              onRatioChange={(localizeAspectRatio) => patchSettings({ localizeAspectRatio })}
-              backgroundPath={sourcePath}
-              backgroundIsVideo
-              reviewLoading={stage === 'download' && Boolean(url.trim())}
-              reviewProgress={downloadPercent}
-              captions={(project.scenes.length ? project.scenes.map((scene) => ({ start: scene.sourceStart ?? 0, end: scene.sourceEnd ?? 0, text: scene.narration })) : (project.transcript ?? []).map((segment) => ({ start: segment.start, end: segment.end, text: segment.text }))).filter((caption) => caption.end > caption.start && caption.text.trim())}
-            />
-          </div>}
-
-          {setupStep === 'export' && <div className="mx-auto max-w-3xl">
-            <div className="mb-5"><div className="flex items-center gap-2 text-base font-bold"><SlidersHorizontal size={18} className="text-emerald-300" /> Kiểm tra trước khi tạo</div><p className="mt-1 text-xs text-white/35">Mọi thiết lập quan trọng được gom tại đây.</p></div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-2xl border border-white/[0.07] bg-black/15 p-4"><span className="text-[10px] font-black uppercase tracking-wider text-white/30">Video nguồn</span><p className="mt-2 truncate text-sm font-semibold text-white/80">{taskMode === 'batch' ? `${batchItems.length} video trong hàng đợi` : sourceName || (url.trim() ? 'Video từ liên kết' : 'Chưa chọn video')}</p></div>
-              <div className="rounded-2xl border border-white/[0.07] bg-black/15 p-4"><span className="text-[10px] font-black uppercase tracking-wider text-white/30">Ngôn ngữ</span><p className="mt-2 text-sm font-semibold text-white/80">{sourceLanguageLabel} <ChevronRight size={13} className="mx-1 inline text-emerald-300" /> {targetLanguageLabel}</p></div>
-              <div className="rounded-2xl border border-white/[0.07] bg-black/15 p-4"><span className="text-[10px] font-black uppercase tracking-wider text-white/30">Giọng đọc</span><p className="mt-2 truncate text-sm font-semibold text-white/80">{voiceConfig.voiceId ? 'Đã chọn giọng' : 'Chưa chọn giọng'}</p></div>
-              <div className="rounded-2xl border border-white/[0.07] bg-black/15 p-4"><span className="text-[10px] font-black uppercase tracking-wider text-white/30">Phụ đề</span><p className="mt-2 text-sm font-semibold text-white/80">{sub.enabled ? 'Đang bật' : 'Đang tắt'}</p></div>
-            </div>
-            <div className="mt-4 rounded-2xl border border-white/[0.07] bg-black/10 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-3"><div className="min-w-0"><p className="flex items-center gap-2 text-sm font-bold text-white/80"><FolderOpen size={16} className="text-emerald-300" /> Nơi lưu video</p><p className="mt-1 truncate text-[11px] text-white/35" title={project.settings.localizeOutputDirectory || undefined}>{project.settings.localizeOutputDirectory || 'Chưa chọn · Bạn sẽ chọn nơi lưu khi bắt đầu tạo'}</p></div><div className="flex shrink-0 gap-2">{project.settings.localizeOutputDirectory && <button type="button" onClick={() => patchSettings({ localizeOutputDirectory: '' })} disabled={running} className="rounded-lg border border-white/10 px-3 py-2 text-[10px] font-semibold text-white/45 hover:text-white disabled:opacity-40">Đặt lại</button>}<button type="button" onClick={() => void chooseOutputDirectory()} disabled={running} className="inline-flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.07] px-3 py-2 text-[10px] font-bold text-emerald-200 disabled:opacity-40"><FolderOpen size={13} /> Chọn thư mục</button></div></div>
-            </div>
-            <div className="mt-4 rounded-2xl border border-white/[0.07] p-5"><div className="flex items-center justify-between"><span className="flex items-center gap-2 text-sm font-bold"><Volume2 size={16} className="text-emerald-300" /> Âm thanh video gốc</span><span className="text-xs font-bold text-emerald-300">{project.settings.originalAudioVolume}%</span></div><p className="mt-2 text-[11px] text-white/35">Giữ nhẹ không khí và âm thanh nền bên dưới giọng mới.</p><input type="range" min={0} max={40} step={1} value={project.settings.originalAudioVolume} onChange={(event) => patchSettings({ originalAudioVolume: Number(event.target.value) })} disabled={running} className="mt-4 w-full accent-emerald-400" /><div className="mt-1 flex justify-between text-[10px] text-white/25"><span>Tắt tiếng gốc</span><span>Rõ hơn</span></div></div>
-
-            {stage === 'voice-error' && <div className="mt-4 rounded-2xl border border-amber-400/25 bg-amber-400/10 p-4"><p className="text-sm font-bold text-amber-200">Lồng tiếng bị gián đoạn ở đoạn {voiceProgress.done + 1}/{voiceProgress.total}</p>{voiceErrorMsg && <p className="mt-2 text-xs text-amber-200/65">{voiceErrorMsg}</p>}<button onClick={retryVoice} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-amber-300 px-3 py-2 text-xs font-bold text-black"><RotateCcw size={13} /> Tiếp tục từ đoạn lỗi</button></div>}
-            {stage === 'done' && resultPath && <div className="mt-4 flex items-center gap-3 rounded-2xl border border-emerald-400/25 bg-emerald-400/10 p-4 text-sm text-emerald-200"><Check size={16} className="shrink-0" /><div className="min-w-0 flex-1"><p className="font-bold">Hoàn tất</p><p className="mt-1 truncate text-[11px] text-emerald-100/60" title={resultPath}>{resultPath}</p></div><button type="button" onClick={() => window.gensuite.shell.showItemInFolder(resultPath)} className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-emerald-200/15 px-3 py-2 text-[10px] font-bold text-emerald-100/75 hover:bg-white/[0.05]"><FolderOpen size={13} /> Mở thư mục</button></div>}
-          </div>}
-        </section>
-
-      <footer className={`mx-auto flex w-full shrink-0 items-center gap-3 rounded-2xl border border-white/[0.08] bg-[#151516]/95 p-3 shadow-2xl backdrop-blur-xl ${setupStep === 'subtitle' ? 'mt-2 max-w-none' : 'mt-4 max-w-5xl'}`}>
-        {running ? <div className="min-w-0 flex-1 px-2"><p className="flex items-center gap-2 truncate text-xs font-semibold text-emerald-200"><Loader2 size={15} className="shrink-0 animate-spin" /> {taskMode === 'batch' && activeBatchId ? `Video ${Math.max(1, batchItems.findIndex((item) => item.id === activeBatchId) + 1)}/${batchItems.length} · ` : ''}{stageLabel()}</p><div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-emerald-400 transition-all" style={{ width: `${stage === 'download' ? downloadPercent : stage === 'transcribe' ? (transcribePercent ?? 1) : stage === 'merge' ? mergePercent : stage === 'align' ? (alignmentProgress.total ? (alignmentProgress.done / alignmentProgress.total) * 100 : 0) : stage === 'voice' && voiceProgress.total ? (voiceProgress.done / voiceProgress.total) * 100 : 18}%` }} /></div></div> : <div className="min-w-0 flex-1 px-2"><p className="truncate text-xs font-semibold text-white/60">Bước {currentStepIndex + 1}/4 · {SETUP_STEPS[currentStepIndex].label}</p><p className="mt-0.5 truncate text-[10px] text-white/25">{sourceReady ? taskMode === 'batch' ? `${batchItems.length} video · ${completedBatchCount} đã xong` : `${sourceLanguageLabel} → ${targetLanguageLabel}` : 'Hãy chọn video để bắt đầu'}</p></div>}
-        {stage === 'transcribe' && <button type="button" onClick={() => void cancelRecognition()} className="inline-flex items-center gap-2 rounded-xl border border-red-300/20 px-4 py-3 text-xs font-bold text-red-200/80 hover:bg-red-400/10"><X size={14} /> Dừng</button>}
-        {currentStepIndex > 0 && !running && <button onClick={goBack} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-xs font-bold text-white/55 hover:text-white"><ArrowLeft size={14} /> Quay lại</button>}
-        {setupStep !== 'export' ? <button onClick={() => void goNext()} disabled={running || !stepReady(setupStep)} className="primary-action inline-flex items-center gap-2 rounded-xl px-5 py-3 text-xs font-bold disabled:opacity-40">{running && setupStep === 'voice' ? <><Loader2 size={14} className="animate-spin" /> Đang chuẩn bị review</> : <>Tiếp tục <ChevronRight size={14} /></>}</button> : <button onClick={run} disabled={running || !sourceReady || !voiceConfig.voiceId || (taskMode === 'batch' && remainingBatchCount === 0)} className="primary-action inline-flex min-w-40 items-center justify-center gap-2 rounded-xl px-5 py-3 text-xs font-bold disabled:opacity-40">{running ? <><Loader2 size={15} className="animate-spin" /> Đang xử lý</> : <><Play size={15} /> {taskMode === 'batch' ? remainingBatchCount === 0 ? 'Đã hoàn tất' : completedBatchCount ? 'Chạy phần còn lại' : `Tạo ${batchItems.length} video` : 'Tạo video'}</>}</button>}
-      </footer>
-      </div>
-
+  return <div ref={studioRef} className="mx-auto flex min-h-full w-full max-w-[1180px] flex-col px-5 py-5">
+    <div className="mb-4">
+      <p className="text-[10px] font-black uppercase tracking-[0.22em] text-emerald-400">Bản địa hóa video</p>
+      <h1 className="mt-1 text-2xl font-black tracking-tight text-white">Dịch và tạo dự án chỉnh sửa</h1>
+      <p className="mt-1 text-xs text-white/35">GenSuite xử lý lời thoại và giọng đọc; bạn hoàn thiện phụ đề, hiệu ứng và bố cục trong CapCut.</p>
     </div>
-  );
+
+    {error && <div className="mb-4 rounded-xl border border-red-400/20 bg-red-400/[0.07] px-4 py-3 text-xs text-red-200">{error}</div>}
+    {missingKey && <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[0.06] px-4 py-3"><p className="flex items-center gap-2 text-xs text-amber-100"><KeyRound size={14} /> Cần hoàn tất cấu hình cho nguồn đã chọn.</p><button type="button" onClick={onOpenSettings} className="rounded-lg border border-white/10 px-3 py-2 text-[10px] font-bold text-white/70">Mở cài đặt</button></div>}
+
+    {setupStep === 'source' ? <div className="grid flex-1 gap-4 lg:grid-cols-[1.05fr_0.95fr]">
+      <section className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-5">
+        <div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-emerald-400/10 text-emerald-300"><FileVideo size={19} /></span><div><h2 className="text-base font-black text-white">Video và ngôn ngữ</h2><p className="text-[11px] text-white/35">Video phải tải xong trước khi chuyển sang xử lý.</p></div></div>
+        <div key={`video-${missingVideo ? validationAttempt : 0}`} data-validation-error={missingVideo || undefined} className={`mt-5 rounded-2xl border p-4 ${missingVideo ? 'validation-attention' : 'border-white/[0.07]'}`}>
+          <div role="tablist" aria-label="Nguồn video" className="grid grid-cols-2 rounded-xl border border-white/[0.07] bg-black/20 p-1">
+            <button type="button" role="tab" aria-selected={sourceInputMode === 'link'} onClick={() => { setSourceInputMode('link'); useProjectStore.getState().patchSettings({ localizeSourceInputMode: 'link' }); }} disabled={running} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[11px] font-bold transition ${sourceInputMode === 'link' ? 'bg-white/[0.09] text-white shadow-sm' : 'text-white/35 hover:text-white/60'} disabled:opacity-40`}><Link2 size={14} />Liên kết video</button>
+            <button type="button" role="tab" aria-selected={sourceInputMode === 'file'} onClick={() => { setSourceInputMode('file'); useProjectStore.getState().patchSettings({ localizeSourceInputMode: 'file' }); }} disabled={running} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[11px] font-bold transition ${sourceInputMode === 'file' ? 'bg-white/[0.09] text-white shadow-sm' : 'text-white/35 hover:text-white/60'} disabled:opacity-40`}><Upload size={14} />File từ máy</button>
+          </div>
+          {sourceInputMode === 'link' ? <div role="tabpanel" className="pt-4">
+            <label htmlFor="localize-video-url" className="text-[10px] font-black uppercase tracking-[0.14em] text-white/35">Đường dẫn video</label>
+            <div className="field-surface mt-2 flex items-center gap-2 rounded-xl px-3 py-3"><Link2 size={15} className="text-white/30" /><input id="localize-video-url" value={url} onChange={(event) => { const nextUrl = event.target.value; setUrl(nextUrl); useProjectStore.getState().patchSettings({ localizeSourceUrl: nextUrl }); }} disabled={running} placeholder="Dán liên kết video…" className="min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/25" /></div>
+            {sourceName && sourcePreparedForMode && <div className="mt-3 rounded-lg bg-emerald-400/[0.06] px-3 py-2.5"><p className="text-[11px] font-semibold text-emerald-300"><CheckCircle2 size={13} className="mr-1.5 inline" />Video từ liên kết đã sẵn sàng</p><p className="mt-1 truncate pl-[19px] text-[9px] text-white/30">{sourceName}</p></div>}
+            {replacingExistingSource && <div className="mt-3 rounded-lg border border-amber-300/15 bg-amber-300/[0.05] px-3 py-2.5 text-[10px] leading-4 text-amber-100/65">Liên kết đã thay đổi. Khi bắt đầu xử lý, video mới sẽ thay thế dữ liệu xử lý cũ trong dự án này.</div>}
+          </div> : <div role="tabpanel" className="pt-4">
+            <button type="button" onClick={() => void importFile()} disabled={running} className="flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-white/15 bg-white/[0.015] py-5 text-xs font-bold text-white/60 transition hover:border-emerald-300/30 hover:bg-emerald-300/[0.035] hover:text-emerald-100 disabled:opacity-40"><Upload size={16} /> Chọn video từ máy</button>
+            {sourceName && project.settings.localizePreparedSourceMode === 'file' && <p className="mt-3 truncate rounded-lg bg-emerald-400/[0.06] px-3 py-2.5 text-[11px] font-semibold text-emerald-300"><CheckCircle2 size={13} className="mr-1.5 inline" />{sourceName}</p>}
+          </div>}
+          {missingVideo && <p className="mt-3 text-[10px] font-semibold text-red-300">{sourceInputMode === 'link' ? 'Vui lòng dán liên kết video.' : 'Vui lòng chọn file video từ máy.'}</p>}
+        </div>
+        {stage === 'download' && <div className="mt-4 rounded-xl border border-emerald-400/20 bg-emerald-400/[0.05] p-4"><div className="flex justify-between text-xs font-bold text-emerald-200"><span>{downloadLabel}</span><span>{Math.round(downloadPercent)}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-emerald-400 transition-[width]" style={{ width: `${downloadPercent}%` }} /></div></div>}
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <label key={`source-language-${missingSourceLanguage ? validationAttempt : 0}`} data-validation-error={missingSourceLanguage || undefined} className="block min-w-0"><span className="mb-2 block text-[10px] font-black uppercase tracking-[0.12em] text-white/35">Ngôn ngữ gốc</span><AppSelect value={project.settings.localizeSourceLanguageConfirmed ? sourceLanguage : ''} options={SOURCE_OPTIONS} onChange={(value) => { setSourceLanguage(value); useProjectStore.getState().setLanguages({ sourceLanguage: value }); useProjectStore.getState().patchSettings({ localizeSourceLanguageConfirmed: true }); }} disabled={running} ariaLabel="Ngôn ngữ gốc" className={`rounded-xl px-3 py-3 text-sm ${missingSourceLanguage ? 'validation-attention' : ''}`} />{missingSourceLanguage && <span className="mt-2 block text-[10px] font-semibold text-red-300">Vui lòng chọn ngôn ngữ gốc.</span>}</label>
+          <label key={`target-language-${missingTargetLanguage ? validationAttempt : 0}`} data-validation-error={missingTargetLanguage || undefined} className="block min-w-0"><span className="mb-2 block text-[10px] font-black uppercase tracking-[0.12em] text-white/35">Dịch sang</span><AppSelect value={project.settings.localizeTargetLanguageConfirmed ? targetLanguage : ''} options={TARGET_OPTIONS} onChange={(value) => { setTargetLanguage(value); useProjectStore.getState().setLanguages({ targetLanguage: value }); useProjectStore.getState().patchSettings({ localizeTargetLanguageConfirmed: true }); }} disabled={running} ariaLabel="Ngôn ngữ đích" className={`rounded-xl px-3 py-3 text-sm ${missingTargetLanguage ? 'validation-attention' : ''}`} />{missingTargetLanguage && <span className="mt-2 block text-[10px] font-semibold text-red-300">Vui lòng chọn ngôn ngữ đích.</span>}</label>
+          <label key={`accuracy-${missingAccuracy ? validationAttempt : 0}`} data-validation-error={missingAccuracy || undefined} className="block min-w-0 sm:col-span-2"><span className="mb-2 block text-[10px] font-black uppercase tracking-[0.12em] text-white/35">Độ chính xác nhận dạng</span><AppSelect value={project.settings.localizeAccuracyConfirmed ? project.settings.whisperModel : ''} options={ACCURACY_OPTIONS} onChange={(value) => { useProjectStore.getState().setWhisperModel(value as WhisperModelName); useProjectStore.getState().patchSettings({ localizeAccuracyConfirmed: true }); }} disabled={running} ariaLabel="Độ chính xác nhận dạng" className={`rounded-xl px-3 py-3 text-sm ${missingAccuracy ? 'validation-attention' : ''}`} />{missingAccuracy && <span className="mt-2 block text-[10px] font-semibold text-red-300">Vui lòng chọn độ chính xác.</span>}</label>
+        </div>
+        <div className="mt-4 rounded-2xl border border-white/[0.07] p-4"><EngineToggle<'free' | 'paid'> label="Cách dịch" value={project.settings.scriptEngine === 'gensuite' ? 'paid' : 'free'} options={[{ value: 'free', label: 'Dùng khóa riêng', hint: 'Dùng cấu hình dịch của bạn', badge: 'free' }, { value: 'paid', label: 'Dùng credits', hint: canUseCloud ? 'Trừ credits trong tài khoản' : 'Cần gói Basic trở lên', premium: true, badge: 'cloud', disabled: entitlementStatus !== 'ready' || !canUseCloud }]} onChange={(value) => setTranslatePaid(value === 'paid')} /></div>
+        <div className="mt-4 rounded-2xl border border-white/[0.07] p-4">
+          <div className="flex items-center justify-between gap-3"><div><p className="flex items-center gap-2 text-sm font-bold text-white/75"><Layers3 size={15} className="text-emerald-300" /> Nơi lưu dự án CapCut</p><p className="mt-1 max-w-[390px] truncate text-[10px] text-white/30">{project.settings.capcutDraftsDirectory || 'Tự động tìm thư mục dự án'}</p></div><button type="button" onClick={() => void chooseCapCutDirectory()} disabled={running} className="rounded-lg border border-white/10 px-3 py-2 text-[10px] font-bold text-white/60"><FolderOpen size={13} className="mr-1.5 inline" />Chọn thư mục</button></div>
+        </div>
+      </section>
+      <aside className="min-h-[680px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0f0f10]"><VoiceConfigPanel feature="localize-cloud" onMissingKey={setMissingKey} validation={{ attempt: validationAttempt, providerMissing: missingVoiceProvider, voiceMissing: missingVoice }} /></aside>
+    </div> : <section className="flex-1 p-5">
+      <PipelineProgressPanel steps={pipelineProgress} running={running} inactivitySeconds={inactivitySeconds} />
+
+      {videoLoginPlatform && <div className="mt-4 rounded-2xl border border-amber-300/25 bg-[linear-gradient(115deg,rgba(120,53,15,.2),rgba(245,158,11,.07))] p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-amber-300/12 text-amber-200"><LogIn size={18} /></span>
+          <div className="min-w-[220px] flex-1"><p className="text-sm font-black text-amber-100">Cần xác nhận quyền truy cập {videoLoginPlatform === 'douyin' ? 'Douyin' : 'TikTok'}</p><p className="mt-1 text-[10px] leading-4 text-amber-100/55">Mở cửa sổ xác nhận, hoàn tất thao tác rồi GenSuite sẽ tự thử tải lại video.</p>{videoSessionCleared && <p className="mt-1.5 text-[10px] font-semibold text-emerald-300">Đã xóa phiên cũ. Bạn có thể xác nhận lại.</p>}</div>
+          <div className="flex items-center gap-2"><button type="button" onClick={() => void clearVideoPlatformSession()} disabled={videoLoginBusy} className="inline-flex items-center gap-2 rounded-xl border border-amber-200/15 px-3 py-2.5 text-[10px] font-bold text-amber-100/65 disabled:opacity-40"><Trash2 size={13} />Xóa phiên cũ</button><button type="button" onClick={() => void loginVideoPlatform()} disabled={videoLoginBusy} className="inline-flex items-center gap-2 rounded-xl bg-amber-300 px-4 py-2.5 text-[10px] font-black text-black disabled:opacity-50">{videoLoginBusy ? <Loader2 size={13} className="animate-spin" /> : <LogIn size={13} />}Mở cửa sổ xác nhận</button></div>
+        </div>
+      </div>}
+
+      {stage === 'error' && failedStep && pipelineFailure && <div className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-red-300/20 bg-red-400/[0.06] p-4">
+        <div className="min-w-[220px] flex-1">
+          <p className="text-xs font-black text-red-100">Quá trình đã dừng</p>
+          <p className="mt-1 text-[10px] leading-4 text-red-100/55">Sao chép thông tin chẩn đoán để gửi cho đội ngũ hỗ trợ. Nội dung không chứa video, đường dẫn hay dữ liệu riêng của bạn.</p>
+          {diagnosticCopyState === 'copied' && <p className="mt-1.5 text-[10px] font-semibold text-emerald-300">Đã sao chép. Bạn có thể dán trực tiếp vào tin nhắn hỗ trợ.</p>}
+          {diagnosticCopyState === 'error' && <p className="mt-1.5 text-[10px] font-semibold text-red-300">Chưa thể sao chép. Vui lòng thử lại.</p>}
+        </div>
+        <button type="button" onClick={() => void copyFailureDiagnostics()} className="inline-flex items-center gap-2 rounded-xl border border-red-200/20 bg-red-300/[0.07] px-4 py-3 text-[10px] font-black text-red-100 transition hover:bg-red-300/[0.12] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300/40">
+          <ClipboardCopy size={14} />{diagnosticCopyState === 'copied' ? 'Đã sao chép' : 'Sao chép log lỗi'}
+        </button>
+      </div>}
+
+      {capcutReady && !sourceSelectionChanged && <div className="relative mt-5 overflow-hidden rounded-2xl border border-emerald-300/25 bg-[linear-gradient(115deg,rgba(6,78,59,.34),rgba(16,185,129,.08)_48%,rgba(15,23,42,.18))] p-5 shadow-[0_22px_55px_rgba(0,0,0,.18)]">
+        <div className="pointer-events-none absolute -right-16 -top-24 h-56 w-56 rounded-full bg-emerald-300/10 blur-3xl" />
+        <div className="relative flex flex-wrap items-center gap-4">
+          <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-emerald-200/25 bg-emerald-300/15 text-emerald-200 shadow-[0_0_30px_rgba(52,211,153,.12)]"><Sparkles size={21} /></span>
+          <div className="min-w-[220px] flex-1"><p className="text-base font-black text-white">Dự án CapCut đã sẵn sàng</p><p className="mt-1 text-[11px] text-white/45">Mở CapCut để hoàn thiện phụ đề, hiệu ứng và bố cục theo phong cách của bạn.</p><div className="mt-3 flex flex-wrap gap-2"><span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{validScenes(project).length} câu thoại</span><span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{languageLabel(targetLanguage)}</span><span className="max-w-[220px] truncate rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{friendlyVoiceLabel(project)}</span></div></div>
+          <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => void runPipeline(false)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-3 text-[10px] font-bold text-white/55 transition hover:bg-white/[0.05] hover:text-white"><RotateCcw size={13} />Tạo lại</button><button type="button" onClick={() => window.gensuite.shell.showItemInFolder(project.capcutDraftPath!)} className="primary-action inline-flex items-center gap-2 rounded-xl px-4 py-3 text-[10px] font-black"><FolderOpen size={14} />Mở thư mục dự án</button></div>
+        </div>
+      </div>}
+
+      <div className="mt-4 overflow-hidden rounded-xl border border-white/[0.055] bg-black/10">
+        <button type="button" onClick={() => setDetailsOpen((open) => !open)} aria-expanded={detailsOpen} className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-white/[0.025]"><span><span className="block text-[11px] font-bold text-white/65">Chi tiết quá trình xử lý</span><span className="mt-0.5 block text-[9px] text-white/25">Video, ngôn ngữ, giọng đọc và tên dự án đầu ra</span></span><ChevronDown size={14} className={`text-white/30 transition-transform ${detailsOpen ? 'rotate-180' : ''}`} /></button>
+        {detailsOpen && <div className="grid gap-px border-t border-white/[0.055] bg-white/[0.045] sm:grid-cols-2 lg:grid-cols-4">
+          <div className="min-w-0 bg-[#151617] p-3.5"><p className="text-[8px] font-black uppercase tracking-[0.16em] text-white/25">Video</p><p className="mt-1.5 truncate text-[11px] font-bold text-white/65">{sourceName || 'Chưa chọn'}</p></div>
+          <div className="min-w-0 bg-[#151617] p-3.5"><p className="text-[8px] font-black uppercase tracking-[0.16em] text-white/25">Ngôn ngữ</p><p className="mt-1.5 truncate text-[11px] font-bold text-white/65">{languageLabel(sourceLanguage)} → {languageLabel(targetLanguage)}</p></div>
+          <div className="min-w-0 bg-[#151617] p-3.5"><p className="text-[8px] font-black uppercase tracking-[0.16em] text-white/25">Giọng đọc</p><p className="mt-1.5 truncate text-[11px] font-bold text-white/65">{friendlyVoiceLabel(project)}</p></div>
+          <div className="min-w-0 bg-[#151617] p-3.5"><p className="text-[8px] font-black uppercase tracking-[0.16em] text-white/25">Kết quả</p><p className="mt-1.5 truncate text-[11px] font-bold text-white/65">{project.capcutDraftName || 'Đang chờ'}</p></div>
+        </div>}
+      </div>
+    </section>}
+
+    <footer className="sticky bottom-0 mt-4 flex items-center justify-between gap-3 rounded-2xl border border-white/[0.08] bg-[#151617]/95 px-4 py-3 backdrop-blur">
+      <div><p className="text-xs font-bold text-white/65">{setupStep === 'source' ? 'Bước 1/2 · Thiết lập' : 'Bước 2/2 · Xử lý & xuất'}</p><p className="mt-0.5 text-[10px] text-white/25">{setupStep === 'source' ? 'Kiểm tra thiết lập trước khi bắt đầu' : activeStep?.detail || failedStep?.detail || (capcutReady ? 'Hoàn tất' : 'Sẵn sàng tiếp tục')}</p></div>
+      <div className="flex items-center gap-2">
+        {setupStep === 'process' && !running && <button type="button" onClick={() => onSetupStepChange('source')} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-xs font-bold text-white/55"><ArrowLeft size={15} />Thiết lập</button>}
+        {running ? <button type="button" onClick={() => void cancelCurrent()} disabled={stage !== 'recognition' && stage !== 'voice'} className="inline-flex items-center gap-2 rounded-xl border border-red-400/20 px-4 py-3 text-xs font-bold text-red-200 disabled:opacity-30"><X size={15} />Dừng</button>
+          : (!capcutReady || sourceSelectionChanged) && <button type="button" onClick={setupStep === 'source' ? startFromSetup : () => void runPipeline(false)} className="primary-action inline-flex min-w-44 items-center justify-center gap-2 rounded-xl px-5 py-3 text-xs font-black">{stage === 'error' ? <RotateCcw size={15} /> : <Play size={15} />}{stage === 'error' ? 'Thử lại từ checkpoint' : setupStep === 'source' ? 'Bắt đầu xử lý' : 'Tiếp tục xử lý'}</button>}
+      </div>
+    </footer>
+  </div>;
 }

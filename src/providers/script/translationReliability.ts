@@ -2,7 +2,7 @@ import type { TranscriptSegment } from '../../shared/types';
 import { findConsecutiveRepetitionRuns, normalizeTranscriptText, type RepetitionRun } from '../../shared/transcriptQuality';
 import { clientAppError } from '../clientAppError';
 import { buildTranslatePrompt, parseTranslationJson } from './prompt';
-import type { TranslateRequest } from './types';
+import type { TranslateRequest, TranslationProgress } from './types';
 
 export const MAX_TRANSLATION_BATCH_SEGMENTS = 32;
 export const MAX_TRANSLATION_BATCH_CHARS = 4_800;
@@ -113,17 +113,28 @@ async function translateCompleteBatch(
   req: TranslateRequest,
   segments: TranscriptSegment[],
   call: (prompt: string) => Promise<string>,
+  heartbeat: () => void,
 ): Promise<TranscriptSegment[]> {
+  let raw: string;
+  try {
+    heartbeat();
+    raw = await call(buildTranslatePrompt({ ...req, segments }));
+  } catch (error) {
+    throw error;
+  }
+
   let translated: TranscriptSegment[];
   try {
-    translated = parseTranslationJson(await call(buildTranslatePrompt({ ...req, segments })), segments);
+    translated = parseTranslationJson(raw, segments);
   } catch (error) {
-    if (!(error instanceof Error) || error.message !== 'TRANSLATION_RESULT_INCOMPLETE') throw error;
+    if (!(error instanceof Error) || error.message !== 'TRANSLATION_RESULT_INCOMPLETE') {
+      throw clientAppError('TRANSLATION_RESULT_INVALID');
+    }
     if (segments.length <= 1) throw clientAppError('TRANSLATION_RESULT_INCOMPLETE');
     const midpoint = Math.ceil(segments.length / 2);
     return [
-      ...await translateCompleteBatch(req, segments.slice(0, midpoint), call),
-      ...await translateCompleteBatch(req, segments.slice(midpoint), call),
+      ...await translateCompleteBatch(req, segments.slice(0, midpoint), call, heartbeat),
+      ...await translateCompleteBatch(req, segments.slice(midpoint), call, heartbeat),
     ];
   }
 
@@ -135,6 +146,7 @@ async function translateCompleteBatch(
     for (let index = run.startIndex; index <= run.endIndex; index += 1) {
       const one = segments[index];
       try {
+        heartbeat();
         repaired[index] = parseTranslationJson(await call(buildTranslatePrompt({ ...req, segments: [one] })), [one])[0];
       } catch (error) {
         if (error instanceof Error && error.message === 'TRANSLATION_RESULT_INCOMPLETE') {
@@ -163,6 +175,11 @@ export async function translateSegmentsReliably(
     completed: {},
   } satisfies TranslationCheckpoint;
   const translated: TranscriptSegment[] = [];
+  const report = (progress: Omit<TranslationProgress, 'totalSegments' | 'batchCount'>) => req.onProgress?.({
+    ...progress,
+    totalSegments: req.segments.length,
+    batchCount: batches.length,
+  });
 
   for (let index = 0; index < batches.length; index += 1) {
     const batch = batches[index];
@@ -172,11 +189,20 @@ export async function translateSegmentsReliably(
       : null;
     if (result && findTranslationCollapseRuns(batch.segments, result).length) result = null;
     if (!result) {
-      result = await translateCompleteBatch(req, batch.segments, call);
+      result = await translateCompleteBatch(req, batch.segments, call, () => report({
+        completedSegments: translated.length,
+        batchNumber: index + 1,
+        phase: 'requesting',
+      }));
       checkpoint.completed[String(index)] = result.map((segment) => segment.text);
       saveCheckpoint(identity, checkpoint);
     }
     translated.push(...result);
+    report({
+      completedSegments: translated.length,
+      batchNumber: index + 1,
+      phase: index === batches.length - 1 ? 'validating' : 'completed',
+    });
   }
 
   const crossBatchCollapse = findTranslationCollapseRuns(req.segments, translated);
@@ -185,6 +211,7 @@ export async function translateSegmentsReliably(
       for (let index = run.startIndex; index <= run.endIndex; index += 1) {
         const one = req.segments[index];
         try {
+          report({ completedSegments: index, batchNumber: batches.length, phase: 'validating' });
           translated[index] = parseTranslationJson(await call(buildTranslatePrompt({ ...req, segments: [one] })), [one])[0];
         } catch (error) {
           if (error instanceof Error && error.message === 'TRANSLATION_RESULT_INCOMPLETE') {
@@ -197,5 +224,6 @@ export async function translateSegmentsReliably(
   }
   if (findTranslationCollapseRuns(req.segments, translated).length) throw clientAppError('TRANSLATION_REPETITION_DETECTED');
   removeCheckpoint(identity);
+  report({ completedSegments: req.segments.length, batchNumber: batches.length, phase: 'completed' });
   return translated;
 }

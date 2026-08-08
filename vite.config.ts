@@ -18,7 +18,7 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              external: ['electron', 'systeminformation', 'msedge-tts'],
+              external: ['electron', 'systeminformation', 'msedge-tts', 'capcut-cli'],
             },
           },
         },
