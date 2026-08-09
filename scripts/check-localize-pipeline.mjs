@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 
-const [studio, panel, voicePanel, appStyles, appErrors, projectStore, diagnosticSummary, preload, mainProcess, mainErrors] = await Promise.all([
+const [studio, panel, voicePanel, appStyles, appErrors, projectStore, diagnosticSummary, preload, mainProcess, mainErrors, runtimeStore, projectHome, app, jobMain, jobContract, translationReliability, voiceReliability, cloudRecognition, entitlements, freeVoiceAdapter, freeVoiceMain] = await Promise.all([
   readFile('src/steps/LocalizeStudio.tsx', 'utf8'),
   readFile('src/components/PipelineProgressPanel.tsx', 'utf8'),
   readFile('src/components/VoiceConfigPanel.tsx', 'utf8'),
@@ -11,8 +11,32 @@ const [studio, panel, voicePanel, appStyles, appErrors, projectStore, diagnostic
   readFile('electron/preload.ts', 'utf8'),
   readFile('electron/main.ts', 'utf8'),
   readFile('electron/ipc/appErrors.ts', 'utf8'),
+  readFile('src/store/localizeRuntimeStore.ts', 'utf8'),
+  readFile('src/components/ProjectHome.tsx', 'utf8'),
+  readFile('src/App.tsx', 'utf8'),
+  readFile('electron/ipc/localizeJob.ts', 'utf8'),
+  readFile('src/shared/localizeJob.ts', 'utf8'),
+  readFile('src/providers/script/translationReliability.ts', 'utf8'),
+  readFile('src/providers/voice/voiceReliability.ts', 'utf8'),
+  readFile('src/providers/transcription/GenSuiteSttAdapter.ts', 'utf8'),
+  readFile('src/store/entitlementStore.ts', 'utf8'),
+  readFile('src/providers/voice/CapCutTtsAdapter.ts', 'utf8'),
+  readFile('electron/ipc/capcuttts.ts', 'utf8'),
 ]);
 const violations = [];
+
+if (!/free:\s*1[\s\S]*starter:\s*2[\s\S]*basic:\s*2[\s\S]*standard:\s*4[\s\S]*pro:\s*6/.test(entitlements)) {
+  violations.push('Số luồng tạo voice chưa bám đúng tier tài khoản.');
+}
+if (!/voiceEngine === 'capcuttts'\s*\?\s*voiceConcurrencyForTier\(tier\)\s*:\s*1/.test(studio)
+  || !/Array\.from\(\{ length: Math\.min\(concurrency, pending\.length\) \}/.test(studio)) {
+  violations.push('GenVoice Free TTS 2 chưa dùng pool theo tier trong pipeline dịch video.');
+}
+if (!freeVoiceAdapter.includes('concurrency: voiceConcurrencyForTier(useEntitlementStore.getState().tier)')
+  || !freeVoiceMain.includes('acquireVoiceSlot(concurrency, controller.signal)')
+  || !freeVoiceMain.includes('Math.min(concurrency, chunks.length)')) {
+  violations.push('Ngân sách luồng GenVoice Free TTS 2 chưa được áp dụng thống nhất cho văn bản dài.');
+}
 
 for (const id of ['download', 'recognition', 'translation', 'voice', 'capcut']) {
   if (!new RegExp(`id:\\s*['\"]${id}['\"]`).test(studio)) violations.push(`Thiếu giai đoạn tiến độ ${id}.`);
@@ -41,7 +65,7 @@ if (!studio.includes("stage === 'error' && failedStep && pipelineFailure")) {
   violations.push('Nút sao chép chẩn đoán chưa được giới hạn cho trạng thái pipeline thực sự bị dừng.');
 }
 
-if (!studio.includes('occurredAt: new Date().toISOString()') || !studio.includes('setPipelineFailure(null)')) {
+if (!studio.includes('const occurredAt = new Date().toISOString()') || !studio.includes('setPipelineFailure(null)')) {
   violations.push('Log hỗ trợ chưa được chụp đúng thời điểm lỗi hoặc chưa được xóa khi bắt đầu lần xử lý mới.');
 }
 const singleFailureCopy = mainProcess.match(/ipcMain\.handle\('diagnostics:copy-failure'[\s\S]*?\n  \}\);/u)?.[0] ?? '';
@@ -61,19 +85,49 @@ if (!studio.includes('restorePipelineProgress(project)')
   || !studio.includes('Đã lưu ${voiceCount}/${scenes.length} câu · Có thể tiếp tục')) {
   violations.push('Pipeline chưa khôi phục checkpoint tải, nhận dạng, dịch, voice và CapCut.');
 }
-if (!studio.includes('restoredProjectIdRef') || !studio.includes('setPipelineProgress(restorePipelineProgress(project))')) {
+if (!studio.includes('restoredProjectIdRef')
+  || !studio.includes('restoredRuntime?.steps ?? restorePipelineProgress(project)')
+  || !studio.includes('useLocalizeRuntimeStore.getState().jobs[project.id]')) {
   violations.push('Checkpoint chưa được nạp lại khi mở dự án khác.');
 }
+if (!runtimeStore.includes("export type LocalizeRuntimeStatus = 'running' | 'blocked' | 'error' | 'cancelled' | 'completed'")
+  || !studio.includes("status: 'error'")
+  || !studio.includes("status: 'completed'")
+  || !app.includes("setLocalizeSetupStep(localizeRuntime ? 'process' : 'source')")) {
+  violations.push('Tác vụ nền chưa giữ trạng thái hoặc chưa tự mở lại bước tiến độ của đúng dự án.');
+}
+if (!projectHome.includes('localizeOverallPercent(runtime)')
+  || !projectHome.includes('LOCALIZE_STAGE_LABEL[runtime.stage]')
+  || !projectHome.includes("runtime?.status === 'error' || runtime?.status === 'blocked'")) {
+  violations.push('Thẻ dự án ở Home chưa hiển thị công đoạn, phần trăm và lỗi của tác vụ nền.');
+}
 const runPipelineBody = studio.match(/const runPipeline = async[\s\S]*?\n  \};\n\n  const chooseCapCutDirectory/u)?.[0] ?? '';
-if (!/touchStage\('download', 0, 'Đang chuẩn bị tải video'\);[\s\S]*onSetupStepChange\('process'\);[\s\S]*requestAnimationFrame[\s\S]*runPipeline\(true, true\)/u.test(studio)
+if (!/touchStage\('download', 0, 'Đang chuẩn bị tải video'\);[\s\S]*onSetupStepChange\('process'\);[\s\S]*requestAnimationFrame[\s\S]*runPipeline\(true\)/u.test(studio)
   || runPipelineBody.includes("onSetupStepChange('process')")) {
   violations.push('Pipeline phải chuyển sang bước 2 và render màn tiến trình trước khi bắt đầu tải video.');
 }
-if (!studio.includes('const startFromSetup = () =>')
+if (!studio.includes('const startFromSetup = async () =>')
   || !studio.includes('if (startValidationMissing)')
   || !studio.includes('data-validation-error={missingVideo || undefined}')
   || studio.includes("disabled={setupStep === 'source' && !readyToStart}")) {
   violations.push('Nút bắt đầu chưa luôn bấm được hoặc chưa chặn chuyển bước bằng validation trực quan.');
+}
+if (!jobMain.includes("ipcMain.handle('localize:start'")
+  || !jobMain.includes("ipcMain.handle('localize:update'")
+  || !jobMain.includes('localize-job.backup.json')
+  || !jobMain.includes('reconcileStale')
+  || !jobContract.includes('LOCALIZE_STAGE_WEIGHTS')
+  || !runtimeStore.includes('window.gensuite.localize.list()')
+  || !runtimeStore.includes('window.gensuite.localize.onJob')) {
+  violations.push('Pipeline V2 chưa có manifest bền vững, heartbeat và cơ chế attach tác vụ nền.');
+}
+if (translationReliability.includes('localStorage')
+  || voiceReliability.includes('localStorage')
+  || cloudRecognition.includes('localStorage')
+  || !translationReliability.includes("scope: 'translation'")
+  || !voiceReliability.includes("scope: 'voice'")
+  || !cloudRecognition.includes("scope: 'cloud-recognition'")) {
+  violations.push('Checkpoint dịch, voice hoặc nhận dạng trực tuyến vẫn phụ thuộc bộ nhớ tạm của màn hình.');
 }
 if (!studio.includes("type SourceInputMode = 'link' | 'file'")
   || !studio.includes('role="tablist"')

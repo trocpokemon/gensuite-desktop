@@ -3,6 +3,14 @@
 // matches an actual handler signature in electron/ipc/*.
 
 import type { IpcResult, PublicAppError } from './appErrors';
+import type {
+  LocalizeCheckpointReadArgs,
+  LocalizeCheckpointWriteArgs,
+  LocalizeJobIdentity,
+  LocalizeJobManifest,
+  LocalizeJobStartArgs,
+  LocalizeJobUpdateArgs,
+} from './localizeJob';
 
 export type AspectRatio = '16:9' | '9:16';
 export type LocalizeAspectRatio = 'original' | AspectRatio;
@@ -586,6 +594,8 @@ export interface CapCutTtsSynthesizeArgs {
   voiceId: string;
   resourceId: string;
   speed?: number;
+  /** Account-bound worker budget. Main process clamps this to the supported range. */
+  concurrency?: number;
 }
 
 export interface CapCutTtsSynthesizeResult {
@@ -771,6 +781,8 @@ export interface WhisperModelDownloadArgs {
 }
 
 export interface WhisperProgress {
+  /** Project that owns this recognition event, when the operation is project-scoped. */
+  projectId?: string;
   /** Coarse phase so the renderer can label the bar. */
   phase: 'extracting' | 'downloading-model' | 'transcribing' | 'complete';
   /** 0–100 where measurable (data download or recognized audio); omitted for indeterminate work. */
@@ -872,10 +884,23 @@ export interface GensuiteBridge {
     onProgress(cb: (p: FfmpegProgress) => void): () => void;
   };
   capcut: {
+    /** Launch the installed editor so the newly created project can be opened. */
+    launch(): Promise<IpcResult<boolean>>;
     /** Create a real editable project with separate video, narration, music and subtitle tracks. */
     exportDraft(args: CapCutDraftExportArgs): Promise<IpcResult<CapCutDraftExportResult>>;
     /** Choose the project-store directory when it cannot be detected automatically. */
     selectDraftsDirectory(): Promise<IpcResult<string | null>>;
+  };
+  localize: {
+    start(args: LocalizeJobStartArgs): Promise<IpcResult<LocalizeJobManifest>>;
+    update(args: LocalizeJobUpdateArgs): Promise<IpcResult<LocalizeJobManifest>>;
+    get(projectId: string): Promise<IpcResult<LocalizeJobManifest | null>>;
+    list(): Promise<IpcResult<LocalizeJobManifest[]>>;
+    cancel(identity: LocalizeJobIdentity): Promise<IpcResult<LocalizeJobManifest>>;
+    readCheckpoint(args: LocalizeCheckpointReadArgs): Promise<IpcResult<unknown | null>>;
+    writeCheckpoint(args: LocalizeCheckpointWriteArgs): Promise<IpcResult<boolean>>;
+    removeCheckpoint(args: LocalizeCheckpointReadArgs): Promise<IpcResult<boolean>>;
+    onJob(cb: (job: LocalizeJobManifest) => void): () => void;
   };
   narration: {
     /** Analyze an imported video and produce an editable, time-bounded narration draft. */

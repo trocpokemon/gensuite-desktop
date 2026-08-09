@@ -13,7 +13,7 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   fileName: sourcePath,
 }).outputText + `
-module.exports.__transcriptionChunkingTest = { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine };
+module.exports.__transcriptionChunkingTest = { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine, modelPreflightExitFailure };
 `;
 
 const module = { exports: {} };
@@ -28,17 +28,25 @@ new Function('require', 'module', 'exports', compiled)((name) => {
   if (name === './project') return { projectDir: () => process.cwd() };
   if (name === './ffmpeg') return { ffmpegBinary: () => path.resolve('resources/ffmpeg/ffmpeg.exe') };
   if (name === './appErrors') return {
-    appFailure: () => new Error('not used by chunk tests'),
+    appFailure: (code, context, internalDiagnostics) => ({ code, context, internalDiagnostics }),
     appFailureResult: () => ({ ok: false }),
     appSuccess: (value) => ({ ok: true, value }),
   };
   return requireNode(name);
 }, module, module.exports);
 
-const { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine } = module.exports.__transcriptionChunkingTest;
+const { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine, modelPreflightExitFailure } = module.exports.__transcriptionChunkingTest;
 const violations = [];
 const duration = 1_205;
 const chunks = buildTranscriptionChunks(duration);
+const missingRuntime = modelPreflightExitFailure(3221225781);
+if (missingRuntime.code !== 'TRANSCRIPTION_COMPONENT_UNAVAILABLE'
+  || missingRuntime.internalDiagnostics?.classifier !== 'runtime-dependency-missing') {
+  violations.push('Mã thoát thiếu thành phần chạy vẫn bị phân loại nhầm thành dữ liệu nhận dạng hỏng.');
+}
+if (!/error instanceof AppFailure\) \|\| error\.code !== 'TRANSCRIPTION_MODEL_INVALID'/u.test(source)) {
+  violations.push('Dữ liệu nhận dạng hợp lệ vẫn có nguy cơ bị xóa khi thành phần chạy trên máy bị thiếu.');
+}
 
 if (recognitionProgressFromLine('[00:00:10.000 --> 00:00:20.000] sample', 40) !== 50) {
   violations.push('Tiến độ bên trong một phần nhận dạng không được tính theo mốc âm thanh thực tế.');

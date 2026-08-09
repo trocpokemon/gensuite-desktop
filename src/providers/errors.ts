@@ -162,6 +162,8 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
   OUTPUT_RECOVERY_FAILED: () => 'Không thể khôi phục an toàn video cũ sau khi thao tác lưu bị gián đoạn. Hãy giữ nguyên thư mục lưu và gửi mã chẩn đoán để được hỗ trợ.',
   CAPCUT_EXPORT_INPUT_INVALID: () => 'Dự án chưa đủ video, giọng đọc hoặc mốc thời gian để tạo bản chỉnh sửa. Hãy hoàn tất các bước trước rồi thử lại.',
   CAPCUT_DRAFT_DIRECTORY_UNAVAILABLE: () => 'Chưa tìm thấy thư mục dự án CapCut. Hãy mở CapCut ít nhất một lần hoặc chọn đúng thư mục dự án rồi thử lại.',
+  CAPCUT_APP_UNAVAILABLE: () => 'Chưa tìm thấy CapCut trên máy. Hãy cài đặt hoặc mở CapCut thủ công, sau đó thử lại.',
+  CAPCUT_APP_LAUNCH_FAILED: () => 'Chưa thể mở CapCut lúc này. Hãy thử lại hoặc mở CapCut thủ công.',
   CAPCUT_EDITOR_BUSY: () => 'CapCut đang mở nên chưa thể ghi dự án an toàn. Hãy đóng CapCut rồi thử lại.',
   CAPCUT_EXPORT_PERMISSION_DENIED: () => 'Ứng dụng không có quyền tạo dự án tại thư mục đã chọn. Hãy cấp quyền hoặc chọn thư mục khác.',
   CAPCUT_EXPORT_STORAGE_FULL: () => 'Không đủ dung lượng để tạo dự án chỉnh sửa. Hãy giải phóng dung lượng rồi thử lại.',
@@ -171,6 +173,12 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
   CAPCUT_EXPORT_TIMEOUT: () => 'Tạo dự án chỉnh sửa không có tiến triển trong thời gian dài nên đã được dừng an toàn. Hãy kiểm tra dung lượng rồi thử lại.',
   CAPCUT_EXPORT_FAILED: () => 'Chưa thể tạo dự án chỉnh sửa từ dữ liệu hiện tại. Dữ liệu gốc vẫn được giữ; hãy thử lại.',
   CAPCUT_EXPORT_RECOVERY_FAILED: () => 'Không thể dọn hoặc khôi phục an toàn dữ liệu dự án sau khi thao tác bị gián đoạn. Hãy giữ nguyên thư mục và gửi mã chẩn đoán để được hỗ trợ.',
+  LOCALIZE_JOB_INPUT_INVALID: () => 'Thông tin tác vụ chưa đầy đủ. Hãy quay lại bước thiết lập và kiểm tra các lựa chọn.',
+  LOCALIZE_JOB_NOT_FOUND: () => 'Không tìm thấy trạng thái xử lý trước đó. Dữ liệu đã tạo vẫn được giữ; hãy tiếp tục từ phần đã lưu.',
+  LOCALIZE_JOB_OWNERSHIP_CONFLICT: () => 'Dự án đang được một lượt xử lý khác cập nhật. Hãy mở lại dự án để theo dõi đúng lượt hiện tại.',
+  LOCALIZE_CHECKPOINT_INVALID: () => 'Dữ liệu tiếp tục của tác vụ chưa hợp lệ. Các tệp đã hoàn tất vẫn được giữ để kiểm tra lại.',
+  LOCALIZE_CHECKPOINT_UNAVAILABLE: () => 'Chưa thể lưu hoặc đọc điểm tiếp tục của tác vụ. Hãy kiểm tra dung lượng và thử lại.',
+  LOCALIZE_JOB_UNEXPECTED: () => 'Trạng thái xử lý bị gián đoạn ngoài dự kiến. Hãy mở lại dự án để tiếp tục từ phần đã lưu.',
   TEMP_STORAGE_PERMISSION_DENIED: () => 'Ứng dụng không có quyền tạo dữ liệu tạm để hoàn thiện video. Hãy kiểm tra quyền thư mục tạm rồi thử lại.',
   TEMP_STORAGE_FULL: () => 'Vùng lưu tạm không đủ dung lượng để hoàn thiện video. Hãy giải phóng dung lượng trên ổ hệ thống rồi thử lại.',
   TEMP_STORAGE_UNAVAILABLE: () => 'Không thể tạo dữ liệu tạm để hoàn thiện video. Hãy khởi động lại ứng dụng rồi thử lại.',
@@ -206,8 +214,7 @@ const STRUCTURED_ERROR_MESSAGES: Record<AppErrorCode, (error: PublicAppError) =>
   UNEXPECTED: () => 'Đã xảy ra lỗi ngoài dự kiến khi hoàn thiện video. Dữ liệu đã tạo vẫn được giữ; hãy thử lại.',
 };
 
-function structuredErrorMessage(error: PublicAppError): string {
-  rememberDiagnostic(error);
+export function publicErrorMessage(error: PublicAppError): string {
   return `${STRUCTURED_ERROR_MESSAGES[error.code](error)}${diagnosticSuffix(error)}`;
 }
 
@@ -301,8 +308,9 @@ function isSafeLegacyUserMessage(message: string): boolean {
 
 export function errorMessage(err: unknown): string {
   if (isPublicAppError(err)) {
+    rememberDiagnostic(err);
     notifyIfInsufficientCredits(err);
-    return structuredErrorMessage(err);
+    return publicErrorMessage(err);
   }
   if (notifyIfInsufficientCredits(err)) return 'Tài khoản không đủ credits để thực hiện thao tác này.';
   const msg = unwrapIpcMessage(rawErrorMessage(err));

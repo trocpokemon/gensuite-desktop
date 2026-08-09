@@ -20,10 +20,20 @@ function evaluate(source, dependencies = {}) {
 }
 
 const storage = new Map();
-globalThis.localStorage = {
-  getItem: (key) => storage.get(key) ?? null,
-  setItem: (key, value) => storage.set(key, String(value)),
-  removeItem: (key) => storage.delete(key),
+globalThis.window = {
+  gensuite: {
+    localize: {
+      readCheckpoint: async ({ scope, key }) => ({ ok: true, value: storage.get(`${scope}:${key}`) ?? null }),
+      writeCheckpoint: async ({ scope, key, value }) => {
+        storage.set(`${scope}:${key}`, structuredClone(value));
+        return { ok: true, value: true };
+      },
+      removeCheckpoint: async ({ scope, key }) => {
+        storage.delete(`${scope}:${key}`);
+        return { ok: true, value: true };
+      },
+    },
+  },
 };
 
 const voicePath = path.resolve('src/providers/voice/voiceReliability.ts');
@@ -61,8 +71,8 @@ if (key === voice.voiceRequestKey({ ...request, speed: 1.1 }, 'engine')) violati
 
 const checkpoint = voice.createVoiceCheckpoint(key, 3);
 checkpoint.parts[0] = { index: 0, status: 'done', audioPath: 'safe-part.mp3', durationSec: 1 };
-voice.saveVoiceCheckpoint('p', 's', checkpoint);
-const restored = voice.loadVoiceCheckpoint('p', 's', key);
+await voice.saveVoiceCheckpoint('p', 's', checkpoint);
+const restored = await voice.loadVoiceCheckpoint('p', 's', key);
 if (restored?.parts[0]?.status !== 'done' || restored.parts.length !== 3) violations.push('Checkpoint giọng không khôi phục đúng phần đã hoàn thành.');
 
 const cancelled = new AbortController();
@@ -84,11 +94,7 @@ if (estimated.some((word, index) => word.end <= word.start || (index && word.sta
 const cjk = subtitle.estimateSubtitleTiming('你好，世界！', 3);
 if (cjk.length < 4 || Math.abs(cjk.at(-1).end - 3) > 0.001) violations.push('Fallback phụ đề không xử lý đúng nội dung không có khoảng trắng.');
 
-globalThis.window = {
-  gensuite: {
-    whisper: { align: async () => ({ ok: false, error: { kind: 'app-error-v1' } }) },
-  },
-};
+window.gensuite.whisper = { align: async () => ({ ok: false, error: { kind: 'app-error-v1' } }) };
 const fallback = await subtitle.alignSceneSubtitle({ id: 's', narration: 'Một câu cần fallback.', audioPath: 'a.mp3', audioDuration: 2 }, 'p');
 if (fallback.quality !== 'estimated' || !fallback.words.length) violations.push('Căn phụ đề lỗi chưa tự chuyển sang thời gian ước lượng.');
 window.gensuite.whisper.align = async () => ({ ok: true, value: [{ word: 'Khớp', start: 0, end: 1 }] });

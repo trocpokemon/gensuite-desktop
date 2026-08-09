@@ -19,6 +19,7 @@ import { useAuthStore } from './store/authStore';
 import { useEntitlementStore } from './store/entitlementStore';
 import type { StepId } from './shared/types';
 import { useUpdateStore } from './store/updateStore';
+import { useLocalizeRuntimeStore } from './store/localizeRuntimeStore';
 
 const TOPIC_STEPS: Array<{ id: StepId; label: string; icon: typeof Film }> = [
   { id: 'topic', label: '1. Chủ đề', icon: LayoutTemplate },
@@ -45,6 +46,8 @@ export default function App() {
   const hydrate = useProjectStore((state) => state.hydrate);
   const home = useProjectStore((state) => state.home);
   const project = useProjectStore((state) => state.project);
+  const localizeRuntime = useLocalizeRuntimeStore((state) => state.jobs[project.id]);
+  const initializeLocalizeRuntime = useLocalizeRuntimeStore((state) => state.initialize);
   const setName = useProjectStore((state) => state.setName);
   const setStep = useProjectStore((state) => state.setStep);
   const goHome = useProjectStore((state) => state.goHome);
@@ -81,7 +84,62 @@ export default function App() {
 
   useEffect(() => { initAuth(); }, [initAuth]);
   useEffect(() => { initializeUpdater(); }, [initializeUpdater]);
-  useEffect(() => { hydrate(); loadSettings(); loadTopics(); }, [hydrate, loadSettings, loadTopics]);
+  useEffect(() => {
+    hydrate();
+    loadSettings();
+    loadTopics();
+    void initializeLocalizeRuntime();
+  }, [hydrate, initializeLocalizeRuntime, loadSettings, loadTopics]);
+  useEffect(() => window.gensuite.whisper.onProgress((progress) => {
+    if (!progress.projectId) return;
+    const runtimeStore = useLocalizeRuntimeStore.getState();
+    const job = runtimeStore.jobs[progress.projectId];
+    if (!job || job.status !== 'running' || job.stage !== 'recognition') return;
+    const percent = progress.phase === 'extracting' ? 2
+      : progress.phase === 'downloading-model' ? Math.min(10, (progress.percent ?? 0) / 10)
+        : progress.phase === 'complete' ? 99 : Math.max(10, progress.percent ?? 10);
+    const detail = progress.phase === 'extracting' ? 'Đang chuẩn bị âm thanh'
+      : progress.phase === 'downloading-model' ? 'Đang chuẩn bị dữ liệu nhận dạng'
+        : progress.chunkNumber && progress.chunkCount ? `Đang xử lý phần ${progress.chunkNumber}/${progress.chunkCount}` : 'Đang nhận dạng lời thoại';
+    const steps = job.steps.map((step) => step.id === 'recognition'
+      ? { ...step, status: 'active' as const, percent: Math.max(step.percent, Math.min(99, percent)), detail }
+      : step);
+    runtimeStore.update(progress.projectId, job.runId, { steps, lastActivityAt: Date.now() });
+    void window.gensuite.localize.update({
+      projectId: progress.projectId,
+      operationId: job.runId,
+      stage: 'recognition',
+      status: 'running',
+      stageStatus: progress.phase === 'extracting' || progress.phase === 'downloading-model' ? 'preflight' : 'running',
+      percent: steps.find((step) => step.id === 'recognition')?.percent ?? percent,
+      label: detail,
+    }).then((result) => {
+      if (result.ok) useLocalizeRuntimeStore.getState().acceptManifest(result.value);
+    });
+  }), []);
+  useEffect(() => window.gensuite.ytdlp.onProgress((progress) => {
+    if (!progress.projectId) return;
+    const runtimeStore = useLocalizeRuntimeStore.getState();
+    const job = runtimeStore.jobs[progress.projectId];
+    if (!job || job.status !== 'running' || job.stage !== 'download') return;
+    const percent = Math.max(0, Math.min(99, progress.percent ?? 0));
+    const detail = progress.phase === 'merging' ? 'Đang hoàn thiện video tải về' : 'Đang tải video';
+    const steps = job.steps.map((step) => step.id === 'download'
+      ? { ...step, status: 'active' as const, percent: Math.max(step.percent, percent), detail }
+      : step);
+    runtimeStore.update(progress.projectId, job.runId, { steps, lastActivityAt: Date.now() });
+    void window.gensuite.localize.update({
+      projectId: progress.projectId,
+      operationId: job.runId,
+      stage: 'download',
+      status: 'running',
+      stageStatus: progress.phase === 'merging' ? 'validating' : 'running',
+      percent,
+      label: detail,
+    }).then((result) => {
+      if (result.ok) useLocalizeRuntimeStore.getState().acceptManifest(result.value);
+    });
+  }), []);
   useEffect(() => {
     if (authStatus === 'signedIn') void loadEntitlements();
     else if (authStatus === 'signedOut') resetEntitlements();
@@ -93,10 +151,10 @@ export default function App() {
     return () => window.removeEventListener('focus', refreshCredits);
   }, [authStatus, loadEntitlements]);
   useEffect(() => {
-    setLocalizeSetupStep('source');
+    setLocalizeSetupStep(localizeRuntime ? 'process' : 'source');
     setLocalizeSourceReady(Boolean(project.sourceVideoPath));
     setNarrationSetupStep('source');
-  }, [project.id]);
+  }, [project.id, localizeRuntime?.status]);
 
   return (
     <div className="app-background flex h-full flex-col bg-background text-text">

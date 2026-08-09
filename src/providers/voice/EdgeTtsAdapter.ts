@@ -28,10 +28,10 @@ export class EdgeTtsAdapter implements IVoiceProvider {
     const signal = this.controller.signal;
     const chunks = splitVoiceText(req.text, 900);
     const requestKey = voiceRequestKey(req, this.engine);
-    const checkpoint = loadVoiceCheckpoint(req.projectId, req.segmentId, requestKey)
+    const checkpoint = await loadVoiceCheckpoint(req.projectId, req.segmentId, requestKey)
       ?? createVoiceCheckpoint(requestKey, chunks.length);
     if (checkpoint.parts.length !== chunks.length) checkpoint.parts = createVoiceCheckpoint(requestKey, chunks.length).parts;
-    saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
+    await saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
 
     const partPaths: string[] = [];
     const wordTimings: SubtitleWordTiming[] = [];
@@ -88,7 +88,7 @@ export class EdgeTtsAdapter implements IVoiceProvider {
         part.durationSec = result.value.durationSec;
         part.wordTimings = result.value.wordTimings;
         checkpoint.createdAt = Date.now();
-        saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
+        await saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
         for (const timing of result.value.wordTimings ?? []) {
           wordTimings.push({ word: timing.word, start: timing.start + offset, end: timing.end + offset });
         }

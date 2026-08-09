@@ -3,6 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { appErrorDefinition, isIpcResult } from '../src/shared/appErrors';
 import type { IpcResult, PublicAppError } from '../src/shared/appErrors';
 import type {
+  LocalizeCheckpointReadArgs,
+  LocalizeCheckpointWriteArgs,
+  LocalizeJobIdentity,
+  LocalizeJobManifest,
+  LocalizeJobStartArgs,
+  LocalizeJobUpdateArgs,
+} from '../src/shared/localizeJob';
+import type {
   GensuiteBridge,
   ProjectState,
   AppSettings,
@@ -150,6 +158,27 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+function isLocalizeJob(value: unknown): value is LocalizeJobManifest {
+  if (!isRecord(value) || value.schemaVersion !== 1 || typeof value.projectId !== 'string'
+    || typeof value.operationId !== 'string' || typeof value.status !== 'string'
+    || typeof value.activeStage !== 'string' || !isRecord(value.steps)) return false;
+  const steps = value.steps;
+  return ['download', 'recognition', 'translation', 'voice', 'capcut'].every((stage) => {
+    const step = steps[stage];
+    return isRecord(step) && step.stage === stage && typeof step.status === 'string'
+      && typeof step.percent === 'number' && Number.isFinite(step.percent);
+  });
+}
+
+function isJsonValue(value: unknown, depth = 0): boolean {
+  if (depth > 12) return false;
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) return value.length <= 20_000 && value.every((item) => isJsonValue(item, depth + 1));
+  return isRecord(value) && Object.keys(value).length <= 20_000
+    && Object.values(value).every((item) => isJsonValue(item, depth + 1));
+}
+
 function isTranscriptSegments(value: unknown): value is TranscriptSegment[] {
   return Array.isArray(value) && value.every((item) => isRecord(item)
     && Object.keys(item).every((key) => ['id', 'start', 'end', 'text'].includes(key))
@@ -255,6 +284,11 @@ const bridge: GensuiteBridge = {
     },
   },
   capcut: {
+    launch: () => invokeStructured(
+      'capcut:launch',
+      undefined,
+      (value): value is boolean => value === true,
+    ),
     exportDraft: (args: CapCutDraftExportArgs) => invokeStructured(
       'capcut:exportDraft',
       args,
@@ -265,6 +299,36 @@ const bridge: GensuiteBridge = {
       undefined,
       (value): value is string | null => value === null || (typeof value === 'string' && value.trim().length > 0),
     ),
+  },
+  localize: {
+    start: (args: LocalizeJobStartArgs) => invokeStructured('localize:start', args, isLocalizeJob),
+    update: (args: LocalizeJobUpdateArgs) => invokeStructured('localize:update', args, isLocalizeJob),
+    get: (projectId: string) => invokeStructured(
+      'localize:get', projectId,
+      (value): value is LocalizeJobManifest | null => value === null || isLocalizeJob(value),
+    ),
+    list: () => invokeStructured(
+      'localize:list', undefined,
+      (value): value is LocalizeJobManifest[] => Array.isArray(value) && value.every(isLocalizeJob),
+    ),
+    cancel: (identity: LocalizeJobIdentity) => invokeStructured('localize:cancel', identity, isLocalizeJob),
+    readCheckpoint: (args: LocalizeCheckpointReadArgs) => invokeStructured(
+      'localize:checkpoint-read', args,
+      (value): value is unknown | null => value === null || isJsonValue(value),
+    ),
+    writeCheckpoint: (args: LocalizeCheckpointWriteArgs) => invokeStructured(
+      'localize:checkpoint-write', args,
+      (value): value is boolean => typeof value === 'boolean',
+    ),
+    removeCheckpoint: (args: LocalizeCheckpointReadArgs) => invokeStructured(
+      'localize:checkpoint-remove', args,
+      (value): value is boolean => typeof value === 'boolean',
+    ),
+    onJob: (cb: (job: LocalizeJobManifest) => void) => {
+      const listener = (_event: unknown, job: unknown) => { if (isLocalizeJob(job)) cb(job); };
+      ipcRenderer.on('localize:job-event', listener);
+      return () => ipcRenderer.removeListener('localize:job-event', listener);
+    },
   },
   narration: {
     analyze: (args: NarrationAnalyzeArgs) => ipcRenderer.invoke('narration:analyze', args),

@@ -52,7 +52,11 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
       const text = await response.text();
       let data: any = null;
       try { data = text ? JSON.parse(text) : null; } catch { data = null; }
-      if (!response.ok) throw sttFailure(response.status, String(data?.error || ''));
+      if (!response.ok) {
+        const existingJobId = response.status === 409 ? String(data?.jobId || data?.existingJobId || '').trim() : '';
+        if (existingJobId) return { ...data, jobId: existingJobId, status: data?.status || 'processing' };
+        throw sttFailure(response.status, String(data?.error || ''));
+      }
       if (!data || typeof data !== 'object') throw clientAppError('TRANSCRIPTION_RESULT_INVALID');
       return data;
     } catch (error) {
@@ -82,7 +86,7 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
       if (!(durationSeconds > 0)) throw clientAppError('TRANSCRIPTION_SOURCE_UNREADABLE');
 
       const checkpointKey = sttCheckpointKey(req.projectId, req.sourcePath, req.language);
-      let checkpoint = loadSttCheckpoint(checkpointKey);
+      let checkpoint = await loadSttCheckpoint(req.projectId, checkpointKey);
       const idempotencyKey = checkpointKey.replace('gensuite_stt_checkpoint_v1:', 'desktop-stt-');
       const submit = async () => {
         const form = new FormData();
@@ -109,7 +113,7 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
         const jobId = String(data?.jobId ?? '');
         if (!jobId) throw clientAppError('TRANSCRIPTION_RESULT_INVALID');
         checkpoint = { jobId, createdAt: Date.now() };
-        saveSttCheckpoint(checkpointKey, checkpoint);
+        await saveSttCheckpoint(req.projectId, checkpointKey, checkpoint);
         return jobId;
       };
 
@@ -120,7 +124,7 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
         job = await this.pollJob(jobId);
       } catch (error) {
         if (!isPublicAppError(error) || error.code !== 'TRANSCRIPTION_JOB_EXPIRED') throw error;
-        localStorage.removeItem(checkpointKey);
+        await removeSttCheckpoint(req.projectId, checkpointKey);
         jobId = await submit();
         this.jobId = jobId;
         job = await this.pollJob(jobId);
@@ -134,7 +138,7 @@ export class GenSuiteSttAdapter implements ITranscriptionProvider {
           ? estimateTranscriptSegments(transcript, durationSeconds)
           : [];
       if (!segments.length) throw clientAppError('TRANSCRIPTION_NO_SPEECH');
-      localStorage.removeItem(checkpointKey);
+      await removeSttCheckpoint(req.projectId, checkpointKey);
       return segments;
     } finally {
       this.controller = null;
@@ -236,19 +240,25 @@ function sttCheckpointKey(projectId: string, sourcePath: string, language?: stri
   return `gensuite_stt_checkpoint_v1:${projectId}:${(hash >>> 0).toString(36)}`;
 }
 
-function loadSttCheckpoint(key: string): { jobId: string; createdAt: number } | null {
-  try {
-    const value = JSON.parse(localStorage.getItem(key) || 'null') as { jobId?: string; createdAt?: number } | null;
-    if (!value?.jobId || !value.createdAt || Date.now() - value.createdAt > CHECKPOINT_TTL_MS) {
-      localStorage.removeItem(key);
-      return null;
-    }
-    return { jobId: value.jobId, createdAt: value.createdAt };
-  } catch { return null; }
+async function loadSttCheckpoint(projectId: string, key: string): Promise<{ jobId: string; createdAt: number } | null> {
+  const result = await window.gensuite.localize.readCheckpoint({ projectId, scope: 'cloud-recognition', key });
+  if (!result.ok) throw result.error;
+  const value = result.value as { jobId?: string; createdAt?: number } | null;
+  if (!value?.jobId || !value.createdAt || Date.now() - value.createdAt > CHECKPOINT_TTL_MS) {
+    await removeSttCheckpoint(projectId, key);
+    return null;
+  }
+  return { jobId: value.jobId, createdAt: value.createdAt };
 }
 
-function saveSttCheckpoint(key: string, value: { jobId: string; createdAt: number }): void {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* retry can submit a fresh job */ }
+async function saveSttCheckpoint(projectId: string, key: string, value: { jobId: string; createdAt: number }): Promise<void> {
+  const result = await window.gensuite.localize.writeCheckpoint({ projectId, scope: 'cloud-recognition', key, value });
+  if (!result.ok) throw result.error;
+}
+
+async function removeSttCheckpoint(projectId: string, key: string): Promise<void> {
+  const result = await window.gensuite.localize.removeCheckpoint({ projectId, scope: 'cloud-recognition', key });
+  if (!result.ok) throw result.error;
 }
 
 // Read a WAV Blob's duration through an <audio> element (renderer has no ffprobe).

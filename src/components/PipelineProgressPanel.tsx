@@ -1,4 +1,5 @@
 import { AlertTriangle, Check, Download, Languages, Layers3, Loader2, Mic2, Radio } from 'lucide-react';
+import { LOCALIZE_STAGE_WEIGHTS, type LocalizeJobStage } from '../shared/localizeJob';
 
 export type PipelineStepStatus = 'pending' | 'active' | 'completed' | 'skipped' | 'error';
 
@@ -40,7 +41,10 @@ function statusLabel(step: PipelineProgressStep, percent: number): string {
 
 export function PipelineProgressPanel({ steps, running, inactivitySeconds }: Props) {
   const activity = activitySummary(inactivitySeconds);
-  const overallPercent = Math.round(steps.reduce((total, step) => total + Math.max(0, Math.min(100, step.percent)), 0) / Math.max(1, steps.length));
+  const overallPercent = Math.round(steps.reduce((total, step) => {
+    const weight = LOCALIZE_STAGE_WEIGHTS[step.id as LocalizeJobStage] ?? 0;
+    return total + weight * Math.max(0, Math.min(100, step.percent)) / 100;
+  }, 0));
   const completed = steps.filter((step) => step.status === 'completed').length;
   const activeStep = steps.find((step) => step.status === 'active' || step.status === 'error');
 

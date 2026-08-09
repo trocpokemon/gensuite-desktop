@@ -79,28 +79,28 @@ function storageKey(projectId: string, segmentId: string, requestKey: string): s
   return `${CHECKPOINT_PREFIX}:${projectId}:${segmentId}:${requestKey}`;
 }
 
-export function loadVoiceCheckpoint(projectId: string, segmentId: string, requestKey: string): VoiceCheckpoint | null {
-  try {
-    const key = storageKey(projectId, segmentId, requestKey);
-    const value = JSON.parse(localStorage.getItem(key) || 'null') as VoiceCheckpoint | null;
-    if (!value || value.schemaVersion !== 1 || value.requestKey !== requestKey || !Array.isArray(value.parts)
-      || Date.now() - value.createdAt > CHECKPOINT_TTL_MS) {
-      localStorage.removeItem(key);
-      return null;
-    }
-    return value;
-  } catch {
+export async function loadVoiceCheckpoint(projectId: string, segmentId: string, requestKey: string): Promise<VoiceCheckpoint | null> {
+  const key = storageKey(projectId, segmentId, requestKey);
+  const result = await window.gensuite.localize.readCheckpoint({ projectId, scope: 'voice', key });
+  if (!result.ok) throw result.error;
+  const value = result.value as VoiceCheckpoint | null;
+  if (!value || value.schemaVersion !== 1 || value.requestKey !== requestKey || !Array.isArray(value.parts)
+    || Date.now() - value.createdAt > CHECKPOINT_TTL_MS) {
+    const removed = await window.gensuite.localize.removeCheckpoint({ projectId, scope: 'voice', key });
+    if (!removed.ok) throw removed.error;
     return null;
   }
+  return value;
 }
 
-export function saveVoiceCheckpoint(projectId: string, segmentId: string, checkpoint: VoiceCheckpoint): void {
-  try {
-    localStorage.setItem(storageKey(projectId, segmentId, checkpoint.requestKey), JSON.stringify(checkpoint));
-  } catch {
-    // Audio parts still remain on disk; a later retry can safely regenerate
-    // only if the small local checkpoint could not be persisted.
-  }
+export async function saveVoiceCheckpoint(projectId: string, segmentId: string, checkpoint: VoiceCheckpoint): Promise<void> {
+  const result = await window.gensuite.localize.writeCheckpoint({
+    projectId,
+    scope: 'voice',
+    key: storageKey(projectId, segmentId, checkpoint.requestKey),
+    value: checkpoint,
+  });
+  if (!result.ok) throw result.error;
 }
 
 export function createVoiceCheckpoint(requestKey: string, partCount: number): VoiceCheckpoint {

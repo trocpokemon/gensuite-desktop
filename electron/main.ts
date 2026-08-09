@@ -18,6 +18,7 @@ import { registerWhisperIpc } from './ipc/whisper';
 import { registerFilesIpc } from './ipc/files';
 import { registerNarrationIpc } from './ipc/narration';
 import { registerCapCutDraftIpc } from './ipc/capcut';
+import { registerLocalizeJobIpc } from './ipc/localizeJob';
 import { registerUpdater, startUpdateChecks } from './updater';
 import { isPublicAppError } from '../src/shared/appErrors';
 import { appFailureResult, appSuccess, internalDiagnosticFor } from './ipc/appErrors';
@@ -195,6 +196,7 @@ function registerIpc(): void {
   registerFilesIpc();
   registerNarrationIpc();
   registerCapCutDraftIpc();
+  registerLocalizeJobIpc();
 }
 
 function registerProjectFileProtocol(): void {

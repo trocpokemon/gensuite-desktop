@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, CheckCircle2, ChevronDown, ClipboardCopy, FileVideo, FolderOpen, KeyRound, Layers3, Link2, Loader2, LogIn, Play, RotateCcw, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, ChevronDown, ClipboardCopy, ExternalLink, FileVideo, FolderOpen, KeyRound, Layers3, Link2, Loader2, LogIn, Play, RotateCcw, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import { AppSelect } from '../components/AppSelect';
 import { EngineToggle } from '../components/EngineToggle';
 import { PipelineProgressPanel, type PipelineProgressStep } from '../components/PipelineProgressPanel';
@@ -16,10 +16,11 @@ import type { AppErrorCode, AppErrorContext, PublicAppError } from '../shared/ap
 import { rememberDiagnostic } from '../shared/diagnosticSummary';
 import { transcriptHasAbnormalRepetition } from '../shared/transcriptQuality';
 import type { ProjectState, TranscriptSegment, WhisperModelName } from '../shared/types';
-import { useEntitlementStore } from '../store/entitlementStore';
+import { useEntitlementStore, voiceConcurrencyForTier } from '../store/entitlementStore';
 import { isInsufficientCreditsError } from '../store/creditPromptStore';
 import { useProjectStore } from '../store/projectStore';
 import { useSettingsStore } from '../store/settingsStore';
+import { useLocalizeRuntimeStore, type LocalizeRuntimeStage } from '../store/localizeRuntimeStore';
 
 interface Props {
   onOpenSettings: () => void;
@@ -31,7 +32,7 @@ interface Props {
 
 export type LocalizeSetupStep = 'source' | 'process';
 type Stage = 'idle' | 'download' | 'recognition' | 'translation' | 'voice' | 'capcut' | 'done' | 'error';
-type PipelineStageId = 'download' | 'recognition' | 'translation' | 'voice' | 'capcut';
+type PipelineStageId = LocalizeRuntimeStage;
 type SourceInputMode = 'link' | 'file';
 interface PipelineFailureSnapshot {
   error: PublicAppError;
@@ -54,6 +55,7 @@ const SOURCE_OPTIONS = [{ value: '', label: 'Chọn ngôn ngữ gốc', disabled
 const TARGET_OPTIONS = [{ value: '', label: 'Chọn ngôn ngữ đích', disabled: true }, ...TARGET_LANGUAGES.map(([value, label]) => ({ value, label }))];
 const ACCURACY_OPTIONS = [{ value: '', label: 'Chọn độ chính xác', disabled: true }, ...ACCURACY_LEVELS.map(([value, label]) => ({ value, label }))];
 const GENSUITE_TRANSLATE_MODEL = 'google-ai-studio/gemini-3.1-flash-lite';
+const activeLocalizeExecutions = new Map<string, Promise<void>>();
 
 const PIPELINE_DEFINITIONS: Array<Pick<PipelineProgressStep, 'id' | 'label'>> = [
   { id: 'download', label: 'Tải video' },
@@ -84,6 +86,12 @@ const VOICE_ENGINE_LABELS: Record<ProjectState['settings']['voiceEngine'], strin
 
 function languageLabel(value: string): string {
   return [...SOURCE_LANGUAGES, ...TARGET_LANGUAGES].find(([id]) => id === value)?.[1] ?? value;
+}
+
+async function safeFingerprint(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function friendlyVoiceLabel(project: ProjectState): string {
@@ -149,6 +157,7 @@ function normalizePipelineError(error: unknown, stage: PipelineStageId, context?
 
 export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, onNavigationLockChange, onSourceReadyChange }: Props) {
   const project = useProjectStore((state) => state.project);
+  const runtimeJob = useLocalizeRuntimeStore((state) => state.jobs[project.id]);
   const keys = useSettingsStore((state) => state.keys);
   const entitlementStatus = useEntitlementStore((state) => state.status);
   const canUseCloud = useEntitlementStore((state) => state.features.localizeCloud);
@@ -157,45 +166,117 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
   const [sourceInputMode, setSourceInputMode] = useState<SourceInputMode>(project.settings.localizeSourceInputMode ?? 'link');
   const [sourceLanguage, setSourceLanguage] = useState(project.sourceLanguage ?? 'vi');
   const [targetLanguage, setTargetLanguage] = useState(project.targetLanguage ?? 'vietnamese');
-  const [stage, setStage] = useState<Stage>('idle');
-  const [pipelineProgress, setPipelineProgress] = useState<PipelineProgressStep[]>(() => restorePipelineProgress(project));
-  const [lastActivityAt, setLastActivityAt] = useState(Date.now());
+  const [stage, setStage] = useState<Stage>(() => runtimeJob?.status === 'running' ? runtimeJob.stage : runtimeJob?.status === 'error' || runtimeJob?.status === 'blocked' ? 'error' : runtimeJob?.status === 'completed' ? 'done' : 'idle');
+  const [pipelineProgress, setPipelineProgress] = useState<PipelineProgressStep[]>(() => runtimeJob?.steps ?? restorePipelineProgress(project));
+  const [lastActivityAt, setLastActivityAt] = useState(runtimeJob?.lastActivityAt ?? Date.now());
   const [activityClock, setActivityClock] = useState(Date.now());
   const [downloadPercent, setDownloadPercent] = useState(0);
   const [downloadLabel, setDownloadLabel] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(runtimeJob?.failure ? errorMessage(runtimeJob.failure.error) : runtimeJob?.errorMessage ?? '');
   const [missingKey, setMissingKey] = useState<string | null>(null);
   const [validationAttempt, setValidationAttempt] = useState(0);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [diagnosticCopyState, setDiagnosticCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
-  const [pipelineFailure, setPipelineFailure] = useState<PipelineFailureSnapshot | null>(null);
+  const [capCutLaunchError, setCapCutLaunchError] = useState('');
+  const [pipelineFailure, setPipelineFailure] = useState<PipelineFailureSnapshot | null>(runtimeJob?.failure ?? null);
   const [videoLoginPlatform, setVideoLoginPlatform] = useState<VideoLoginPlatform | null>(null);
   const [videoLoginBusy, setVideoLoginBusy] = useState(false);
   const [videoSessionCleared, setVideoSessionCleared] = useState(false);
   const studioRef = useRef<HTMLDivElement | null>(null);
   const activeStageRef = useRef<PipelineStageId | null>(null);
   const transcriberRef = useRef<ITranscriptionProvider | null>(null);
-  const voiceRef = useRef<IVoiceProvider | null>(null);
+  const voiceRefs = useRef<Set<IVoiceProvider>>(new Set());
   const restoredProjectIdRef = useRef(project.id);
-  const running = !['idle', 'done', 'error'].includes(stage);
+  const resumeAttemptRef = useRef('');
+  const runIdRef = useRef(runtimeJob?.runId ?? '');
+  const running = runtimeJob?.status === 'running' || !['idle', 'done', 'error'].includes(stage);
   const sourceName = project.sourceVideoPath?.replace(/\\/g, '/').split('/').pop() ?? '';
 
-  const touchStage = useCallback((id: PipelineStageId, percent: number, detail?: string) => {
-    activeStageRef.current = id;
-    setLastActivityAt(Date.now());
-    setPipelineProgress((current) => current.map((step) => step.id === id
-      ? { ...step, status: 'active', percent: Math.max(step.status === 'active' ? step.percent : 0, Math.min(99, Math.max(0, percent))), detail }
-      : step));
+  const openCapCut = useCallback(async () => {
+    setCapCutLaunchError('');
+    const result = await window.gensuite.capcut.launch();
+    if (!result.ok) setCapCutLaunchError(errorMessage(result.error));
   }, []);
+
+  const jobFingerprints = useCallback(async () => {
+    const current = useProjectStore.getState().project;
+    const voiceConfig = current.settings.voiceConfigs[current.settings.voiceEngine];
+    return {
+      sourceFingerprint: await safeFingerprint({
+        mode: current.settings.localizeSourceInputMode,
+        preparedMode: current.settings.localizePreparedSourceMode,
+        sourcePath: current.sourceVideoPath,
+        sourceUrl: current.settings.localizeSourceUrl,
+      }),
+      configFingerprint: await safeFingerprint({
+        sourceLanguage: current.sourceLanguage,
+        targetLanguage: current.targetLanguage,
+        accuracy: current.settings.whisperModel,
+        scriptEngine: current.settings.scriptEngine,
+        voiceEngine: current.settings.voiceEngine,
+        voiceId: voiceConfig.voiceId,
+        voiceModel: voiceConfig.modelId,
+        speed: voiceConfig.speed,
+      }),
+    };
+  }, []);
+
+  const persistJobUpdate = useCallback((args: Parameters<typeof window.gensuite.localize.update>[0]) => {
+    void window.gensuite.localize.update(args).then((result) => {
+      if (result.ok) useLocalizeRuntimeStore.getState().acceptManifest(result.value);
+    });
+  }, []);
+
+  const touchStage = useCallback((id: PipelineStageId, percent: number, detail?: string, stageStatus: 'preflight' | 'running' | 'validating' = 'running') => {
+    activeStageRef.current = id;
+    const now = Date.now();
+    setLastActivityAt(now);
+    const runtime = useLocalizeRuntimeStore.getState().jobs[project.id];
+    const currentSteps = runtime?.runId === runIdRef.current ? runtime.steps : pipelineProgress;
+    const steps = currentSteps.map((step) => step.id === id
+        ? { ...step, status: 'active' as const, percent: Math.max(step.status === 'active' ? step.percent : 0, Math.min(99, Math.max(0, percent))), detail }
+        : step);
+    const runId = runIdRef.current;
+    if (runId) {
+      useLocalizeRuntimeStore.getState().update(project.id, runId, { stage: id, status: 'running', steps, lastActivityAt: now, errorMessage: undefined, failure: undefined });
+      persistJobUpdate({ projectId: project.id, operationId: runId, stage: id, status: 'running', stageStatus, percent: steps.find((step) => step.id === id)?.percent ?? 0, label: detail });
+    }
+    setPipelineProgress(steps);
+  }, [persistJobUpdate, pipelineProgress, project.id]);
   const completeStage = useCallback((id: PipelineStageId, detail = 'Hoàn tất') => {
     if (activeStageRef.current === id) activeStageRef.current = null;
-    setLastActivityAt(Date.now());
-    setPipelineProgress((current) => current.map((step) => step.id === id ? { ...step, status: 'completed', percent: 100, detail } : step));
-  }, []);
+    const now = Date.now();
+    setLastActivityAt(now);
+    const runtime = useLocalizeRuntimeStore.getState().jobs[project.id];
+    const currentSteps = runtime?.runId === runIdRef.current ? runtime.steps : pipelineProgress;
+    const steps = currentSteps.map((step) => step.id === id ? { ...step, status: 'completed' as const, percent: 100, detail } : step);
+    const runId = runIdRef.current;
+    if (runId) {
+      useLocalizeRuntimeStore.getState().update(project.id, runId, { stage: id, steps, lastActivityAt: now });
+      persistJobUpdate({ projectId: project.id, operationId: runId, stage: id, stageStatus: 'completed', percent: 100, label: detail });
+    }
+    setPipelineProgress(steps);
+  }, [persistJobUpdate, pipelineProgress, project.id]);
   const failStage = useCallback((id: PipelineStageId, detail: string) => {
     if (activeStageRef.current === id) activeStageRef.current = null;
-    setPipelineProgress((current) => current.map((step) => step.id === id ? { ...step, status: 'error', detail } : step));
-  }, []);
+    const runtime = useLocalizeRuntimeStore.getState().jobs[project.id];
+    const currentSteps = runtime?.runId === runIdRef.current ? runtime.steps : pipelineProgress;
+    const steps = currentSteps.map((step) => step.id === id ? { ...step, status: 'error' as const, detail } : step);
+    const runId = runIdRef.current;
+    if (runId) useLocalizeRuntimeStore.getState().update(project.id, runId, { stage: id, status: 'error', steps, lastActivityAt: Date.now(), errorMessage: detail });
+    setPipelineProgress(steps);
+  }, [pipelineProgress, project.id]);
+
+  useEffect(() => {
+    if (!runtimeJob) return;
+    runIdRef.current = runtimeJob.runId;
+    setPipelineProgress(runtimeJob.steps);
+    setLastActivityAt(runtimeJob.lastActivityAt);
+    setPipelineFailure(runtimeJob.failure ?? null);
+    setError(runtimeJob.failure ? errorMessage(runtimeJob.failure.error) : runtimeJob.errorMessage ?? '');
+    setStage(runtimeJob.status === 'running' ? runtimeJob.stage : runtimeJob.status === 'error' || runtimeJob.status === 'blocked' ? 'error' : runtimeJob.status === 'completed' ? 'done' : 'idle');
+    if (runtimeJob.status === 'running') activeStageRef.current = runtimeJob.stage;
+  }, [runtimeJob]);
 
   useEffect(() => {
     if (restoredProjectIdRef.current === project.id) return;
@@ -204,12 +285,14 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     setSourceInputMode(project.settings.localizeSourceInputMode ?? 'link');
     setSourceLanguage(project.sourceLanguage ?? 'vi');
     setTargetLanguage(project.targetLanguage ?? 'vietnamese');
-    setPipelineProgress(restorePipelineProgress(project));
+    const restoredRuntime = useLocalizeRuntimeStore.getState().jobs[project.id];
+    runIdRef.current = restoredRuntime?.runId ?? '';
+    setPipelineProgress(restoredRuntime?.steps ?? restorePipelineProgress(project));
     setDetailsOpen(true);
     setDiagnosticCopyState('idle');
-    setPipelineFailure(null);
-    setStage('idle');
-    setError('');
+    setPipelineFailure(restoredRuntime?.failure ?? null);
+    setStage(restoredRuntime?.status === 'running' ? restoredRuntime.stage : restoredRuntime?.status === 'error' || restoredRuntime?.status === 'blocked' ? 'error' : restoredRuntime?.status === 'completed' ? 'done' : 'idle');
+    setError(restoredRuntime?.errorMessage ?? '');
     setVideoLoginPlatform(null);
     setVideoSessionCleared(false);
   }, [project]);
@@ -238,8 +321,9 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
 
   const reportFailure = useCallback((failure: unknown, fallback: PipelineStageId) => {
     const normalized = normalizePipelineError(failure, activeStageRef.current ?? fallback);
+    const occurredAt = new Date().toISOString();
     rememberDiagnostic(normalized);
-    setPipelineFailure({ error: normalized, occurredAt: new Date().toISOString() });
+    setPipelineFailure({ error: normalized, occurredAt });
     const storedUrl = useProjectStore.getState().project.settings.localizeSourceUrl ?? '';
     const loginPlatform = loginRequiredPlatform(failure)
       ?? (normalized.code === 'VIDEO_SOURCE_UNREADABLE' ? videoPlatformFromUrl(storedUrl) : null);
@@ -251,14 +335,24 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       failStage(activeStageRef.current ?? fallback, message);
       setError('');
       setStage('error');
+      const runId = runIdRef.current;
+      if (runId) {
+        useLocalizeRuntimeStore.getState().update(project.id, runId, { status: 'error', errorMessage: message, failure: { error: normalized, occurredAt } });
+        persistJobUpdate({ projectId: project.id, operationId: runId, stage: activeStageRef.current ?? fallback, stageStatus: 'failed', failure: { error: normalized, occurredAt } });
+      }
       return normalized;
     }
     const message = errorMessage(normalized);
     failStage(activeStageRef.current ?? fallback, message);
     setError(message);
     setStage('error');
+    const runId = runIdRef.current;
+    if (runId) {
+      useLocalizeRuntimeStore.getState().update(project.id, runId, { status: 'error', errorMessage: message, failure: { error: normalized, occurredAt } });
+      persistJobUpdate({ projectId: project.id, operationId: runId, stage: activeStageRef.current ?? fallback, stageStatus: 'failed', failure: { error: normalized, occurredAt } });
+    }
     return normalized;
-  }, [failStage]);
+  }, [failStage, persistJobUpdate, project.id]);
 
   const copyFailureDiagnostics = async () => {
     if (!pipelineFailure) return;
@@ -333,7 +427,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     let segments = current.transcript;
     if (!(current.transcriptionVersion === 4 && segments?.length && current.sourceLanguage === sourceLanguage)) {
       setStage('recognition');
-      touchStage('recognition', 0, 'Đang bắt đầu nhận dạng');
+      touchStage('recognition', 0, 'Đang kiểm tra dữ liệu đầu vào', 'preflight');
       const transcriber = getTranscriptionProvider(current.settings.transcriptionEngine, keys, 'localize-cloud');
       transcriberRef.current = transcriber;
       try {
@@ -358,7 +452,8 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       translated = await translator.translateSegments({
         projectId: current.id, segments, targetLanguage, sourceLanguage,
         onProgress: (progress) => touchStage('translation', progress.totalSegments ? (progress.completedSegments / progress.totalSegments) * 100 : 0,
-          progress.phase === 'validating' ? 'Đang kiểm tra bản dịch' : `Đang dịch nhóm ${Math.max(1, progress.batchNumber)}/${Math.max(1, progress.batchCount)}`),
+          progress.phase === 'validating' ? 'Đang kiểm tra bản dịch' : `Đang dịch nhóm ${Math.max(1, progress.batchNumber)}/${Math.max(1, progress.batchCount)}`,
+          progress.phase === 'validating' ? 'validating' : 'running'),
       });
     } catch (failure) {
       const service = missingKeyService(failure);
@@ -376,37 +471,67 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     if (!scenes.length) throw clientAppError('VIDEO_SEGMENTS_EMPTY');
     setStage('voice');
     touchStage('voice', 0, 'Đang chuẩn bị tạo voice');
-    const provider = getVoiceProvider(current.settings.voiceEngine, keys, 'localize-cloud');
-    voiceRef.current = provider;
     const config = current.settings.voiceConfigs[current.settings.voiceEngine];
+    const pending: Array<{ scene: typeof scenes[number]; index: number }> = [];
+    const progressByIndex = new Map<number, number>();
     for (let index = 0; index < scenes.length; index += 1) {
       let scene = useProjectStore.getState().project.scenes.find((item) => item.id === scenes[index].id) ?? scenes[index];
       if (scene.audioPath) {
         const usable = await probeUsableAudio(scene.audioPath);
         if (usable) {
           if (Math.abs((scene.audioDuration ?? 0) - usable.durationSec) > 0.1) useProjectStore.getState().updateScene(scene.id, { audioDuration: usable.durationSec });
+          progressByIndex.set(index, 1);
           touchStage('voice', ((index + 1) / scenes.length) * 100, `Đã tạo ${index + 1}/${scenes.length} câu`);
           continue;
         }
         useProjectStore.getState().updateScene(scene.id, { audioPath: undefined, audioDuration: undefined });
         scene = { ...scene, audioPath: undefined, audioDuration: undefined };
       }
-      try {
-        const result = await provider.synthesize({
-          projectId: current.id, segmentId: scene.id, text: scene.narration, voiceId: config.voiceId, modelId: config.modelId,
-          language: config.language, speed: config.speed, temperature: config.temperature, stability: config.stability,
-          similarityBoost: config.similarityBoost, style: config.style, useSpeakerBoost: config.useSpeakerBoost,
-          pitch: config.pitch, volume: config.volume, deliveryMode: config.deliveryMode,
-          onProgress: (progress) => touchStage('voice', ((index + (progress.totalChunks ? progress.completedChunks / progress.totalChunks : 0)) / scenes.length) * 100,
-            `Đang tạo câu ${index + 1}/${scenes.length}`),
-        });
-        useProjectStore.getState().updateScene(scene.id, { audioPath: result.audioPath, audioDuration: result.durationSec });
-      } catch (failure) {
-        throw normalizePipelineError(failure, 'voice', { segmentNumber: index + 1, segmentCount: scenes.length });
-      }
-      touchStage('voice', ((index + 1) / scenes.length) * 100, `Đã tạo ${index + 1}/${scenes.length} câu`);
+      pending.push({ scene, index });
     }
-    voiceRef.current = null;
+
+    const tier = useEntitlementStore.getState().tier;
+    const concurrency = current.settings.voiceEngine === 'capcuttts' ? voiceConcurrencyForTier(tier) : 1;
+    const overallProgress = () => [...progressByIndex.values()].reduce((sum, value) => sum + value, 0) / scenes.length * 100;
+    let nextPending = 0;
+    let firstFailure: PublicAppError | null = null;
+    const workers = Array.from({ length: Math.min(concurrency, pending.length) }, async () => {
+      const provider = getVoiceProvider(current.settings.voiceEngine, keys, 'localize-cloud');
+      voiceRefs.current.add(provider);
+      try {
+        while (!firstFailure) {
+          const item = pending[nextPending];
+          nextPending += 1;
+          if (!item) break;
+          try {
+            const result = await provider.synthesize({
+              projectId: current.id, segmentId: item.scene.id, text: item.scene.narration, voiceId: config.voiceId, modelId: config.modelId,
+              language: config.language, speed: config.speed, temperature: config.temperature, stability: config.stability,
+              similarityBoost: config.similarityBoost, style: config.style, useSpeakerBoost: config.useSpeakerBoost,
+              pitch: config.pitch, volume: config.volume, deliveryMode: config.deliveryMode,
+              onProgress: (progress) => {
+                progressByIndex.set(item.index, progress.totalChunks ? progress.completedChunks / progress.totalChunks : 0);
+                touchStage('voice', overallProgress(),
+                  progress.phase === 'assembling' ? `Đang kiểm tra câu ${item.index + 1}/${scenes.length}` : `Đang tạo tối đa ${concurrency} câu cùng lúc`,
+                  progress.phase === 'assembling' ? 'validating' : 'running');
+              },
+            });
+            useProjectStore.getState().updateScene(item.scene.id, { audioPath: result.audioPath, audioDuration: result.durationSec });
+            progressByIndex.set(item.index, 1);
+            const completed = [...progressByIndex.values()].filter((value) => value >= 1).length;
+            touchStage('voice', overallProgress(), `Đã tạo ${completed}/${scenes.length} câu`);
+          } catch (failure) {
+            firstFailure = normalizePipelineError(failure, 'voice', { segmentNumber: item.index + 1, segmentCount: scenes.length });
+            for (const activeProvider of voiceRefs.current) activeProvider.cancel?.();
+          }
+        }
+      } finally {
+        voiceRefs.current.delete(provider);
+      }
+    });
+    await Promise.allSettled(workers);
+    voiceRefs.current.clear();
+    if (firstFailure) throw firstFailure;
     completeStage('voice', `${scenes.length} câu đã tạo`);
   };
 
@@ -415,7 +540,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     const scenes = validScenes(current);
     if (!current.sourceVideoPath || !scenes.length || scenes.some((scene) => !scene.audioPath || !scene.audioDuration)) throw clientAppError('CAPCUT_EXPORT_INPUT_INVALID');
     setStage('capcut');
-    touchStage('capcut', 10, 'Đang chuẩn bị các track chỉnh sửa');
+    touchStage('capcut', 10, 'Đang kiểm tra dữ liệu dự án', 'preflight');
     const result = await window.gensuite.capcut.exportDraft({
       projectId: current.id,
       projectName: current.name,
@@ -437,11 +562,25 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     useProjectStore.getState().setCapCutDraft(result.value);
     completeStage('capcut', 'Dự án đã sẵn sàng');
     setStage('done');
+    const runId = runIdRef.current;
+    if (runId) {
+      useLocalizeRuntimeStore.getState().update(project.id, runId, { status: 'completed', stage: 'capcut', lastActivityAt: Date.now(), errorMessage: undefined, failure: undefined });
+      persistJobUpdate({ projectId: project.id, operationId: runId, stage: 'capcut', status: 'completed', stageStatus: 'completed', percent: 100, label: 'Dự án đã sẵn sàng' });
+    }
     void refreshEntitlements();
   };
 
-  const runPipeline = async (downloadFirst = false, transitionStarted = false) => {
-    if (running && !transitionStarted) return;
+  const executePipeline = async (downloadFirst = false) => {
+    const existingRuntime = useLocalizeRuntimeStore.getState().jobs[project.id];
+    if (!runIdRef.current || existingRuntime?.status !== 'running') {
+      const result = await window.gensuite.localize.start({ projectId: project.id, ...await jobFingerprints() });
+      if (!result.ok) {
+        reportFailure(result.error, activeStageRef.current ?? 'download');
+        return;
+      }
+      runIdRef.current = result.value.operationId;
+      useLocalizeRuntimeStore.getState().acceptManifest(result.value);
+    }
     setError('');
     setDiagnosticCopyState('idle');
     setPipelineFailure(null);
@@ -459,6 +598,28 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     }
   };
 
+  const runPipeline = async (downloadFirst = false) => {
+    const active = activeLocalizeExecutions.get(project.id);
+    if (active) return active;
+    const execution = executePipeline(downloadFirst);
+    activeLocalizeExecutions.set(project.id, execution);
+    try {
+      await execution;
+    } finally {
+      if (activeLocalizeExecutions.get(project.id) === execution) activeLocalizeExecutions.delete(project.id);
+    }
+  };
+
+  useEffect(() => {
+    if (!runtimeJob || !['running', 'blocked'].includes(runtimeJob.status)) return;
+    const resumeKey = `${runtimeJob.runId}:${runtimeJob.status}`;
+    if (resumeAttemptRef.current === resumeKey || activeLocalizeExecutions.has(project.id)) return;
+    resumeAttemptRef.current = resumeKey;
+    onSetupStepChange('process');
+    const timer = window.setTimeout(() => void runPipeline(false), 250);
+    return () => window.clearTimeout(timer);
+  }, [onSetupStepChange, project.id, runtimeJob?.runId, runtimeJob?.status]);
+
   const chooseCapCutDirectory = async () => {
     if (running) return;
     setError('');
@@ -471,7 +632,14 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     if (stage === 'recognition') {
       transcriberRef.current?.cancel?.();
       await window.gensuite.whisper.cancel(project.id).catch(() => false);
-    } else if (stage === 'voice') voiceRef.current?.cancel?.();
+    } else if (stage === 'voice') {
+      for (const provider of voiceRefs.current) provider.cancel?.();
+    }
+    const operationId = runIdRef.current;
+    if (operationId) {
+      const result = await window.gensuite.localize.cancel({ projectId: project.id, operationId });
+      if (result.ok) useLocalizeRuntimeStore.getState().acceptManifest(result.value);
+    }
   };
 
   const loginVideoPlatform = async () => {
@@ -533,8 +701,12 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
   const missingVoice = validationVisible && Boolean(project.settings.localizeVoiceProviderConfirmed) && !voiceConfig.voiceId;
   const startValidationMissing = sourceInputMissing
     || !sourceChoicesReady || !project.settings.localizeVoiceProviderConfirmed || !voiceConfig.voiceId;
-  const startFromSetup = () => {
-    if (running) return;
+  const startFromSetup = async () => {
+    const existingRuntime = useLocalizeRuntimeStore.getState().jobs[project.id];
+    if (existingRuntime?.status === 'running') {
+      onSetupStepChange('process');
+      return;
+    }
     if (startValidationMissing) {
       setValidationAttempt((current) => current + 1);
       setError('Vui lòng hoàn tất các mục bắt buộc được đánh dấu bên dưới.');
@@ -545,13 +717,25 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       return;
     }
     setError('');
-    setPipelineProgress(initialPipelineProgress());
+    const steps = initialPipelineProgress();
+    setPipelineProgress(steps);
     setStage('download');
+    const result = await window.gensuite.localize.start({
+      projectId: project.id,
+      ...await jobFingerprints(),
+      restart: existingRuntime?.status === 'completed' || existingRuntime?.status === 'cancelled',
+    });
+    if (!result.ok) {
+      reportFailure(result.error, 'download');
+      return;
+    }
+    runIdRef.current = result.value.operationId;
+    useLocalizeRuntimeStore.getState().acceptManifest(result.value);
     touchStage('download', 0, 'Đang chuẩn bị tải video');
     onSetupStepChange('process');
     // Let the process screen paint before starting any disk or network work.
     window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => void runPipeline(true, true));
+      window.requestAnimationFrame(() => void runPipeline(true));
     });
   };
   const activeStep = pipelineProgress.find((step) => step.status === 'active');
@@ -629,8 +813,9 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
         <div className="relative flex flex-wrap items-center gap-4">
           <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-emerald-200/25 bg-emerald-300/15 text-emerald-200 shadow-[0_0_30px_rgba(52,211,153,.12)]"><Sparkles size={21} /></span>
           <div className="min-w-[220px] flex-1"><p className="text-base font-black text-white">Dự án CapCut đã sẵn sàng</p><p className="mt-1 text-[11px] text-white/45">Mở CapCut để hoàn thiện phụ đề, hiệu ứng và bố cục theo phong cách của bạn.</p><div className="mt-3 flex flex-wrap gap-2"><span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{validScenes(project).length} câu thoại</span><span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{languageLabel(targetLanguage)}</span><span className="max-w-[220px] truncate rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{friendlyVoiceLabel(project)}</span></div></div>
-          <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => void runPipeline(false)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-3 text-[10px] font-bold text-white/55 transition hover:bg-white/[0.05] hover:text-white"><RotateCcw size={13} />Tạo lại</button><button type="button" onClick={() => window.gensuite.shell.showItemInFolder(project.capcutDraftPath!)} className="primary-action inline-flex items-center gap-2 rounded-xl px-4 py-3 text-[10px] font-black"><FolderOpen size={14} />Mở thư mục dự án</button></div>
+          <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => void runPipeline(false)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-3 text-[10px] font-bold text-white/55 transition hover:bg-white/[0.05] hover:text-white"><RotateCcw size={13} />Tạo lại</button><button type="button" onClick={() => window.gensuite.shell.showItemInFolder(project.capcutDraftPath!)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-3 text-[10px] font-bold text-white/55 transition hover:bg-white/[0.05] hover:text-white"><FolderOpen size={13} />Mở thư mục</button><button type="button" onClick={() => void openCapCut()} className="primary-action inline-flex items-center gap-2 rounded-xl px-4 py-3 text-[10px] font-black"><ExternalLink size={14} />Mở CapCut</button></div>
         </div>
+        {capCutLaunchError && <div role="alert" className="relative mt-4 rounded-xl border border-red-300/20 bg-red-400/[0.07] px-4 py-3 text-[10px] font-semibold text-red-100">{capCutLaunchError}</div>}
       </div>}
 
       <div className="mt-4 overflow-hidden rounded-xl border border-white/[0.055] bg-black/10">
@@ -649,7 +834,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       <div className="flex items-center gap-2">
         {setupStep === 'process' && !running && <button type="button" onClick={() => onSetupStepChange('source')} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-4 py-3 text-xs font-bold text-white/55"><ArrowLeft size={15} />Thiết lập</button>}
         {running ? <button type="button" onClick={() => void cancelCurrent()} disabled={stage !== 'recognition' && stage !== 'voice'} className="inline-flex items-center gap-2 rounded-xl border border-red-400/20 px-4 py-3 text-xs font-bold text-red-200 disabled:opacity-30"><X size={15} />Dừng</button>
-          : (!capcutReady || sourceSelectionChanged) && <button type="button" onClick={setupStep === 'source' ? startFromSetup : () => void runPipeline(false)} className="primary-action inline-flex min-w-44 items-center justify-center gap-2 rounded-xl px-5 py-3 text-xs font-black">{stage === 'error' ? <RotateCcw size={15} /> : <Play size={15} />}{stage === 'error' ? 'Thử lại từ checkpoint' : setupStep === 'source' ? 'Bắt đầu xử lý' : 'Tiếp tục xử lý'}</button>}
+          : (!capcutReady || sourceSelectionChanged) && <button type="button" onClick={setupStep === 'source' ? startFromSetup : () => void runPipeline(false)} className="primary-action inline-flex min-w-44 items-center justify-center gap-2 rounded-xl px-5 py-3 text-xs font-black">{stage === 'error' ? <RotateCcw size={15} /> : <Play size={15} />}{stage === 'error' ? 'Tiếp tục từ phần đã lưu' : setupStep === 'source' ? 'Bắt đầu xử lý' : 'Tiếp tục xử lý'}</button>}
       </div>
     </footer>
   </div>;

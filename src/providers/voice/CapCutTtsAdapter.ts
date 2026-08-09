@@ -1,6 +1,7 @@
 import type { IVoiceProvider, VoiceRequest, VoiceResult } from './types';
 import { capCutVoiceById } from './capcutTtsCatalog';
 import { clientAppError } from '../clientAppError';
+import { useEntitlementStore, voiceConcurrencyForTier } from '../../store/entitlementStore';
 
 export class CapCutTtsAdapter implements IVoiceProvider {
   readonly engine = 'capcuttts' as const;
@@ -24,6 +25,7 @@ export class CapCutTtsAdapter implements IVoiceProvider {
         voiceId: voice.voiceId,
         resourceId: voice.resourceId,
         speed: req.speed,
+        concurrency: voiceConcurrencyForTier(useEntitlementStore.getState().tier),
       });
       if (!response.ok) throw response.error;
       const result = response.value;

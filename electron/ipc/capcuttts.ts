@@ -41,6 +41,68 @@ const AUDIO_DOWNLOAD_TIMEOUT_MS = 60_000;
 const AUDIO_ASSEMBLY_TIMEOUT_MS = 2 * 60_000;
 const AUDIO_PROBE_TIMEOUT_MS = 30_000;
 
+interface VoiceSlotWaiter {
+  limit: number;
+  signal: AbortSignal;
+  resolve: (release: () => void) => void;
+  reject: (error: unknown) => void;
+  abort: () => void;
+}
+
+let activeVoiceSlots = 0;
+const voiceSlotQueue: VoiceSlotWaiter[] = [];
+
+function normalizedVoiceConcurrency(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? Math.max(1, Math.min(6, parsed)) : 1;
+}
+
+function drainVoiceSlots(): void {
+  while (voiceSlotQueue.length) {
+    const waiter = voiceSlotQueue[0];
+    if (waiter.signal.aborted) {
+      voiceSlotQueue.shift();
+      waiter.signal.removeEventListener('abort', waiter.abort);
+      waiter.reject(appFailure('VOICE_CANCELLED'));
+      continue;
+    }
+    if (activeVoiceSlots >= waiter.limit) break;
+    voiceSlotQueue.shift();
+    waiter.signal.removeEventListener('abort', waiter.abort);
+    activeVoiceSlots += 1;
+    let released = false;
+    waiter.resolve(() => {
+      if (released) return;
+      released = true;
+      activeVoiceSlots = Math.max(0, activeVoiceSlots - 1);
+      drainVoiceSlots();
+    });
+  }
+}
+
+function acquireVoiceSlot(limit: number, signal: AbortSignal): Promise<() => void> {
+  return new Promise((resolve, reject) => {
+    const waiter = {} as VoiceSlotWaiter;
+    waiter.limit = normalizedVoiceConcurrency(limit);
+    waiter.signal = signal;
+    waiter.resolve = resolve;
+    waiter.reject = reject;
+    waiter.abort = () => {
+      const index = voiceSlotQueue.indexOf(waiter);
+      if (index >= 0) voiceSlotQueue.splice(index, 1);
+      reject(appFailure('VOICE_CANCELLED'));
+      drainVoiceSlots();
+    };
+    if (signal.aborted) {
+      reject(appFailure('VOICE_CANCELLED'));
+      return;
+    }
+    signal.addEventListener('abort', waiter.abort, { once: true });
+    voiceSlotQueue.push(waiter);
+    drainVoiceSlots();
+  });
+}
+
 class VoiceMergeFailure extends Error {
   constructor(
     readonly kind: 'spawn' | 'exit',
@@ -614,8 +676,10 @@ export async function synthesizeCapCutTts(args: CapCutTtsSynthesizeArgs): Promis
       throw voiceOutputFailure(error);
     }
     const chunks = splitCapCutTtsText(args.text);
-    for (let index = 0; index < chunks.length; index += 1) {
+    const concurrency = normalizedVoiceConcurrency(args.concurrency);
+    const processChunk = async (index: number): Promise<void> => {
       let bytes: Buffer;
+      const releaseSlot = await acquireVoiceSlot(concurrency, controller.signal);
       try {
         bytes = await generateAudioWithRetry({ ...args, text: chunks[index] }, controller.signal);
       } catch (error) {
@@ -631,6 +695,8 @@ export async function synthesizeCapCutTts(args: CapCutTtsSynthesizeArgs): Promis
           });
         }
         throw error;
+      } finally {
+        releaseSlot();
       }
       if (chunks.length === 1) {
         try {
@@ -638,10 +704,10 @@ export async function synthesizeCapCutTts(args: CapCutTtsSynthesizeArgs): Promis
         } catch (error) {
           throw voiceOutputFailure(error);
         }
-        continue;
+        return;
       }
       const partPath = `${workPrefix}.chunk-${String(index).padStart(3, '0')}.mp3`;
-      partFiles.push(partPath);
+      partFiles[index] = partPath;
       try {
         await fs.writeFile(partPath, bytes);
       } catch (error) {
@@ -663,7 +729,23 @@ export async function synthesizeCapCutTts(args: CapCutTtsSynthesizeArgs): Promis
           chunkCount: chunks.length,
         }, { classifier: 'chunk-audio-validation' });
       }
-    }
+    };
+    let nextChunk = 0;
+    let firstChunkFailure: unknown;
+    const chunkWorkers = Array.from({ length: Math.min(concurrency, chunks.length) }, async () => {
+      while (firstChunkFailure === undefined) {
+        const index = nextChunk;
+        nextChunk += 1;
+        if (index >= chunks.length) return;
+        try {
+          await processChunk(index);
+        } catch (error) {
+          if (firstChunkFailure === undefined) firstChunkFailure = error;
+        }
+      }
+    });
+    await Promise.all(chunkWorkers);
+    if (firstChunkFailure !== undefined) throw firstChunkFailure;
     if (partFiles.length > 1) await mergeAudioParts(partFiles, manifest, partial, controller.signal);
     let durationSec: number;
     try {

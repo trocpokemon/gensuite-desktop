@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -41,6 +41,10 @@ type CompatibilityTemplate = {
   directory: string;
   fileName: 'draft_content.json' | 'draft_info.json';
   profile: CapCutCompatibilityProfile;
+};
+
+type CachedCompatibilityProfile = Omit<CompatibilityTemplate, 'directory'> & {
+  schemaVersion: 1;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -175,6 +179,64 @@ async function editorIsRunning(): Promise<boolean> {
   });
 }
 
+async function capCutExecutableCandidates(): Promise<string[]> {
+  if (process.platform === 'darwin') {
+    return [
+      '/Applications/CapCut.app',
+      path.join(os.homedir(), 'Applications', 'CapCut.app'),
+    ];
+  }
+  if (process.platform !== 'win32') return [];
+
+  const local = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local');
+  const programFiles = [process.env.ProgramFiles, process.env['ProgramFiles(x86)']]
+    .filter((value): value is string => Boolean(value));
+  const appsRoot = path.join(local, 'CapCut', 'Apps');
+  const candidates = [
+    path.join(appsRoot, 'CapCut.exe'),
+    path.join(local, 'Programs', 'CapCut', 'CapCut.exe'),
+    ...programFiles.map((root) => path.join(root, 'CapCut', 'CapCut.exe')),
+  ];
+
+  try {
+    const versionDirectories = await fs.readdir(appsRoot, { withFileTypes: true });
+    const versionCandidates = await Promise.all(versionDirectories
+      .filter((entry) => entry.isDirectory())
+      .map(async (entry) => {
+        const executable = path.join(appsRoot, entry.name, 'CapCut.exe');
+        const stat = await fs.stat(executable).catch(() => null);
+        return stat?.isFile() ? { executable, modifiedAt: stat.mtimeMs } : null;
+      }));
+    candidates.push(...versionCandidates
+      .filter((entry): entry is { executable: string; modifiedAt: number } => Boolean(entry))
+      .sort((left, right) => right.modifiedAt - left.modifiedAt)
+      .map((entry) => entry.executable));
+  } catch {
+    // Other well-known installation locations are still checked below.
+  }
+  return [...new Set(candidates.map((candidate) => path.resolve(candidate)))];
+}
+
+async function launchCapCut(): Promise<boolean> {
+  const candidates = await capCutExecutableCandidates();
+  let installationFound = false;
+  for (const candidate of candidates) {
+    const stat = await fs.stat(candidate).catch(() => null);
+    if (!stat || (!stat.isFile() && !stat.isDirectory())) continue;
+    installationFound = true;
+    const launchError = await shell.openPath(candidate);
+    if (!launchError) return true;
+  }
+  if (installationFound) {
+    throw appFailure('CAPCUT_APP_LAUNCH_FAILED', undefined, {
+      operation: 'editor-launch', classifier: 'launch-failed',
+    });
+  }
+  throw appFailure('CAPCUT_APP_UNAVAILABLE', undefined, {
+    operation: 'editor-launch', classifier: 'app-not-found',
+  });
+}
+
 async function probeSourceVideo(sourceVideoPath: string): Promise<{ width: number; height: number; durationSec: number }> {
   return await new Promise((resolve, reject) => {
     const child = spawn(ffprobeBinary(), [
@@ -227,8 +289,10 @@ async function discoverCompatibilityProfile(
   let directories;
   try {
     directories = (await fs.readdir(draftsDirectory, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('GenSuite -'));
+      .filter((entry) => entry.isDirectory());
   } catch (error) {
+    const cached = await loadCompatibilityProfile(expectedOs);
+    if (cached) return cached;
     throw appFailure('CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE', undefined, {
       operation: 'draft-compatibility',
       systemCode: systemCode(error),
@@ -237,9 +301,9 @@ async function discoverCompatibilityProfile(
   const ranked = await Promise.all(directories.map(async (entry) => {
     const directory = path.join(draftsDirectory, entry.name);
     const modified = await fs.stat(directory).then((stat) => stat.mtimeMs).catch(() => 0);
-    return { directory, modified };
+    return { directory, modified, generated: entry.name.startsWith('GenSuite -') };
   }));
-  ranked.sort((left, right) => right.modified - left.modified);
+  ranked.sort((left, right) => Number(left.generated) - Number(right.generated) || right.modified - left.modified);
   const fileNames: CompatibilityTemplate['fileName'][] = expectedOs === 'windows'
     ? ['draft_content.json']
     : ['draft_info.json', 'draft_content.json'];
@@ -251,16 +315,53 @@ async function discoverCompatibilityProfile(
         if (!stat.isFile() || stat.size <= 100 || stat.size > MAX_TEMPLATE_BYTES) continue;
         const parsed: unknown = JSON.parse(await fs.readFile(filePath, 'utf8'));
         const profile = readCapCutCompatibilityProfile(parsed, expectedOs);
-        if (profile) return { fileName, profile };
+        if (profile) {
+          const discovered = { fileName, profile };
+          await saveCompatibilityProfile(discovered).catch(() => undefined);
+          return discovered;
+        }
       } catch {
         // Ignore unreadable, stale or incompatible projects and inspect the next one.
       }
     }
   }
+  const cached = await loadCompatibilityProfile(expectedOs);
+  if (cached) return cached;
   throw appFailure('CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE', undefined, {
     operation: 'draft-compatibility',
     classifier: 'profile-missing',
   });
+}
+
+function compatibilityProfilePath(expectedOs: CapCutHostOs): string {
+  return path.join(app.getPath('userData'), 'GenSuite', 'runtime', `capcut-compatibility-${expectedOs}.json`);
+}
+
+async function loadCompatibilityProfile(expectedOs: CapCutHostOs): Promise<Omit<CompatibilityTemplate, 'directory'> | null> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(compatibilityProfilePath(expectedOs), 'utf8')) as CachedCompatibilityProfile;
+    if (parsed.schemaVersion !== 1 || !['draft_content.json', 'draft_info.json'].includes(parsed.fileName)) return null;
+    const verified = readCapCutCompatibilityProfile(applyCapCutCompatibilityProfile({
+      version: parsed.profile.version,
+      new_version: parsed.profile.newVersion,
+      tracks: [],
+      materials: {},
+      platform: parsed.profile.platform,
+      last_modified_platform: parsed.profile.lastModifiedPlatform,
+      ...parsed.profile.markers,
+    }, parsed.profile), expectedOs);
+    return verified ? { fileName: parsed.fileName, profile: verified } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveCompatibilityProfile(value: Omit<CompatibilityTemplate, 'directory'>): Promise<void> {
+  const expectedOs = hostOs();
+  if (!expectedOs) return;
+  const filePath = compatibilityProfilePath(expectedOs);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await writeTextTransactional(filePath, JSON.stringify({ schemaVersion: 1, ...value } satisfies CachedCompatibilityProfile));
 }
 
 async function createCompatibilityTemplate(
@@ -671,6 +772,16 @@ async function exportDraft(args: CapCutDraftExportArgs): Promise<CapCutDraftExpo
 }
 
 export function registerCapCutDraftIpc(): void {
+  ipcMain.handle('capcut:launch', async () => {
+    try {
+      return appSuccess(await launchCapCut());
+    } catch (error) {
+      return appFailureResult<boolean>(error, 'CAPCUT_APP_LAUNCH_FAILED', {
+        operation: 'editor-launch',
+      });
+    }
+  });
+
   ipcMain.handle('capcut:exportDraft', async (_event, args: unknown) => {
     try {
       validateExportArgs(args);

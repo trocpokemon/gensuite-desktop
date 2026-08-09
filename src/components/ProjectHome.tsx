@@ -1,14 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
-import { AudioLines, Copy, Download, FileText, Film, FolderOpen, HardDrive, ImagePlus, Languages, LogOut, Mic, Plus, Search, Sparkles, Trash2, UserRound } from 'lucide-react';
+import { AlertTriangle, AudioLines, Copy, Download, FileText, Film, FolderOpen, HardDrive, ImagePlus, Languages, Loader2, LogOut, Mic, Plus, Search, Sparkles, Trash2, UserRound } from 'lucide-react';
 import { useProjectStore } from '../store/projectStore';
 import { useAuthStore } from '../store/authStore';
 import { localFileUrl } from '../shared/localFile';
 import type { ProjectSummary } from '../shared/types';
 import { QuickToolWorkspace, type QuickToolId } from './QuickToolWorkspace';
+import { localizeOverallPercent, useLocalizeRuntimeStore, type LocalizeRuntimeStage } from '../store/localizeRuntimeStore';
+import { publicErrorMessage } from '../providers/errors';
 
 const STEP_LABEL: Record<string, string> = {
   topic: 'Chọn chủ đề', content: 'Viết nội dung', storyboard: 'Storyboard', voice: 'Giọng đọc', timeline: 'Xuất video', localize: 'Dịch & lồng tiếng', narrate: 'Video Review',
+};
+
+const LOCALIZE_STAGE_LABEL: Record<LocalizeRuntimeStage, string> = {
+  download: 'Đang tải video',
+  recognition: 'Đang nhận dạng lời thoại',
+  translation: 'Đang dịch',
+  voice: 'Đang tạo voice',
+  capcut: 'Đang tạo dự án chỉnh sửa',
 };
 
 const AVATAR_FIELDS = ['avatar_url', 'picture', 'avatarUrl', 'photo_url', 'photoURL'] as const;
@@ -78,6 +88,7 @@ function ProjectThumbnail({ project }: { project: ProjectSummary }) {
 }
 
 export function ProjectHome({ onOpenSettings }: Props) {
+  const localizeJobs = useLocalizeRuntimeStore((state) => state.jobs);
   const authUser = useAuthStore((state) => state.user);
   const authEmail = useAuthStore((state) => state.email);
   const signOut = useAuthStore((state) => state.signOut);
@@ -92,7 +103,15 @@ export function ProjectHome({ onOpenSettings }: Props) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [quickTool, setQuickTool] = useState<QuickToolId | null>(null);
+  const [backgroundNotice, setBackgroundNotice] = useState(false);
   const avatarUrl = useMemo(() => readAvatarUrl(authUser), [authUser]);
+  const activeBackgroundJob = Object.values(localizeJobs).find((job) => job.status === 'running');
+
+  const canChangeProject = (nextProjectId?: string): boolean => {
+    if (!activeBackgroundJob || activeBackgroundJob.projectId === nextProjectId) return true;
+    setBackgroundNotice(true);
+    return false;
+  };
 
   const visible = projects.filter((project) =>
     `${project.name} ${project.topicName}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
@@ -130,8 +149,21 @@ export function ProjectHome({ onOpenSettings }: Props) {
           )}
         </header>
 
+        {backgroundNotice && activeBackgroundJob && (
+          <div role="status" className="mb-5 flex items-start justify-between gap-4 rounded-2xl border border-amber-300/20 bg-amber-300/[0.07] px-4 py-3.5 text-amber-50/85">
+            <div className="flex min-w-0 items-start gap-3">
+              <Loader2 size={17} className="mt-0.5 shrink-0 animate-spin text-amber-200" />
+              <div className="min-w-0">
+                <div className="text-sm font-bold">Một dự án đang được xử lý nền</div>
+                <div className="mt-1 text-xs leading-5 text-amber-50/55">Bạn có thể mở lại đúng dự án đó để theo dõi. Hãy chờ hoàn tất trước khi chuyển sang dự án khác.</div>
+              </div>
+            </div>
+            <button type="button" onClick={() => setBackgroundNotice(false)} className="shrink-0 rounded-lg px-3 py-1.5 text-xs font-semibold text-amber-100/65 transition hover:bg-amber-100/10 hover:text-amber-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200">Đã hiểu</button>
+          </div>
+        )}
+
         <div className="mb-7 grid grid-cols-1 gap-4 md:grid-cols-3">
-          <button onClick={() => void createLocalizeProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-400/[0.12] via-indigo-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-sky-400/40">
+          <button onClick={() => canChangeProject() && void createLocalizeProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-400/[0.12] via-indigo-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-sky-400/40">
             <HeroBadges />
             <div className="mb-4 inline-flex rounded-xl bg-sky-400/15 p-3 text-sky-300"><Languages size={24} /></div>
             <h2 className="text-lg font-bold text-white">Dịch & lồng tiếng video</h2>
@@ -141,7 +173,7 @@ export function ProjectHome({ onOpenSettings }: Props) {
             </span>
           </button>
 
-          <button onClick={() => void createNarrationProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-amber-300/20 bg-gradient-to-br from-amber-300/[0.13] via-orange-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-amber-300/45">
+          <button onClick={() => canChangeProject() && void createNarrationProject()} className="hero-tool group relative overflow-hidden rounded-2xl border border-amber-300/20 bg-gradient-to-br from-amber-300/[0.13] via-orange-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-amber-300/45">
             <HeroBadges isDemo />
             <div className="mb-4 inline-flex rounded-xl bg-amber-300/15 p-3 text-amber-200"><AudioLines size={24} /></div>
             <h2 className="text-lg font-bold text-white">Video Review</h2>
@@ -151,7 +183,7 @@ export function ProjectHome({ onOpenSettings }: Props) {
             </span>
           </button>
 
-          <button onClick={() => setCreating(true)} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-emerald-400/[0.12] via-teal-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-emerald-400/40">
+          <button onClick={() => canChangeProject() && setCreating(true)} className="hero-tool group relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-emerald-400/[0.12] via-teal-400/[0.04] to-transparent p-6 text-left transition hover:-translate-y-0.5 hover:border-emerald-400/40">
             <HeroBadges isDemo />
             <div className="mb-4 inline-flex rounded-xl bg-emerald-400/15 p-3 text-emerald-300"><Sparkles size={24} /></div>
             <h2 className="text-lg font-bold text-white">Tạo dự án nội dung</h2>
@@ -199,12 +231,20 @@ export function ProjectHome({ onOpenSettings }: Props) {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {visible.map((project) => (
-              <article key={project.id} className="workspace-panel group rounded-2xl p-5 transition hover:-translate-y-0.5 hover:border-emerald-400/30">
-                <button onClick={() => openProject(project.id)} className="w-full text-left">
+            {visible.map((project) => {
+              const runtime = localizeJobs[project.id];
+              const processing = runtime?.status === 'running';
+              const failed = runtime?.status === 'error' || runtime?.status === 'blocked';
+              const runtimePercent = localizeOverallPercent(runtime);
+              const runtimeFailureMessage = runtime?.failure ? publicErrorMessage(runtime.failure.error) : runtime?.errorMessage;
+              return (
+              <article key={project.id} className={`workspace-panel group rounded-2xl p-5 transition hover:-translate-y-0.5 ${failed ? 'border-red-400/30 hover:border-red-400/45' : processing ? 'border-emerald-400/25 hover:border-emerald-400/45' : 'hover:border-emerald-400/30'}`}>
+                <button onClick={() => canChangeProject(project.id) && void openProject(project.id)} className="w-full text-left">
                   <div className="relative mb-5 h-28 overflow-hidden rounded-xl bg-white/[0.03]">
                     <ProjectThumbnail project={project} />
                     <span className="absolute bottom-2 right-2 flex items-center gap-1 rounded-md bg-black/65 px-2 py-1 text-[10px] font-semibold text-white/75 backdrop-blur-sm"><HardDrive size={11} /> {formatProjectSize(project.sizeBytes)}</span>
+                    {processing && <span className="absolute left-2 top-2 inline-flex items-center gap-1.5 rounded-lg border border-emerald-300/20 bg-[#092019]/90 px-2.5 py-1.5 text-[10px] font-bold text-emerald-200 backdrop-blur"><Loader2 size={12} className="animate-spin" />Đang xử lý</span>}
+                    {failed && <span className="absolute left-2 top-2 inline-flex items-center gap-1.5 rounded-lg border border-red-300/20 bg-[#281415]/90 px-2.5 py-1.5 text-[10px] font-bold text-red-200 backdrop-blur"><AlertTriangle size={12} />Có lỗi</span>}
                   </div>
                   <div className="mb-2 flex items-start justify-between gap-3">
                     <h2 className="line-clamp-2 font-bold text-white">{project.name}</h2>
@@ -212,14 +252,20 @@ export function ProjectHome({ onOpenSettings }: Props) {
                   </div>
                   <p className="text-xs font-medium text-emerald-300/80">{project.topicName}</p>
                   <p className="mt-3 text-xs text-white/35">{project.wordCount.toLocaleString('vi-VN')} từ · {project.sceneCount} cảnh · {new Date(project.updatedAt).toLocaleDateString('vi-VN')}</p>
+                  {processing && <div className="mt-4 rounded-xl border border-emerald-300/15 bg-emerald-400/[0.055] px-3 py-2.5">
+                    <div className="flex items-center justify-between gap-3 text-[10px]"><span className="truncate font-semibold text-emerald-100/80">{LOCALIZE_STAGE_LABEL[runtime.stage]}</span><span className="font-mono font-black text-emerald-300">{runtimePercent}%</span></div>
+                    <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-300 transition-[width] duration-500" style={{ width: `${runtimePercent}%` }} /></div>
+                  </div>}
+                  {failed && <div className="mt-4 flex items-start gap-2 rounded-xl border border-red-300/15 bg-red-400/[0.055] px-3 py-2.5 text-[10px] text-red-100/75"><AlertTriangle size={13} className="mt-0.5 shrink-0 text-red-300" /><span className="line-clamp-2">{runtimeFailureMessage || 'Quá trình xử lý đã dừng. Mở dự án để xem chi tiết.'}</span></div>}
                 </button>
                 <div className="mt-4 flex justify-end gap-1 border-t border-white/5 pt-3">
                   <button title="Mở thư mục dự án" onClick={() => window.gensuite.project.openDir(project.id)} className="rounded-lg p-2 text-white/35 hover:bg-emerald-400/10 hover:text-emerald-300"><FolderOpen size={15} /></button>
                   <button title="Nhân bản" onClick={() => duplicateProject(project.id)} className="rounded-lg p-2 text-white/35 hover:bg-white/5 hover:text-white"><Copy size={15} /></button>
-                  <button title="Xóa" onClick={() => confirm(`Xóa dự án “${project.name}”?`) && deleteProject(project.id)} className="rounded-lg p-2 text-white/35 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={15} /></button>
+                  <button title="Xóa" onClick={() => canChangeProject(project.id) && confirm(`Xóa dự án “${project.name}”?`) && void deleteProject(project.id)} className="rounded-lg p-2 text-white/35 hover:bg-red-500/10 hover:text-red-300"><Trash2 size={15} /></button>
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

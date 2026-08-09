@@ -39,6 +39,15 @@ function cloneRecord(value: JsonRecord): JsonRecord {
   return JSON.parse(JSON.stringify(value)) as JsonRecord;
 }
 
+function safePlatform(value: JsonRecord): JsonRecord {
+  const result: JsonRecord = {};
+  for (const key of ['os', 'os_version', 'app_id', 'app_version', 'app_source']) {
+    const candidate = value[key];
+    if (typeof candidate === 'string' || typeof candidate === 'number' || typeof candidate === 'boolean') result[key] = candidate;
+  }
+  return result;
+}
+
 function validSchemaVersion(value: unknown): value is string | number {
   return (typeof value === 'number' && Number.isFinite(value) && value > 0)
     || (typeof value === 'string' && /^\d+$/.test(value) && Number(value) > 0);
@@ -73,8 +82,8 @@ export function readCapCutCompatibilityProfile(
     version: value.version,
     newVersion: value.new_version,
     appVersion: latestVersion,
-    platform: cloneRecord(value.platform),
-    lastModifiedPlatform: cloneRecord(value.last_modified_platform),
+    platform: safePlatform(value.platform),
+    lastModifiedPlatform: safePlatform(value.last_modified_platform),
     markers,
   };
 }

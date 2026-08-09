@@ -70,7 +70,7 @@ function stableHash(value: string): string {
   return `${(first >>> 0).toString(36)}${(second >>> 0).toString(36)}`;
 }
 
-function checkpointIdentity(req: TranslateRequest, provider: string): { key: string; fingerprint: string } | null {
+function checkpointIdentity(req: TranslateRequest, provider: string): { projectId: string; key: string; fingerprint: string } | null {
   if (!req.projectId) return null;
   const fingerprint = stableHash(JSON.stringify({
     provider,
@@ -79,34 +79,36 @@ function checkpointIdentity(req: TranslateRequest, provider: string): { key: str
     segments: req.segments.map((segment) => [segment.id, segment.start, segment.end, segment.text]),
   }));
   return {
+    projectId: req.projectId,
     key: `gensuite_translation_checkpoint_v1:${req.projectId}:${provider}:${fingerprint}`,
     fingerprint,
   };
 }
 
-function loadCheckpoint(identity: { key: string; fingerprint: string } | null): TranslationCheckpoint | null {
+async function loadCheckpoint(identity: { projectId: string; key: string; fingerprint: string } | null): Promise<TranslationCheckpoint | null> {
   if (!identity) return null;
-  try {
-    const parsed = JSON.parse(localStorage.getItem(identity.key) || 'null') as TranslationCheckpoint | null;
-    if (!parsed || parsed.schemaVersion !== 1 || parsed.fingerprint !== identity.fingerprint
-      || Date.now() - parsed.createdAt > CHECKPOINT_TTL_MS || !parsed.completed) {
-      localStorage.removeItem(identity.key);
-      return null;
-    }
-    return parsed;
-  } catch {
+  const result = await window.gensuite.localize.readCheckpoint({ projectId: identity.projectId, scope: 'translation', key: identity.key });
+  if (!result.ok) throw result.error;
+  const parsed = result.value as TranslationCheckpoint | null;
+  if (!parsed || parsed.schemaVersion !== 1 || parsed.fingerprint !== identity.fingerprint
+    || Date.now() - parsed.createdAt > CHECKPOINT_TTL_MS || !parsed.completed) {
+    const removed = await window.gensuite.localize.removeCheckpoint({ projectId: identity.projectId, scope: 'translation', key: identity.key });
+    if (!removed.ok) throw removed.error;
     return null;
   }
+  return parsed;
 }
 
-function saveCheckpoint(identity: { key: string; fingerprint: string } | null, checkpoint: TranslationCheckpoint): void {
+async function saveCheckpoint(identity: { projectId: string; key: string; fingerprint: string } | null, checkpoint: TranslationCheckpoint): Promise<void> {
   if (!identity) return;
-  try { localStorage.setItem(identity.key, JSON.stringify(checkpoint)); } catch { /* checkpoint is optional */ }
+  const result = await window.gensuite.localize.writeCheckpoint({ projectId: identity.projectId, scope: 'translation', key: identity.key, value: checkpoint });
+  if (!result.ok) throw result.error;
 }
 
-function removeCheckpoint(identity: { key: string; fingerprint: string } | null): void {
+async function removeCheckpoint(identity: { projectId: string; key: string; fingerprint: string } | null): Promise<void> {
   if (!identity) return;
-  try { localStorage.removeItem(identity.key); } catch { /* storage is optional */ }
+  const result = await window.gensuite.localize.removeCheckpoint({ projectId: identity.projectId, scope: 'translation', key: identity.key });
+  if (!result.ok) throw result.error;
 }
 
 async function translateCompleteBatch(
@@ -168,7 +170,7 @@ export async function translateSegmentsReliably(
   if (!req.segments.length) return [];
   const batches = splitTranslationBatches(req.segments);
   const identity = checkpointIdentity(req, provider);
-  const checkpoint = loadCheckpoint(identity) ?? {
+  const checkpoint = await loadCheckpoint(identity) ?? {
     schemaVersion: 1,
     fingerprint: identity?.fingerprint ?? '',
     createdAt: Date.now(),
@@ -195,7 +197,7 @@ export async function translateSegmentsReliably(
         phase: 'requesting',
       }));
       checkpoint.completed[String(index)] = result.map((segment) => segment.text);
-      saveCheckpoint(identity, checkpoint);
+      await saveCheckpoint(identity, checkpoint);
     }
     translated.push(...result);
     report({
@@ -223,7 +225,7 @@ export async function translateSegmentsReliably(
     }
   }
   if (findTranslationCollapseRuns(req.segments, translated).length) throw clientAppError('TRANSLATION_REPETITION_DETECTED');
-  removeCheckpoint(identity);
+  await removeCheckpoint(identity);
   report({ completedSegments: req.segments.length, batchNumber: batches.length, phase: 'completed' });
   return translated;
 }

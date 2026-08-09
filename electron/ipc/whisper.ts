@@ -193,6 +193,35 @@ function silentWav(durationSeconds = 0.5): Buffer {
   return buffer;
 }
 
+function modelPreflightExitFailure(code: number | null): AppFailure {
+  const unsigned = code === null ? null : code >>> 0;
+  // Windows loader failures describe the bundled recognition component, not
+  // the downloaded model. Keeping these distinct prevents pointless model
+  // deletion/redownload loops on affected client machines.
+  if (unsigned === 0xC0000135) {
+    return appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE', undefined, {
+      exitCode: unsigned,
+      classifier: 'runtime-dependency-missing',
+    });
+  }
+  if (unsigned === 0xC0000017) {
+    return appFailure('TRANSCRIPTION_MEMORY_LIMIT', undefined, {
+      exitCode: unsigned,
+      classifier: 'memory-unavailable',
+    });
+  }
+  if (unsigned === 0xC000007B) {
+    return appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE', undefined, {
+      exitCode: unsigned,
+      classifier: 'runtime-binary-incompatible',
+    });
+  }
+  return appFailure('TRANSCRIPTION_MODEL_INVALID', undefined, {
+    exitCode: unsigned ?? undefined,
+    classifier: 'preflight-exit',
+  });
+}
+
 async function validateModelRuntime(model: WhisperModelName, filePath: string): Promise<void> {
   const stat = await fs.stat(filePath);
   const binaryStat = await fs.stat(whisperBinary());
@@ -227,9 +256,7 @@ async function validateModelRuntime(model: WhisperModelName, filePath: string): 
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        code === 0
-          ? resolve()
-          : reject(appFailure('TRANSCRIPTION_MODEL_INVALID', undefined, { exitCode: code ?? undefined, classifier: 'preflight-exit' }));
+        code === 0 ? resolve() : reject(modelPreflightExitFailure(code));
       });
     });
     const verified = await fs.stat(filePath);
@@ -304,7 +331,8 @@ async function ensureModelUnlocked(model: WhisperModelName, win: BrowserWindow |
     try {
       await validateModelRuntime(model, dest);
       return dest;
-    } catch {
+    } catch (error) {
+      if (!(error instanceof AppFailure) || error.code !== 'TRANSCRIPTION_MODEL_INVALID') throw error;
       await fs.unlink(dest).catch(() => undefined);
       await fs.unlink(`${dest}.verified.json`).catch(() => undefined);
     }
@@ -974,7 +1002,7 @@ export function registerWhisperIpc(): void {
 
       const binary = ffmpegBinary();
       if (!(await fileExists(binary))) throw appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE');
-      emit(win, { phase: 'extracting' });
+      emit(win, { phase: 'extracting', projectId });
       await new Promise<void>((resolve, reject) => {
         const child = spawn(binary, [
           '-y', '-i', sourcePath,
@@ -1100,7 +1128,7 @@ export function registerWhisperIpc(): void {
       if (!(audioDuration > 0)) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
       const chunks = buildTranscriptionChunks(audioDuration);
       if (!chunks.length) throw appFailure('TRANSCRIPTION_SOURCE_UNREADABLE');
-      emit(win, { phase: 'transcribing', percent: 1, model, chunkNumber: 1, chunkCount: chunks.length });
+      emit(win, { phase: 'transcribing', percent: 1, model, projectId, chunkNumber: 1, chunkCount: chunks.length });
 
       const workDir = path.join(projectDir(projectId), 'work', 'transcription-chunks');
       try {
@@ -1132,7 +1160,7 @@ export function registerWhisperIpc(): void {
       if (completed.size) {
         const resumedPercent = Math.max(1, Math.min(99, Math.round((completed.size / chunks.length) * 99)));
         emit(win, {
-          phase: 'transcribing', percent: resumedPercent, model,
+          phase: 'transcribing', percent: resumedPercent, model, projectId,
           chunkNumber: Math.min(chunks.length, completed.size + 1), chunkCount: chunks.length,
         });
       }
@@ -1159,7 +1187,7 @@ export function registerWhisperIpc(): void {
               ((index + chunkPercent / 100) / chunks.length) * 99,
             )));
             emit(win, {
-              phase: 'transcribing', percent, model,
+              phase: 'transcribing', percent, model, projectId,
               chunkNumber: index + 1, chunkCount: chunks.length,
             });
           },
@@ -1173,7 +1201,7 @@ export function registerWhisperIpc(): void {
           throw tempFailure(error);
         }
         const percent = Math.max(1, Math.min(99, Math.round((completed.size / chunks.length) * 99)));
-        emit(win, { phase: 'transcribing', percent, model, chunkNumber: index + 1, chunkCount: chunks.length });
+        emit(win, { phase: 'transcribing', percent, model, projectId, chunkNumber: index + 1, chunkCount: chunks.length });
       }
 
       const chunkResults = [...completed.values()]
@@ -1181,7 +1209,7 @@ export function registerWhisperIpc(): void {
         .map(({ chunk, segments }) => ({ chunk, segments }));
       const segments = mergeTranscriptionChunks(chunkResults, audioDuration);
       if (!segments.length) throw appFailure('TRANSCRIPTION_NO_SPEECH');
-      emit(win, { phase: 'complete', percent: 100, model, chunkNumber: chunks.length, chunkCount: chunks.length });
+      emit(win, { phase: 'complete', percent: 100, model, projectId, chunkNumber: chunks.length, chunkCount: chunks.length });
       return appSuccess(segments);
     } catch (error) {
       return appFailureResult(error, 'TRANSCRIPTION_UNEXPECTED', { operation: 'transcribe' });

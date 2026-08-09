@@ -1,6 +1,7 @@
 import { app, ipcMain, shell } from 'electron';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { ProjectState } from '../../src/shared/types';
 
 // Root: <userData>/GenSuite/projects/<id>/project.json
@@ -16,6 +17,10 @@ function projectFile(id: string): string {
   return path.join(projectDir(id), 'project.json');
 }
 
+function projectBackupFile(id: string): string {
+  return path.join(projectDir(id), 'project.backup.json');
+}
+
 const lastPointer = () => path.join(projectsRoot(), 'last.json');
 
 async function ensureDir(dir: string): Promise<void> {
@@ -29,6 +34,30 @@ function sanitize(name: string): string {
 async function exists(filePath?: string): Promise<boolean> {
   if (!filePath) return false;
   return fs.access(filePath).then(() => true).catch(() => false);
+}
+
+async function writeJsonTransactional(filePath: string, value: unknown, backupPath?: string): Promise<void> {
+  await ensureDir(path.dirname(filePath));
+  const partialPath = `${filePath}.${randomUUID()}.partial`;
+  const displacedPath = `${filePath}.${randomUUID()}.previous`;
+  const serialized = JSON.stringify(value, null, 2);
+  await fs.writeFile(partialPath, serialized, { encoding: 'utf8', flag: 'wx' });
+  JSON.parse(await fs.readFile(partialPath, 'utf8'));
+  const existed = await exists(filePath);
+  let displaced = false;
+  try {
+    if (existed) {
+      if (backupPath) await fs.copyFile(filePath, backupPath);
+      await fs.rename(filePath, displacedPath);
+      displaced = true;
+    }
+    await fs.rename(partialPath, filePath);
+    if (displaced) await fs.rm(displacedPath, { force: true });
+  } catch (error) {
+    await fs.rm(partialPath, { force: true }).catch(() => undefined);
+    if (displaced && !(await exists(filePath))) await fs.rename(displacedPath, filePath).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function directorySize(dir: string): Promise<number> {
@@ -81,14 +110,18 @@ async function reconcileProjectFiles(state: ProjectState): Promise<{ project: Pr
 }
 
 async function readProject(id: string): Promise<ProjectState | null> {
-  try {
-    const raw = JSON.parse(await fs.readFile(projectFile(id), 'utf-8')) as ProjectState;
-    const { project, changed } = await reconcileProjectFiles(raw);
-    if (changed) await fs.writeFile(projectFile(id), JSON.stringify(project, null, 2), 'utf-8');
-    return project;
-  } catch {
-    return null;
+  for (const candidate of [projectFile(id), projectBackupFile(id)]) {
+    try {
+      const raw = JSON.parse(await fs.readFile(candidate, 'utf-8')) as ProjectState;
+      if (!raw?.id || raw.id !== id) continue;
+      const { project, changed } = await reconcileProjectFiles(raw);
+      if (changed) await writeJsonTransactional(projectFile(id), project, projectBackupFile(id));
+      return project;
+    } catch {
+      // A validated backup keeps a project recoverable after an interrupted write.
+    }
   }
+  return null;
 }
 
 export function registerProjectIpc(): void {
@@ -97,8 +130,8 @@ export function registerProjectIpc(): void {
     const dir = projectDir(state.id);
     await ensureDir(dir);
     const next = { ...state, updatedAt: new Date().toISOString() };
-    await fs.writeFile(projectFile(state.id), JSON.stringify(next, null, 2), 'utf-8');
-    await fs.writeFile(lastPointer(), JSON.stringify({ id: state.id }), 'utf-8');
+    await writeJsonTransactional(projectFile(state.id), next, projectBackupFile(state.id));
+    await writeJsonTransactional(lastPointer(), { id: state.id });
     return dir;
   });
 

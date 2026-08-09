@@ -20,10 +20,20 @@ const reliabilityPath = path.resolve('src/providers/script/translationReliabilit
 const quality = evaluate(await compile(qualityPath), requireNode);
 const prompt = evaluate(await compile(promptPath), requireNode);
 const memory = new Map();
-globalThis.localStorage = {
-  getItem: (key) => memory.get(key) ?? null,
-  setItem: (key, value) => memory.set(key, String(value)),
-  removeItem: (key) => memory.delete(key),
+globalThis.window = {
+  gensuite: {
+    localize: {
+      readCheckpoint: async ({ scope, key }) => ({ ok: true, value: memory.get(`${scope}:${key}`) ?? null }),
+      writeCheckpoint: async ({ scope, key, value }) => {
+        memory.set(`${scope}:${key}`, structuredClone(value));
+        return { ok: true, value: true };
+      },
+      removeCheckpoint: async ({ scope, key }) => {
+        memory.delete(`${scope}:${key}`);
+        return { ok: true, value: true };
+      },
+    },
+  },
 };
 const reliability = evaluate(await compile(reliabilityPath), (name) => {
   if (name === '../../shared/transcriptQuality') return quality;

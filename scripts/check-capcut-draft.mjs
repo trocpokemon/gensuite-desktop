@@ -26,6 +26,8 @@ async function loadTypeScriptModule(fileName) {
 const file = path.resolve('src/shared/capcutDraft.ts');
 const ipcSource = await readFile(path.resolve('electron/ipc/capcut.ts'), 'utf8');
 const studioSource = await readFile(path.resolve('src/steps/NarrationStudio.tsx'), 'utf8');
+const localizeStudioSource = await readFile(path.resolve('src/steps/LocalizeStudio.tsx'), 'utf8');
+const preloadSource = await readFile(path.resolve('electron/preload.ts'), 'utf8');
 const { buildCapCutDraftSpec, safeCapCutProjectName, synchronizeCapCutCaptionSemantics, synchronizeCapCutVoiceTiming } = await loadTypeScriptModule(file);
 const {
   applyCapCutCompatibilityProfile,
@@ -205,8 +207,18 @@ assert.equal(compatibleDraft.platform.os, 'windows');
 assert.equal(compatibleDraft.render_index_track_mode_on, true);
 assert.equal(isCapCutDraftCompatible(compatibleDraft, compatibility), true);
 assert.match(ipcSource, /createCompatibilityTemplate/, 'Compilation must use an app-authored compatibility profile.');
+assert.match(ipcSource, /compatibilityProfilePath/, 'A validated compatibility profile must be cached for later projects.');
+assert.match(ipcSource, /loadCompatibilityProfile/, 'Export must recover from the validated compatibility cache.');
+assert.match(ipcSource, /saveCompatibilityProfile/, 'A discovered native profile must be persisted transactionally.');
+assert.match(ipcSource, /generated:\s*entry\.name\.startsWith\('GenSuite -'\)/, 'Discovery must distinguish native drafts from generated drafts.');
 assert.match(ipcSource, /syncDraftRegistration/, 'The project index must be updated after the final duration is known.');
 assert.match(ipcSource, /synchronizeVoiceTiming/, 'Voice speed metadata must be synchronized before registration.');
+assert.match(ipcSource, /capcut:launch/, 'The desktop bridge must expose a dedicated editor launch action.');
+assert.match(ipcSource, /shell\.openPath\(candidate\)/, 'The editor must be launched through the main process.');
+assert.match(ipcSource, /CAPCUT_APP_UNAVAILABLE/, 'A missing editor installation must return a structured error.');
+assert.match(preloadSource, /capcut:launch/, 'The renderer bridge must expose the structured editor launch action.');
+assert.match(localizeStudioSource, />Mở CapCut</, 'The completed project card must offer CapCut as the primary action.');
+assert.match(localizeStudioSource, />Mở thư mục</, 'The completed project card must retain a folder fallback.');
 const registration = updateCapCutRegistrationMetadata({
   all_draft_store: [{ draft_id: 'draft-1', draft_name: 'old', tm_duration: 0 }],
   draft_ids: 1,

@@ -59,7 +59,11 @@ async function readJson(response: Response, context?: AppErrorContext): Promise<
   if (response.status === 402 || data?.error === 'INSUFFICIENT_CREDITS') throw clientAppError('VOICE_CREDITS_INSUFFICIENT');
   if (!response.ok) {
     if (response.status === 429) throw clientAppError('VOICE_RATE_LIMITED', context);
-    if (response.status === 409) throw clientAppError('VOICE_JOB_CONFLICT', context);
+    if (response.status === 409) {
+      const existingJobId = String(data?.jobId || data?.existingJobId || '').trim();
+      if (existingJobId) return { ...data, jobId: existingJobId, status: data?.status || 'processing' };
+      throw clientAppError('VOICE_JOB_CONFLICT', context);
+    }
     if (response.status === 408) throw clientAppError('VOICE_REQUEST_TIMEOUT', context);
     if (response.status === 400 || response.status === 413 || response.status === 422) {
       if (data?.error === 'TEXT_TOO_LONG') throw clientAppError('VOICE_TEXT_TOO_LONG', context);
@@ -382,12 +386,12 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
     const signal = this.controller.signal;
     const chunks = splitVoiceText(req.text, 900);
     const requestKey = voiceRequestKey(req, this.engine);
-    const checkpoint = loadVoiceCheckpoint(req.projectId, req.segmentId, requestKey)
+    const checkpoint = await loadVoiceCheckpoint(req.projectId, req.segmentId, requestKey)
       ?? createVoiceCheckpoint(requestKey, chunks.length);
     if (checkpoint.parts.length !== chunks.length) {
       checkpoint.parts = createVoiceCheckpoint(requestKey, chunks.length).parts;
     }
-    saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
+    await saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
     const partPaths: string[] = [];
     const report = (completedChunks: number, phase: Parameters<NonNullable<VoiceRequest['onProgress']>>[0]['phase']) => {
       req.onProgress?.({ completedChunks, totalChunks: chunks.length, phase });
@@ -444,7 +448,7 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
           if (!part.jobId) throw clientAppError('VOICE_RESPONSE_INVALID', context);
           part.status = 'processing';
           checkpoint.createdAt = Date.now();
-          saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
+          await saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
           job = submit;
         }
 
@@ -465,7 +469,7 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
         part.audioPath = downloaded.value.audioPath;
         part.durationSec = downloaded.value.durationSec;
         checkpoint.createdAt = Date.now();
-        saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
+        await saveVoiceCheckpoint(req.projectId, req.segmentId, checkpoint);
         partPaths.push(downloaded.value.audioPath);
         report(index + 1, 'requesting');
       }
