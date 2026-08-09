@@ -13,7 +13,7 @@ import { probeUsableAudio } from '../providers/voice/audioUtils';
 import { capCutVoiceById } from '../providers/voice/capcutTtsCatalog';
 import { EDGE_TTS_FALLBACK_VOICES, edgeVoiceName } from '../providers/voice/edgeTtsCatalog';
 import type { AppErrorCode, AppErrorContext, PublicAppError } from '../shared/appErrors';
-import { diagnosticSummaryForError, rememberDiagnostic } from '../shared/diagnosticSummary';
+import { rememberDiagnostic } from '../shared/diagnosticSummary';
 import { transcriptHasAbnormalRepetition } from '../shared/transcriptQuality';
 import type { ProjectState, TranscriptSegment, WhisperModelName } from '../shared/types';
 import { useEntitlementStore } from '../store/entitlementStore';
@@ -263,7 +263,8 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
   const copyFailureDiagnostics = async () => {
     if (!pipelineFailure) return;
     try {
-      await navigator.clipboard.writeText(diagnosticSummaryForError(pipelineFailure.error, pipelineFailure.occurredAt));
+      const result = await window.gensuite.diagnostics.copyFailure(pipelineFailure.error, pipelineFailure.occurredAt);
+      if (!result.ok || !result.value) throw new Error('diagnostic copy failed');
       setDiagnosticCopyState('copied');
     } catch {
       setDiagnosticCopyState('error');

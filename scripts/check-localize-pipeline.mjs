@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 
-const [studio, panel, voicePanel, appStyles, appErrors, projectStore, diagnosticSummary] = await Promise.all([
+const [studio, panel, voicePanel, appStyles, appErrors, projectStore, diagnosticSummary, preload, mainProcess, mainErrors] = await Promise.all([
   readFile('src/steps/LocalizeStudio.tsx', 'utf8'),
   readFile('src/components/PipelineProgressPanel.tsx', 'utf8'),
   readFile('src/components/VoiceConfigPanel.tsx', 'utf8'),
@@ -8,6 +8,9 @@ const [studio, panel, voicePanel, appStyles, appErrors, projectStore, diagnostic
   readFile('src/shared/appErrors.ts', 'utf8'),
   readFile('src/store/projectStore.ts', 'utf8'),
   readFile('src/shared/diagnosticSummary.ts', 'utf8'),
+  readFile('electron/preload.ts', 'utf8'),
+  readFile('electron/main.ts', 'utf8'),
+  readFile('electron/ipc/appErrors.ts', 'utf8'),
 ]);
 const violations = [];
 
@@ -24,7 +27,13 @@ if (!studio.includes('useState(true)') || !studio.includes('setDetailsOpen(true)
   violations.push('Chi tiết quá trình xử lý chưa được mở mặc định khi vào màn hình hoặc đổi dự án.');
 }
 
-if (!studio.includes('copyFailureDiagnostics') || !studio.includes('diagnosticSummaryForError(') || !studio.includes('Sao chép log lỗi')) {
+if (!studio.includes('copyFailureDiagnostics')
+  || !studio.includes('window.gensuite.diagnostics.copyFailure(')
+  || !studio.includes('Sao chép log lỗi')
+  || !preload.includes("'diagnostics:copy-failure'")
+  || !mainProcess.includes("ipcMain.handle('diagnostics:copy-failure'")
+  || !mainProcess.includes('internalDiagnosticFor(error.diagnosticId)')
+  || !mainErrors.includes('rememberInternalDiagnostic(diagnosticId, internalDiagnostics)')) {
   violations.push('Lỗi làm dừng pipeline chưa có nút sao chép thông tin chẩn đoán an toàn.');
 }
 
@@ -35,12 +44,15 @@ if (!studio.includes("stage === 'error' && failedStep && pipelineFailure")) {
 if (!studio.includes('occurredAt: new Date().toISOString()') || !studio.includes('setPipelineFailure(null)')) {
   violations.push('Log hỗ trợ chưa được chụp đúng thời điểm lỗi hoặc chưa được xóa khi bắt đầu lần xử lý mới.');
 }
-const singleFailureSummary = diagnosticSummary.match(/export function diagnosticSummaryForError[\s\S]*?\n\}/u)?.[0] ?? '';
-if (!singleFailureSummary.includes('appVersion: __APP_VERSION__')
-  || !singleFailureSummary.includes('occurredAt')
-  || !singleFailureSummary.includes('diagnosticId: error.diagnosticId')
-  || singleFailureSummary.includes('recentErrors')
-  || singleFailureSummary.includes('loadRecords()')) {
+const singleFailureCopy = mainProcess.match(/ipcMain\.handle\('diagnostics:copy-failure'[\s\S]*?\n  \}\);/u)?.[0] ?? '';
+if (!singleFailureCopy.includes('appVersion: app.getVersion()')
+  || !singleFailureCopy.includes('occurredAt')
+  || !singleFailureCopy.includes('diagnosticId: error.diagnosticId')
+  || !singleFailureCopy.includes('operation: internal.operation')
+  || !singleFailureCopy.includes('classifier: internal.classifier')
+  || !singleFailureCopy.includes('exitCode: internal.exitCode')
+  || singleFailureCopy.includes('recentErrors')
+  || singleFailureCopy.includes('loadRecords()')) {
   violations.push('Log lỗi tại chỗ phải có phiên bản và chỉ chứa đúng sự cố hiện tại, không kèm lịch sử lỗi.');
 }
 if (!studio.includes('restorePipelineProgress(project)')

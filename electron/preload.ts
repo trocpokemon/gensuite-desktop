@@ -178,6 +178,11 @@ function isWhisperModelStatus(value: unknown): value is import('../src/shared/ty
 const bridge: GensuiteBridge = {
   diagnostics: {
     record: (error: PublicAppError) => ipcRenderer.send('diagnostics:client-failure', copyPublicError(error)),
+    copyFailure: (error: PublicAppError, occurredAt: string) => invokeStructured(
+      'diagnostics:copy-failure',
+      { error: copyPublicError(error), occurredAt },
+      (value): value is boolean => typeof value === 'boolean',
+    ),
   },
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),

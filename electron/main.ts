@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, protocol, shell } from 'electron';
 import { createReadStream, promises as fs } from 'node:fs';
 import { Readable } from 'node:stream';
 import path from 'node:path';
@@ -20,6 +20,7 @@ import { registerNarrationIpc } from './ipc/narration';
 import { registerCapCutDraftIpc } from './ipc/capcut';
 import { registerUpdater, startUpdateChecks } from './updater';
 import { isPublicAppError } from '../src/shared/appErrors';
+import { appFailureResult, appSuccess, internalDiagnosticFor } from './ipc/appErrors';
 
 // Vite injects these in dev; undefined in a packaged build.
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
@@ -110,6 +111,45 @@ function registerWindowIpc(): void {
       retryable: payload.retryable,
       ...payload.context,
     });
+  });
+  ipcMain.handle('diagnostics:copy-failure', (_e, payload: unknown) => {
+    try {
+      const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : null;
+      const error = record?.error;
+      const occurredAt = record?.occurredAt;
+      if (!isPublicAppError(error) || typeof occurredAt !== 'string' || !Number.isFinite(Date.parse(occurredAt))) {
+        return appFailureResult<boolean>(new Error('invalid diagnostic request'), 'UNEXPECTED', {
+          operation: 'diagnostic-copy',
+          classifier: 'invalid-request',
+        });
+      }
+
+      const internal = internalDiagnosticFor(error.diagnosticId);
+      const supportDetails = internal ? {
+        operation: internal.operation,
+        classifier: internal.classifier,
+        exitCode: internal.exitCode,
+      } : { available: false };
+      clipboard.writeText(JSON.stringify({
+        appVersion: app.getVersion(),
+        occurredAt,
+        error: {
+          code: error.code,
+          stage: error.stage,
+          cause: error.cause,
+          retryable: error.retryable,
+          diagnosticId: error.diagnosticId,
+          context: error.context ? { ...error.context } : undefined,
+        },
+        diagnostics: supportDetails,
+      }, null, 2));
+      return appSuccess(true);
+    } catch (error) {
+      return appFailureResult<boolean>(error, 'UNEXPECTED', {
+        operation: 'diagnostic-copy',
+        classifier: 'clipboard-failed',
+      });
+    }
   });
   ipcMain.on('window:minimize', (e) => BrowserWindow.fromWebContents(e.sender)?.minimize());
   ipcMain.on('window:toggleMaximize', (e) => {

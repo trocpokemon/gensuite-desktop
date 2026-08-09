@@ -800,6 +800,8 @@ export interface GensuiteBridge {
   diagnostics: {
     /** Persist an already-sanitized renderer failure under the same diagnostic id shown to the user. */
     record(error: PublicAppError): void;
+    /** Copy a support payload for exactly one failure; internal metadata never crosses into the renderer. */
+    copyFailure(error: PublicAppError, occurredAt: string): Promise<IpcResult<boolean>>;
   };
   window: {
     minimize(): void;

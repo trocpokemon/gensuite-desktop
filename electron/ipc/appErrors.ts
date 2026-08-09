@@ -11,6 +11,14 @@ import {
 type SafeDiagnosticValue = string | number | boolean | undefined;
 export type SafeDiagnostics = Record<string, SafeDiagnosticValue>;
 
+interface StoredDiagnostic {
+  diagnosticId: string;
+  diagnostics: SafeDiagnostics;
+}
+
+const MAX_STORED_DIAGNOSTICS = 100;
+const storedDiagnostics = new Map<string, StoredDiagnostic>();
+
 const SAFE_DIAGNOSTIC_KEYS = new Set([
   'operation',
   'activeStage',
@@ -40,6 +48,24 @@ function sanitizedDiagnostics(values: SafeDiagnostics): SafeDiagnostics {
     else if (typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value)) result[key] = value;
   }
   return result;
+}
+
+function rememberInternalDiagnostic(diagnosticId: string, diagnostics: SafeDiagnostics): void {
+  storedDiagnostics.set(diagnosticId, {
+    diagnosticId,
+    diagnostics: sanitizedDiagnostics(diagnostics),
+  });
+  while (storedDiagnostics.size > MAX_STORED_DIAGNOSTICS) {
+    const oldest = storedDiagnostics.keys().next().value as string | undefined;
+    if (!oldest) break;
+    storedDiagnostics.delete(oldest);
+  }
+}
+
+/** Returns only allowlisted metadata for the single matching support code. */
+export function internalDiagnosticFor(diagnosticId: string): SafeDiagnostics | null {
+  const stored = storedDiagnostics.get(diagnosticId);
+  return stored ? { ...stored.diagnostics } : null;
 }
 
 export class AppFailure extends Error {
@@ -101,6 +127,12 @@ export function appFailureResult<T>(
 
   // Only normalized, allowlisted metadata reaches diagnostics. Paths, source
   // text, command output and service details never leave the process boundary.
+  const internalDiagnostics = sanitizedDiagnostics({
+    ...safeUnexpectedMetadata(error),
+    ...diagnostics,
+  });
+  rememberInternalDiagnostic(diagnosticId, internalDiagnostics);
+
   log.error('operation failed', {
     diagnosticId,
     code: publicError.code,
@@ -108,10 +140,7 @@ export function appFailureResult<T>(
     cause: publicError.cause,
     retryable: publicError.retryable,
     ...publicError.context,
-    ...sanitizedDiagnostics({
-      ...safeUnexpectedMetadata(error),
-      ...diagnostics,
-    }),
+    ...internalDiagnostics,
   });
 
   return { ok: false, error: publicError };
