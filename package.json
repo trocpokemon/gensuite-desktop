@@ -60,7 +60,9 @@
       {
         "provider": "github",
         "owner": "trocpokemon",
-        "repo": "gensuite-desktop"
+        "repo": "gensuite-desktop",
+        "releaseType": "release",
+        "publishAutoUpdate": true
       }
     ],
     "protocols": [
