@@ -22,6 +22,38 @@ export interface CapCutRegistrationUpdate {
   draftsDirectory: string;
 }
 
+/** Tested baseline used when a machine has no existing project to inspect. */
+export function bundledCapCutCompatibilityProfile(expectedOs: CapCutHostOs): CapCutCompatibilityProfile | null {
+  if (expectedOs !== 'windows') return null;
+  return {
+    version: 360000,
+    newVersion: '179.0.0',
+    appVersion: '9.1.0',
+    platform: {
+      os: 'windows',
+      os_version: '10.0',
+      app_id: '359289',
+      app_version: '9.1.0',
+      app_source: 'cc',
+    },
+    lastModifiedPlatform: {
+      os: 'windows',
+      os_version: '10.0',
+      app_id: '359289',
+      app_version: '9.1.0',
+      app_source: 'cc',
+    },
+    markers: {
+      draft_type: 'video',
+      color_space: 0,
+      free_render_index_mode_on: false,
+      is_drop_frame_timecode: false,
+      mixed_track_mode_on: false,
+      render_index_track_mode_on: true,
+    },
+  };
+}
+
 const COMPATIBILITY_MARKERS = [
   'color_space',
   'draft_type',

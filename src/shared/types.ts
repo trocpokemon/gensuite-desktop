@@ -185,11 +185,27 @@ export interface CapCutDraftExportArgs {
   musicVolume?: number;
   /** Optional override for CapCut's project-store directory. */
   draftsDirectory?: string;
+  /** Optional user-selected blank project used only when automatic compatibility cannot be prepared. */
+  templateDraftDirectory?: string;
+  /** Final fallback: create a portable project folder without registering it in CapCut's project list. */
+  manualOutputDirectory?: string;
 }
 
 export interface CapCutDraftExportResult {
   draftPath: string;
   projectName: string;
+  registered: boolean;
+}
+
+export interface CapCutExportPreflightArgs {
+  draftsDirectory?: string;
+  templateDraftDirectory?: string;
+  manualOutputDirectory?: string;
+}
+
+export interface CapCutExportPreflightResult {
+  mode: 'registered' | 'portable';
+  compatibility: 'automatic' | 'selected-project';
 }
 
 /** Safe metadata returned after verifying that a source contains usable video. */
@@ -426,6 +442,10 @@ export interface ProjectSettings {
   localizeOutputDirectory: string;
   /** Optional CapCut project-store folder used by the localization workflow. */
   capcutDraftsDirectory: string;
+  /** Optional blank CapCut project selected as a compatibility fallback. */
+  capcutTemplateDraftDirectory: string;
+  /** Optional final fallback directory for a portable project folder. */
+  capcutManualOutputDirectory: string;
   music: MusicConfig;
   /** Transcription engine for localize projects (local whisper.cpp vs cloud GenSuite STT). */
   transcriptionEngine: TranscriptionEngine;
@@ -895,10 +915,16 @@ export interface GensuiteBridge {
     launch(): Promise<IpcResult<boolean>>;
     /** Create a real editable project with separate video, narration, music and subtitle tracks. */
     exportDraft(args: CapCutDraftExportArgs): Promise<IpcResult<CapCutDraftExportResult>>;
+    /** Verify the selected output strategy before recognition and voice generation begin. */
+    preflight(args: CapCutExportPreflightArgs): Promise<IpcResult<CapCutExportPreflightResult>>;
     /** Verify a persisted/downloaded source before a checkpoint is trusted. */
     validateSource(sourceVideoPath: string): Promise<IpcResult<SourceVideoValidationResult>>;
     /** Choose the project-store directory when it cannot be detected automatically. */
     selectDraftsDirectory(): Promise<IpcResult<string | null>>;
+    /** Choose an existing blank project as a compatibility fallback. */
+    selectTemplateDraftDirectory(): Promise<IpcResult<string | null>>;
+    /** Choose a normal folder for the final portable-project fallback. */
+    selectManualOutputDirectory(): Promise<IpcResult<string | null>>;
   };
   localize: {
     start(args: LocalizeJobStartArgs): Promise<IpcResult<LocalizeJobManifest>>;

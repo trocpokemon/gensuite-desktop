@@ -32,6 +32,7 @@ const projectIpcSource = await readFile(path.resolve('electron/ipc/project.ts'),
 const { buildCapCutDraftSpec, safeCapCutProjectName, synchronizeCapCutCaptionSemantics, synchronizeCapCutVoiceTiming } = await loadTypeScriptModule(file);
 const {
   applyCapCutCompatibilityProfile,
+  bundledCapCutCompatibilityProfile,
   isCapCutDraftCompatible,
   readCapCutCompatibilityProfile,
   updateCapCutRegistrationMetadata,
@@ -207,6 +208,15 @@ assert.equal(compatibleDraft.new_version, '179.0.0');
 assert.equal(compatibleDraft.platform.os, 'windows');
 assert.equal(compatibleDraft.render_index_track_mode_on, true);
 assert.equal(isCapCutDraftCompatible(compatibleDraft, compatibility), true);
+const bundledCompatibility = bundledCapCutCompatibilityProfile('windows');
+assert.ok(bundledCompatibility, 'Windows export must have a tested built-in compatibility fallback.');
+assert.equal(bundledCapCutCompatibilityProfile('mac'), null, 'Unsupported built-in profiles must fail closed.');
+const bundledDraft = applyCapCutCompatibilityProfile(nativeDraft, bundledCompatibility);
+bundledDraft.tracks = [{ type: 'video', segments: [{}] }];
+assert.equal(isCapCutDraftCompatible(bundledDraft, bundledCompatibility), true);
+assert.match(ipcSource, /templateDraftDirectory/, 'Export must accept a user-selected project fallback.');
+assert.match(ipcSource, /manualOutputDirectory/, 'Export must support a portable-folder fallback.');
+assert.match(ipcSource, /capcut:preflight/, 'Compatibility must be checked before expensive processing begins.');
 assert.match(ipcSource, /createCompatibilityTemplate/, 'Compilation must use an app-authored compatibility profile.');
 assert.match(ipcSource, /compatibilityProfilePath/, 'A validated compatibility profile must be cached for later projects.');
 assert.match(ipcSource, /loadCompatibilityProfile/, 'Export must recover from the validated compatibility cache.');

@@ -574,6 +574,8 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
         captionLanguage: current.targetLanguage,
         originalAudioVolume: 0,
         draftsDirectory: current.settings.capcutDraftsDirectory || undefined,
+        templateDraftDirectory: current.settings.capcutTemplateDraftDirectory || undefined,
+        manualOutputDirectory: current.settings.capcutManualOutputDirectory || undefined,
       });
     };
 
@@ -660,7 +662,42 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     setError('');
     const result = await window.gensuite.capcut.selectDraftsDirectory();
     if (!result.ok) { setError(errorMessage(result.error)); return; }
-    if (result.value) useProjectStore.getState().patchSettings({ capcutDraftsDirectory: result.value });
+    if (result.value) useProjectStore.getState().patchSettings({
+      capcutDraftsDirectory: result.value,
+      capcutTemplateDraftDirectory: '',
+      capcutManualOutputDirectory: '',
+    });
+  };
+
+  const chooseCapCutTemplate = async () => {
+    if (running) return;
+    setError('');
+    const result = await window.gensuite.capcut.selectTemplateDraftDirectory();
+    if (!result.ok) { setError(errorMessage(result.error)); return; }
+    if (result.value) useProjectStore.getState().patchSettings({
+      capcutTemplateDraftDirectory: result.value,
+      capcutManualOutputDirectory: '',
+    });
+  };
+
+  const chooseManualCapCutOutput = async () => {
+    if (running) return;
+    setError('');
+    const result = await window.gensuite.capcut.selectManualOutputDirectory();
+    if (!result.ok) { setError(errorMessage(result.error)); return; }
+    if (result.value) useProjectStore.getState().patchSettings({
+      capcutTemplateDraftDirectory: '',
+      capcutManualOutputDirectory: result.value,
+    });
+  };
+
+  const useAutomaticCapCutOutput = () => {
+    if (running) return;
+    setError('');
+    useProjectStore.getState().patchSettings({
+      capcutTemplateDraftDirectory: '',
+      capcutManualOutputDirectory: '',
+    });
   };
 
   const cancelCurrent = async () => {
@@ -752,6 +789,16 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
       return;
     }
     setError('');
+    const currentSettings = useProjectStore.getState().project.settings;
+    const capCutPreflight = await window.gensuite.capcut.preflight({
+      draftsDirectory: currentSettings.capcutDraftsDirectory || undefined,
+      templateDraftDirectory: currentSettings.capcutTemplateDraftDirectory || undefined,
+      manualOutputDirectory: currentSettings.capcutManualOutputDirectory || undefined,
+    });
+    if (!capCutPreflight.ok) {
+      setError(`${errorMessage(capCutPreflight.error)} Bạn có thể chọn một dự án mẫu hoặc xuất ra thư mục riêng bên dưới.`);
+      return;
+    }
     const steps = initialPipelineProgress();
     setPipelineProgress(steps);
     setStage('download');
@@ -816,7 +863,12 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
         </div>
         <div className="mt-4 rounded-2xl border border-white/[0.07] p-4"><EngineToggle<'free' | 'paid'> label="Cách dịch" value={project.settings.scriptEngine === 'gensuite' ? 'paid' : 'free'} options={[{ value: 'free', label: 'Dùng khóa riêng', hint: 'Dùng cấu hình dịch của bạn', badge: 'free' }, { value: 'paid', label: 'Dùng credits', hint: canUseCloud ? 'Trừ credits trong tài khoản' : 'Cần gói Basic trở lên', premium: true, badge: 'cloud', disabled: entitlementStatus !== 'ready' || !canUseCloud }]} onChange={(value) => setTranslatePaid(value === 'paid')} /></div>
         <div className="mt-4 rounded-2xl border border-white/[0.07] p-4">
-          <div className="flex items-center justify-between gap-3"><div><p className="flex items-center gap-2 text-sm font-bold text-white/75"><Layers3 size={15} className="text-emerald-300" /> Nơi lưu dự án CapCut</p><p className="mt-1 max-w-[390px] truncate text-[10px] text-white/30">{project.settings.capcutDraftsDirectory || 'Tự động tìm thư mục dự án'}</p></div><button type="button" onClick={() => void chooseCapCutDirectory()} disabled={running} className="rounded-lg border border-white/10 px-3 py-2 text-[10px] font-bold text-white/60"><FolderOpen size={13} className="mr-1.5 inline" />Chọn thư mục</button></div>
+          <div className="flex items-center justify-between gap-3"><div><p className="flex items-center gap-2 text-sm font-bold text-white/75"><Layers3 size={15} className="text-emerald-300" /> Xuất dự án CapCut</p><p className="mt-1 text-[10px] text-white/30">Tự động là lựa chọn khuyến nghị. Hai lựa chọn còn lại dùng khi máy không thể xuất trực tiếp.</p></div>{(project.settings.capcutTemplateDraftDirectory || project.settings.capcutManualOutputDirectory) && <button type="button" onClick={useAutomaticCapCutOutput} disabled={running} className="rounded-lg border border-white/10 px-3 py-2 text-[10px] font-bold text-white/55">Dùng tự động</button>}</div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <button type="button" onClick={() => void chooseCapCutDirectory()} disabled={running} className={`rounded-xl border px-3 py-3 text-left transition ${!project.settings.capcutTemplateDraftDirectory && !project.settings.capcutManualOutputDirectory ? 'border-emerald-300/30 bg-emerald-300/[0.07]' : 'border-white/[0.08] bg-white/[0.015]'}`}><span className="block text-[10px] font-black text-white/70">Tự động</span><span className="mt-1 block truncate text-[9px] text-white/30">{project.settings.capcutDraftsDirectory || 'Tự tìm nơi lưu phù hợp'}</span></button>
+            <button type="button" onClick={() => void chooseCapCutTemplate()} disabled={running} className={`rounded-xl border px-3 py-3 text-left transition ${project.settings.capcutTemplateDraftDirectory ? 'border-amber-300/30 bg-amber-300/[0.07]' : 'border-white/[0.08] bg-white/[0.015]'}`}><span className="block text-[10px] font-black text-white/70">Chọn dự án mẫu</span><span className="mt-1 block truncate text-[9px] text-white/30">{project.settings.capcutTemplateDraftDirectory || 'Dùng một dự án trống có sẵn'}</span></button>
+            <button type="button" onClick={() => void chooseManualCapCutOutput()} disabled={running} className={`rounded-xl border px-3 py-3 text-left transition ${project.settings.capcutManualOutputDirectory ? 'border-sky-300/30 bg-sky-300/[0.07]' : 'border-white/[0.08] bg-white/[0.015]'}`}><span className="block text-[10px] font-black text-white/70">Xuất ra thư mục</span><span className="mt-1 block truncate text-[9px] text-white/30">{project.settings.capcutManualOutputDirectory || 'Phương án dự phòng cuối'}</span></button>
+          </div>
         </div>
       </section>
       <aside className="min-h-[680px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0f0f10]"><VoiceConfigPanel feature="localize-cloud" onMissingKey={setMissingKey} validation={{ attempt: validationAttempt, providerMissing: missingVoiceProvider, voiceMissing: missingVoice }} /></aside>
@@ -847,8 +899,8 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
         <div className="pointer-events-none absolute -right-16 -top-24 h-56 w-56 rounded-full bg-emerald-300/10 blur-3xl" />
         <div className="relative flex flex-wrap items-center gap-4">
           <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-emerald-200/25 bg-emerald-300/15 text-emerald-200 shadow-[0_0_30px_rgba(52,211,153,.12)]"><Sparkles size={21} /></span>
-          <div className="min-w-[220px] flex-1"><p className="text-base font-black text-white">Dự án CapCut đã sẵn sàng</p><p className="mt-1 text-[11px] text-white/45">Mở CapCut để hoàn thiện phụ đề, hiệu ứng và bố cục theo phong cách của bạn.</p><div className="mt-3 flex flex-wrap gap-2"><span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{validScenes(project).length} câu thoại</span><span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{languageLabel(targetLanguage)}</span><span className="max-w-[220px] truncate rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{friendlyVoiceLabel(project)}</span></div></div>
-          <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => void runPipeline(false)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-3 text-[10px] font-bold text-white/55 transition hover:bg-white/[0.05] hover:text-white"><RotateCcw size={13} />Tạo lại</button><button type="button" onClick={() => window.gensuite.shell.showItemInFolder(project.capcutDraftPath!)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-3 text-[10px] font-bold text-white/55 transition hover:bg-white/[0.05] hover:text-white"><FolderOpen size={13} />Mở thư mục</button><button type="button" onClick={() => void openCapCut()} className="primary-action inline-flex items-center gap-2 rounded-xl px-4 py-3 text-[10px] font-black"><ExternalLink size={14} />Mở CapCut</button></div>
+          <div className="min-w-[220px] flex-1"><p className="text-base font-black text-white">{project.settings.capcutManualOutputDirectory ? 'Thư mục dự án đã sẵn sàng' : 'Dự án CapCut đã sẵn sàng'}</p><p className="mt-1 text-[11px] text-white/45">{project.settings.capcutManualOutputDirectory ? 'Dự án đã được xuất riêng để bạn lưu hoặc nhập thủ công.' : 'Mở CapCut để hoàn thiện phụ đề, hiệu ứng và bố cục theo phong cách của bạn.'}</p><div className="mt-3 flex flex-wrap gap-2"><span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{validScenes(project).length} câu thoại</span><span className="rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{languageLabel(targetLanguage)}</span><span className="max-w-[220px] truncate rounded-full border border-white/[0.08] bg-black/15 px-2.5 py-1 text-[9px] font-semibold text-white/55">{friendlyVoiceLabel(project)}</span></div></div>
+          <div className="flex flex-wrap items-center gap-2"><button type="button" onClick={() => void runPipeline(false)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-3 text-[10px] font-bold text-white/55 transition hover:bg-white/[0.05] hover:text-white"><RotateCcw size={13} />Tạo lại</button><button type="button" onClick={() => window.gensuite.shell.showItemInFolder(project.capcutDraftPath!)} className="inline-flex items-center gap-2 rounded-xl border border-white/10 px-3.5 py-3 text-[10px] font-bold text-white/55 transition hover:bg-white/[0.05] hover:text-white"><FolderOpen size={13} />Mở thư mục</button>{!project.settings.capcutManualOutputDirectory && <button type="button" onClick={() => void openCapCut()} className="primary-action inline-flex items-center gap-2 rounded-xl px-4 py-3 text-[10px] font-black"><ExternalLink size={14} />Mở CapCut</button>}</div>
         </div>
         {capCutLaunchError && <div role="alert" className="relative mt-4 rounded-xl border border-red-300/20 bg-red-400/[0.07] px-4 py-3 text-[10px] font-semibold text-red-100">{capCutLaunchError}</div>}
       </div>}

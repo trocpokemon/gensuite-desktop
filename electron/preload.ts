@@ -48,6 +48,8 @@ import type {
   NarrationRewriteArgs,
   CapCutDraftExportArgs,
   CapCutDraftExportResult,
+  CapCutExportPreflightArgs,
+  CapCutExportPreflightResult,
   SourceVideoValidationResult,
 } from '../src/shared/types';
 
@@ -150,9 +152,17 @@ function isCapCutTtsPreviewResult(value: unknown): value is CapCutTtsPreviewResu
 
 function isCapCutDraftExportResult(value: unknown): value is CapCutDraftExportResult {
   return isRecord(value)
-    && Object.keys(value).length === 2
+    && Object.keys(value).length === 3
     && typeof value.draftPath === 'string' && value.draftPath.trim().length > 0
-    && typeof value.projectName === 'string' && value.projectName.trim().length > 0;
+    && typeof value.projectName === 'string' && value.projectName.trim().length > 0
+    && typeof value.registered === 'boolean';
+}
+
+function isCapCutExportPreflightResult(value: unknown): value is CapCutExportPreflightResult {
+  return isRecord(value)
+    && Object.keys(value).length === 2
+    && ['registered', 'portable'].includes(String(value.mode))
+    && ['automatic', 'selected-project'].includes(String(value.compatibility));
 }
 
 function isSourceVideoValidationResult(value: unknown): value is SourceVideoValidationResult {
@@ -303,6 +313,11 @@ const bridge: GensuiteBridge = {
       args,
       isCapCutDraftExportResult,
     ),
+    preflight: (args: CapCutExportPreflightArgs) => invokeStructured(
+      'capcut:preflight',
+      args,
+      isCapCutExportPreflightResult,
+    ),
     validateSource: (sourceVideoPath: string) => invokeStructured(
       'capcut:validateSource',
       sourceVideoPath,
@@ -310,6 +325,16 @@ const bridge: GensuiteBridge = {
     ),
     selectDraftsDirectory: () => invokeStructured(
       'capcut:selectDraftsDirectory',
+      undefined,
+      (value): value is string | null => value === null || (typeof value === 'string' && value.trim().length > 0),
+    ),
+    selectTemplateDraftDirectory: () => invokeStructured(
+      'capcut:selectTemplateDraftDirectory',
+      undefined,
+      (value): value is string | null => value === null || (typeof value === 'string' && value.trim().length > 0),
+    ),
+    selectManualOutputDirectory: () => invokeStructured(
+      'capcut:selectManualOutputDirectory',
       undefined,
       (value): value is string | null => value === null || (typeof value === 'string' && value.trim().length > 0),
     ),

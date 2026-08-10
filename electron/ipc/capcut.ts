@@ -5,11 +5,12 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { CapCutDraftExportArgs, CapCutDraftExportResult, SourceVideoValidationResult } from '../../src/shared/types';
+import type { CapCutDraftExportArgs, CapCutDraftExportResult, CapCutExportPreflightArgs, CapCutExportPreflightResult, SourceVideoValidationResult } from '../../src/shared/types';
 import type { AppErrorCode, AppErrorContext } from '../../src/shared/appErrors';
 import { buildCapCutDraftSpec, safeCapCutProjectName, synchronizeCapCutCaptionSemantics, synchronizeCapCutVoiceTiming, type CapCutCompileSpec } from '../../src/shared/capcutDraft';
 import {
   applyCapCutCompatibilityProfile,
+  bundledCapCutCompatibilityProfile,
   isCapCutDraftCompatible,
   readCapCutCompatibilityProfile,
   updateCapCutRegistrationMetadata,
@@ -124,7 +125,9 @@ function validateExportArgs(value: unknown): asserts value is CapCutDraftExportA
     || (value.captionLanguage !== undefined && (typeof value.captionLanguage !== 'string' || value.captionLanguage.length > 32))
     || typeof value.originalAudioVolume !== 'number' || !Number.isFinite(value.originalAudioVolume)
     || (value.musicPath !== undefined && (typeof value.musicPath !== 'string' || !path.isAbsolute(value.musicPath)))
-    || (value.draftsDirectory !== undefined && (typeof value.draftsDirectory !== 'string' || !path.isAbsolute(value.draftsDirectory)))) {
+    || (value.draftsDirectory !== undefined && (typeof value.draftsDirectory !== 'string' || !path.isAbsolute(value.draftsDirectory)))
+    || (value.templateDraftDirectory !== undefined && (typeof value.templateDraftDirectory !== 'string' || !path.isAbsolute(value.templateDraftDirectory)))
+    || (value.manualOutputDirectory !== undefined && (typeof value.manualOutputDirectory !== 'string' || !path.isAbsolute(value.manualOutputDirectory)))) {
     throw appFailure('CAPCUT_EXPORT_INPUT_INVALID', undefined, { operation: 'draft-validate' });
   }
   if (typeof value.sourceVideoPath !== 'string' || !path.isAbsolute(value.sourceVideoPath)) {
@@ -356,6 +359,8 @@ async function discoverCompatibilityProfile(
   } catch (error) {
     const cached = await loadCompatibilityProfile(expectedOs);
     if (cached) return cached;
+    const bundled = bundledCapCutCompatibilityProfile(expectedOs);
+    if (bundled) return { fileName: 'draft_content.json', profile: bundled };
     throw appFailure('CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE', undefined, {
       operation: 'draft-compatibility',
       systemCode: systemCode(error),
@@ -390,10 +395,90 @@ async function discoverCompatibilityProfile(
   }
   const cached = await loadCompatibilityProfile(expectedOs);
   if (cached) return cached;
+  const bundled = bundledCapCutCompatibilityProfile(expectedOs);
+  if (bundled) return { fileName: 'draft_content.json', profile: bundled };
   throw appFailure('CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE', undefined, {
     operation: 'draft-compatibility',
     classifier: 'profile-missing',
   });
+}
+
+async function preflightExport(args: CapCutExportPreflightArgs): Promise<CapCutExportPreflightResult> {
+  const portable = Boolean(args.manualOutputDirectory?.trim());
+  const outputDirectory = portable
+    ? await resolvePortableOutputDirectory(args.manualOutputDirectory as string)
+    : await resolveDraftsDirectory(args.draftsDirectory);
+  await resolveCompatibility(outputDirectory, args.templateDraftDirectory);
+  if (!portable) {
+    const rootMetaPath = path.join(outputDirectory, 'root_meta_info.json');
+    try {
+      const parsed: unknown = JSON.parse(await fs.readFile(rootMetaPath, 'utf8'));
+      if (!isRecord(parsed)) throw new TypeError('invalid project index');
+    } catch {
+      throw appFailure('CAPCUT_DRAFT_DIRECTORY_UNAVAILABLE', undefined, {
+        operation: 'draft-preflight', classifier: 'project-index-missing',
+      });
+    }
+  }
+  return {
+    mode: portable ? 'portable' : 'registered',
+    compatibility: args.templateDraftDirectory?.trim() ? 'selected-project' : 'automatic',
+  };
+}
+
+async function compatibilityFromSelectedProject(
+  selectedDirectory: string,
+): Promise<Omit<CompatibilityTemplate, 'directory'>> {
+  const expectedOs = hostOs();
+  if (!expectedOs || !path.isAbsolute(selectedDirectory)) {
+    throw appFailure('CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE', undefined, {
+      operation: 'draft-compatibility', classifier: 'selected-project-invalid',
+    });
+  }
+  const fileNames: CompatibilityTemplate['fileName'][] = expectedOs === 'windows'
+    ? ['draft_content.json']
+    : ['draft_info.json', 'draft_content.json'];
+  for (const fileName of fileNames) {
+    try {
+      const filePath = path.join(selectedDirectory, fileName);
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile() || stat.size <= 100 || stat.size > MAX_TEMPLATE_BYTES) continue;
+      const parsed: unknown = JSON.parse(await fs.readFile(filePath, 'utf8'));
+      const profile = readCapCutCompatibilityProfile(parsed, expectedOs);
+      if (profile) return { fileName, profile };
+    } catch {
+      // Try the other supported timeline file before returning a public error.
+    }
+  }
+  throw appFailure('CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE', undefined, {
+    operation: 'draft-compatibility', classifier: 'selected-project-invalid',
+  });
+}
+
+async function resolvePortableOutputDirectory(selected: string): Promise<string> {
+  const directory = path.resolve(selected);
+  if (!path.isAbsolute(selected) || !(await isDirectory(directory))) {
+    throw appFailure('CAPCUT_DRAFT_DIRECTORY_UNAVAILABLE', undefined, {
+      operation: 'portable-directory', classifier: 'directory-missing',
+    });
+  }
+  try {
+    await fs.access(directory, fsConstants.R_OK | fsConstants.W_OK);
+    return directory;
+  } catch {
+    throw appFailure('CAPCUT_EXPORT_PERMISSION_DENIED', undefined, {
+      operation: 'portable-directory', classifier: 'permission',
+    });
+  }
+}
+
+async function resolveCompatibility(
+  draftsDirectory: string,
+  templateDraftDirectory?: string,
+): Promise<Omit<CompatibilityTemplate, 'directory'>> {
+  return templateDraftDirectory?.trim()
+    ? compatibilityFromSelectedProject(templateDraftDirectory.trim())
+    : discoverCompatibilityProfile(draftsDirectory);
 }
 
 function compatibilityProfilePath(expectedOs: CapCutHostOs): string {
@@ -431,8 +516,9 @@ async function createCompatibilityTemplate(
   cliPath: string,
   draftsDirectory: string,
   tempDirectory: string,
+  templateDraftDirectory?: string,
 ): Promise<CompatibilityTemplate> {
-  const discovered = await discoverCompatibilityProfile(draftsDirectory);
+  const discovered = await resolveCompatibility(draftsDirectory, templateDraftDirectory);
   const bundledTemplatePath = path.join(
     path.dirname(path.dirname(cliPath)),
     'templates',
@@ -779,8 +865,11 @@ async function uniqueDraftPath(draftsDirectory: string, projectName: string): Pr
 async function exportDraft(args: CapCutDraftExportArgs): Promise<CapCutDraftExportResult> {
   validateExportArgs(args);
   await assertReadableInputs(args);
-  const draftsDirectory = await resolveDraftsDirectory(args.draftsDirectory);
-  if (await editorIsRunning()) {
+  const portable = Boolean(args.manualOutputDirectory?.trim());
+  const draftsDirectory = portable
+    ? await resolvePortableOutputDirectory(args.manualOutputDirectory as string)
+    : await resolveDraftsDirectory(args.draftsDirectory);
+  if (!portable && await editorIsRunning()) {
     throw appFailure('CAPCUT_EDITOR_BUSY', undefined, { operation: 'draft-editor-check' });
   }
   const source = await probeSourceVideo(args.sourceVideoPath);
@@ -798,10 +887,10 @@ async function exportDraft(args: CapCutDraftExportArgs): Promise<CapCutDraftExpo
 
   let snapshot: RootMetaSnapshot | undefined;
   try {
-    const compatibility = await createCompatibilityTemplate(cliPath, draftsDirectory, tempDirectory);
+    const compatibility = await createCompatibilityTemplate(cliPath, draftsDirectory, tempDirectory, args.templateDraftDirectory);
     const check = await runCompiler(cliPath, specPath, destination.draftPath, true);
     if (check.exitCode !== 0) throw compilerFailure(check);
-    snapshot = await snapshotRootMeta(draftsDirectory);
+    if (!portable) snapshot = await snapshotRootMeta(draftsDirectory);
     const outcome = await runCompiler(
       cliPath,
       specPath,
@@ -812,14 +901,16 @@ async function exportDraft(args: CapCutDraftExportArgs): Promise<CapCutDraftExpo
     if (outcome.exitCode !== 0) throw compilerFailure(outcome);
     await synchronizeVoiceTiming(destination.draftPath, compatibility.fileName, spec);
     const timeline = await verifyCompatibleDraft(destination.draftPath, compatibility);
-    await syncDraftRegistration(
-      draftsDirectory,
-      destination.draftPath,
-      compatibility.fileName,
-      timeline,
-    );
-    if (snapshot.backupPath) await fs.rm(snapshot.backupPath, { force: true }).catch(() => undefined);
-    return { draftPath: destination.draftPath, projectName: destination.projectName };
+    if (!portable) {
+      await syncDraftRegistration(
+        draftsDirectory,
+        destination.draftPath,
+        compatibility.fileName,
+        timeline,
+      );
+    }
+    if (snapshot?.backupPath) await fs.rm(snapshot.backupPath, { force: true }).catch(() => undefined);
+    return { draftPath: destination.draftPath, projectName: destination.projectName, registered: !portable };
   } catch (error) {
     if (snapshot) {
       try {
@@ -857,6 +948,22 @@ export function registerCapCutDraftIpc(): void {
     }
   });
 
+  ipcMain.handle('capcut:preflight', async (_event, args: unknown) => {
+    try {
+      if (!isRecord(args)
+        || (args.draftsDirectory !== undefined && (typeof args.draftsDirectory !== 'string' || !path.isAbsolute(args.draftsDirectory)))
+        || (args.templateDraftDirectory !== undefined && (typeof args.templateDraftDirectory !== 'string' || !path.isAbsolute(args.templateDraftDirectory)))
+        || (args.manualOutputDirectory !== undefined && (typeof args.manualOutputDirectory !== 'string' || !path.isAbsolute(args.manualOutputDirectory)))) {
+        throw appFailure('CAPCUT_EXPORT_INPUT_INVALID', undefined, { operation: 'draft-preflight' });
+      }
+      return appSuccess(await preflightExport(args));
+    } catch (error) {
+      return appFailureResult<CapCutExportPreflightResult>(error, 'CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE', {
+        operation: 'draft-preflight',
+      });
+    }
+  });
+
   ipcMain.handle('capcut:validateSource', async (_event, sourceVideoPath: unknown) => {
     try {
       if (typeof sourceVideoPath !== 'string') throw appFailure('VIDEO_SOURCE_UNAVAILABLE');
@@ -886,6 +993,43 @@ export function registerCapCutDraftIpc(): void {
     } catch (error) {
       return appFailureResult<string | null>(error, 'CAPCUT_DRAFT_DIRECTORY_UNAVAILABLE', {
         operation: 'draft-directory-select',
+      });
+    }
+  });
+
+  ipcMain.handle('capcut:selectTemplateDraftDirectory', async (event) => {
+    try {
+      const owner = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+      const options = {
+        title: 'Chọn dự án mẫu CapCut',
+        defaultPath: (await resolveDraftsDirectory().catch(() => app.getPath('documents'))),
+        properties: ['openDirectory'] as Array<'openDirectory'>,
+      };
+      const selection = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+      if (selection.canceled || !selection.filePaths[0]) return appSuccess<string | null>(null);
+      await compatibilityFromSelectedProject(selection.filePaths[0]);
+      return appSuccess<string | null>(path.resolve(selection.filePaths[0]));
+    } catch (error) {
+      return appFailureResult<string | null>(error, 'CAPCUT_COMPATIBILITY_TEMPLATE_UNAVAILABLE', {
+        operation: 'draft-template-select',
+      });
+    }
+  });
+
+  ipcMain.handle('capcut:selectManualOutputDirectory', async (event) => {
+    try {
+      const owner = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+      const options = {
+        title: 'Chọn thư mục xuất dự án',
+        defaultPath: app.getPath('documents'),
+        properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>,
+      };
+      const selection = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+      if (selection.canceled || !selection.filePaths[0]) return appSuccess<string | null>(null);
+      return appSuccess<string | null>(await resolvePortableOutputDirectory(selection.filePaths[0]));
+    } catch (error) {
+      return appFailureResult<string | null>(error, 'CAPCUT_DRAFT_DIRECTORY_UNAVAILABLE', {
+        operation: 'portable-directory-select',
       });
     }
   });

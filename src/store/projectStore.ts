@@ -64,6 +64,8 @@ const DEFAULT_SETTINGS: ProjectSettings = {
   originalAudioVolume: 8,
   localizeOutputDirectory: '',
   capcutDraftsDirectory: '',
+  capcutTemplateDraftDirectory: '',
+  capcutManualOutputDirectory: '',
   music: { ...DEFAULT_MUSIC },
   voiceConfigs: {
     edgetts: { voiceId: DEFAULT_EDGE_VOICE, modelId: '', language: 'vi-VN', speed: 1, temperature: 1, stability: 0.5, similarityBoost: 0.75, style: 0, useSpeakerBoost: true, pitch: 0, volume: 100, deliveryMode: 'BALANCED' },
@@ -169,6 +171,8 @@ function normalizeProject(raw: ProjectState): ProjectState {
       originalAudioVolume: raw.settings?.originalAudioVolume ?? DEFAULT_SETTINGS.originalAudioVolume,
       localizeOutputDirectory: raw.settings?.localizeOutputDirectory ?? DEFAULT_SETTINGS.localizeOutputDirectory,
       capcutDraftsDirectory: raw.settings?.capcutDraftsDirectory ?? DEFAULT_SETTINGS.capcutDraftsDirectory,
+      capcutTemplateDraftDirectory: raw.settings?.capcutTemplateDraftDirectory ?? DEFAULT_SETTINGS.capcutTemplateDraftDirectory,
+      capcutManualOutputDirectory: raw.settings?.capcutManualOutputDirectory ?? DEFAULT_SETTINGS.capcutManualOutputDirectory,
       localizeAspectRatio: raw.settings?.localizeAspectRatio ?? DEFAULT_SETTINGS.localizeAspectRatio,
       narrationLanguage: raw.settings?.narrationLanguage ?? DEFAULT_SETTINGS.narrationLanguage,
       narrationAudience: raw.settings?.narrationAudience ?? DEFAULT_SETTINGS.narrationAudience,
@@ -478,7 +482,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => {
     patchSettings: (patch) => {
       const project = get().project;
       const invalidatesDraft = Object.prototype.hasOwnProperty.call(patch, 'originalAudioVolume')
-        || Object.prototype.hasOwnProperty.call(patch, 'capcutDraftsDirectory');
+        || Object.prototype.hasOwnProperty.call(patch, 'capcutDraftsDirectory')
+        || Object.prototype.hasOwnProperty.call(patch, 'capcutTemplateDraftDirectory')
+        || Object.prototype.hasOwnProperty.call(patch, 'capcutManualOutputDirectory');
       commit({
         ...project,
         settings: { ...project.settings, ...patch },
