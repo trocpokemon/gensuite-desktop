@@ -8,6 +8,7 @@ import {
 import { useEntitlementStore } from '../store/entitlementStore';
 import { useProjectStore, uid } from '../store/projectStore';
 import { errorMessage } from '../providers/errors';
+import { imageJobFailure } from '../lib/imageStudioErrors';
 import {
   createImageCharacter, createImageProject, deleteImageCharacter, deleteImageGeneration,
   deleteImageProject, getImageJob, listImageCharacters, listImageProjects, listProjectImages,
@@ -90,8 +91,9 @@ async function runGeneration(
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
       try { job = await getImageJob(submitted.jobId); } catch { /* Retry transient polling errors. */ }
     }
-    if (job.status !== 'done' || !job.generation) throw new Error('Tạo ảnh chưa hoàn tất. Vui lòng thử lại.');
-    const result = job.generation;
+    const failure = imageJobFailure(job, !['done', 'failed', 'cancelled'].includes(job.status));
+    if (failure) throw failure;
+    const result = job.generation!;
     imagesCache.set(projectId, [result, ...(imagesCache.get(projectId) || [])]);
     projectsCache = (projectsCache || []).map((project) => project.id === projectId
       ? { ...project, imageCount: project.imageCount + result.imageCount, coverUrl: project.coverUrl || result.imageUrls[0] || null }

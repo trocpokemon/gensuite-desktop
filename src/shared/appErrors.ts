@@ -2,6 +2,7 @@ export type AppErrorStage =
   | 'desktop'
   | 'source'
   | 'speech-recognition'
+  | 'content'
   | 'translation'
   | 'voice'
   | 'subtitle'
@@ -68,6 +69,11 @@ export const APP_ERROR_DEFINITIONS = {
   TRANSCRIPTION_TEMP_UNAVAILABLE: { stage: 'speech-recognition', cause: 'processing-failed', retryable: true },
   TRANSCRIPTION_UNEXPECTED: { stage: 'speech-recognition', cause: 'unexpected', retryable: true },
   TRANSLATION_INPUT_REQUIRED: { stage: 'translation', cause: 'missing-input', retryable: false },
+  TRANSLATION_API_KEY_INVALID: { stage: 'translation', cause: 'permission', retryable: false },
+  TRANSLATION_QUOTA_EXHAUSTED: { stage: 'translation', cause: 'permission', retryable: false },
+  TRANSLATION_MODEL_UNAVAILABLE: { stage: 'translation', cause: 'component-unavailable', retryable: true },
+  TRANSLATION_CONTENT_BLOCKED: { stage: 'translation', cause: 'processing-failed', retryable: false },
+  TRANSLATION_REQUEST_REJECTED: { stage: 'translation', cause: 'processing-failed', retryable: false },
   TRANSLATION_INPUT_TOO_LARGE: { stage: 'translation', cause: 'input-limit', retryable: true },
   TRANSLATION_ACCESS_DENIED: { stage: 'translation', cause: 'permission', retryable: false },
   TRANSLATION_AUTH_REQUIRED: { stage: 'translation', cause: 'permission', retryable: false },
@@ -80,6 +86,15 @@ export const APP_ERROR_DEFINITIONS = {
   TRANSLATION_RESULT_INCOMPLETE: { stage: 'translation', cause: 'processing-failed', retryable: true },
   TRANSLATION_REPETITION_DETECTED: { stage: 'translation', cause: 'processing-failed', retryable: true },
   TRANSLATION_UNEXPECTED: { stage: 'translation', cause: 'unexpected', retryable: true },
+  CONTENT_API_KEY_INVALID: { stage: 'content', cause: 'permission', retryable: false },
+  CONTENT_ACCESS_DENIED: { stage: 'content', cause: 'permission', retryable: false },
+  CONTENT_QUOTA_EXHAUSTED: { stage: 'content', cause: 'permission', retryable: false },
+  CONTENT_RATE_LIMITED: { stage: 'content', cause: 'transport-failed', retryable: true },
+  CONTENT_MODEL_UNAVAILABLE: { stage: 'content', cause: 'component-unavailable', retryable: true },
+  CONTENT_BLOCKED: { stage: 'content', cause: 'processing-failed', retryable: false },
+  CONTENT_REQUEST_REJECTED: { stage: 'content', cause: 'processing-failed', retryable: false },
+  CONTENT_SERVICE_UNAVAILABLE: { stage: 'content', cause: 'transport-failed', retryable: true },
+  CONTENT_RESPONSE_INVALID: { stage: 'content', cause: 'processing-failed', retryable: true },
   SUBTITLE_ALIGNMENT_INPUT_INVALID: { stage: 'subtitle', cause: 'missing-input', retryable: false },
   SUBTITLE_ALIGNMENT_AUDIO_UNAVAILABLE: { stage: 'subtitle', cause: 'file-not-found', retryable: true },
   SUBTITLE_ALIGNMENT_TIMEOUT: { stage: 'subtitle', cause: 'processing-failed', retryable: true },
@@ -185,6 +200,7 @@ export interface AppErrorContext {
   groupCount?: number;
   chunkNumber?: number;
   chunkCount?: number;
+  providerStatus?: number;
 }
 
 /** Safe error payload allowed to cross into the renderer. It intentionally
@@ -205,7 +221,7 @@ export type IpcResult<T> =
 
 const APP_ERROR_CODES: ReadonlySet<string> = new Set(Object.keys(APP_ERROR_DEFINITIONS));
 const APP_ERROR_ROOT_KEYS = new Set(['kind', 'code', 'stage', 'cause', 'retryable', 'diagnosticId', 'context']);
-const APP_ERROR_CONTEXT_KEYS = new Set(['segmentNumber', 'segmentCount', 'groupNumber', 'groupCount', 'chunkNumber', 'chunkCount']);
+const APP_ERROR_CONTEXT_KEYS = new Set(['segmentNumber', 'segmentCount', 'groupNumber', 'groupCount', 'chunkNumber', 'chunkCount', 'providerStatus']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

@@ -871,7 +871,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
           </div>
         </div>
       </section>
-      <aside className="min-h-[680px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0f0f10]"><VoiceConfigPanel feature="localize-cloud" onMissingKey={setMissingKey} validation={{ attempt: validationAttempt, providerMissing: missingVoiceProvider, voiceMissing: missingVoice }} /></aside>
+      <aside className="min-h-[680px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0f0f10]"><VoiceConfigPanel onMissingKey={setMissingKey} validation={{ attempt: validationAttempt, providerMissing: missingVoiceProvider, voiceMissing: missingVoice }} /></aside>
     </div> : <section className="flex-1 p-5">
       <PipelineProgressPanel steps={pipelineProgress} running={running} inactivitySeconds={inactivitySeconds} />
 

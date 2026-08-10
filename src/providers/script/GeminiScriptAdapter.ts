@@ -4,8 +4,31 @@ import { buildContentPrompt, buildRewritePrompt, buildStoryboardPrompt, parseCon
 import { translateSegmentsReliably } from './translationReliability';
 import { clientAppError } from '../clientAppError';
 import { runTranslationRequest } from './translationRequest';
+import { classifyGoogleApiFailure, googleResponseWasBlocked, type GoogleApiFailureKind } from '../../lib/googleApiErrors';
 
 const MODEL = 'gemini-3.1-flash-lite';
+
+const googleFailure = (kind: GoogleApiFailureKind, translationMode: boolean, status: number) => {
+  const context = { providerStatus: status };
+  if (translationMode) {
+    if (kind === 'api-key-invalid') return clientAppError('TRANSLATION_API_KEY_INVALID', context);
+    if (kind === 'access-denied') return clientAppError('TRANSLATION_ACCESS_DENIED', context);
+    if (kind === 'quota-exhausted') return clientAppError('TRANSLATION_QUOTA_EXHAUSTED', context);
+    if (kind === 'rate-limited') return clientAppError('TRANSLATION_RATE_LIMITED', context);
+    if (kind === 'model-unavailable') return clientAppError('TRANSLATION_MODEL_UNAVAILABLE', context);
+    if (kind === 'content-blocked') return clientAppError('TRANSLATION_CONTENT_BLOCKED', context);
+    if (kind === 'request-rejected') return clientAppError('TRANSLATION_REQUEST_REJECTED', context);
+    return clientAppError('TRANSLATION_SERVICE_UNAVAILABLE', context);
+  }
+  if (kind === 'api-key-invalid') return clientAppError('CONTENT_API_KEY_INVALID', context);
+  if (kind === 'access-denied') return clientAppError('CONTENT_ACCESS_DENIED', context);
+  if (kind === 'quota-exhausted') return clientAppError('CONTENT_QUOTA_EXHAUSTED', context);
+  if (kind === 'rate-limited') return clientAppError('CONTENT_RATE_LIMITED', context);
+  if (kind === 'model-unavailable') return clientAppError('CONTENT_MODEL_UNAVAILABLE', context);
+  if (kind === 'content-blocked') return clientAppError('CONTENT_BLOCKED', context);
+  if (kind === 'request-rejected') return clientAppError('CONTENT_REQUEST_REJECTED', context);
+  return clientAppError('CONTENT_SERVICE_UNAVAILABLE', context);
+};
 
 export class GeminiScriptAdapter implements IScriptProvider {
   readonly engine = 'gemini' as const;
@@ -23,19 +46,16 @@ export class GeminiScriptAdapter implements IScriptProvider {
         }),
       });
       if (!resp.ok) {
-        await resp.text().catch(() => '');
-        if (resp.status === 400 || resp.status === 401 || resp.status === 403) throw new Error('MISSING_KEY:google');
-        if (!translationMode) throw new Error('Không thể tạo nội dung lúc này. Vui lòng thử lại.');
-        if (resp.status === 413) throw clientAppError('TRANSLATION_INPUT_TOO_LARGE');
-        if (resp.status === 429) throw clientAppError('TRANSLATION_RATE_LIMITED');
-        throw clientAppError('TRANSLATION_SERVICE_UNAVAILABLE');
+        const payload = await resp.json().catch(() => null);
+        throw googleFailure(classifyGoogleApiFailure(resp.status, payload), translationMode, resp.status);
       }
       const data = await resp.json().catch(() => null);
       const parts = (data as any)?.candidates?.[0]?.content?.parts;
       const text = Array.isArray(parts) ? parts.map((part: any) => String(part?.text ?? '')).join('').trim() : '';
       if (!text) {
-        if (translationMode) throw clientAppError('TRANSLATION_RESULT_INVALID');
-        throw new Error('Không nhận được nội dung kết quả.');
+        if (googleResponseWasBlocked(data)) throw googleFailure('content-blocked', translationMode, resp.status);
+        if (translationMode) throw clientAppError('TRANSLATION_RESULT_INVALID', { providerStatus: resp.status });
+        throw clientAppError('CONTENT_RESPONSE_INVALID', { providerStatus: resp.status });
       }
       return text;
     };

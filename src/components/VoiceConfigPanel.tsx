@@ -11,15 +11,12 @@ import { EDGE_TTS_FALLBACK_VOICES, localeLabel, edgeVoiceName } from '../provide
 import { CAPCUT_TTS_VOICES, capCutVoiceById } from '../providers/voice/capcutTtsCatalog';
 import type { EdgeTtsVoice } from '../shared/types';
 import { useEntitlementStore } from '../store/entitlementStore';
-import type { GenSuiteFeature } from '../lib/gensuiteAuth';
 
 interface Props {
   /** Rendered under the config controls (e.g. a host-specific action button). */
   footer?: ReactNode;
   /** Surface a missing-key notice to the host so it can render the settings prompt. */
   onMissingKey?: (service: string | null) => void;
-  /** Optional paid workflow whose cloud choices need an additional entitlement. */
-  feature?: GenSuiteFeature;
   /** Host validation state for required provider/voice choices. */
   validation?: { attempt: number; providerMissing: boolean; voiceMissing: boolean };
 }
@@ -142,7 +139,7 @@ const ENGINE_OPTIONS: Array<{ id: VoiceEngine; label: string; mark: string; thum
 // Shared voice provider/voice/model/param configuration. Extracted from SoundStage
 // so the localize studio offers the exact same engine + voice picker. Reads and
 // writes voice settings straight to the active project's store.
-export function VoiceConfigPanel({ footer, onMissingKey, feature, validation }: Props) {
+export function VoiceConfigPanel({ footer, onMissingKey, validation }: Props) {
   const project = useProjectStore((state) => state.project);
   const setScenes = useProjectStore((state) => state.setScenes);
   const patchSettings = useProjectStore((state) => state.patchSettings);
@@ -153,7 +150,6 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature, validation }: 
   const refreshEntitlements = useEntitlementStore((state) => state.load);
   const allowedVoiceEngines = useEntitlementStore((state) => state.allowedVoiceEngines);
   const premiumVoiceModels = useEntitlementStore((state) => state.features.premiumVoiceModels);
-  const canUseLocalizeCloud = useEntitlementStore((state) => state.features.localizeCloud);
   const engine = project.settings.voiceEngine;
   const config = project.settings.voiceConfigs[engine];
 
@@ -368,7 +364,6 @@ export function VoiceConfigPanel({ footer, onMissingKey, feature, validation }: 
 
   const canUseVoiceEngine = (next: VoiceEngine): boolean => next === 'edgetts' || next === 'capcuttts' || (
     entitlementStatus === 'ready'
-    && (feature !== 'localize-cloud' || canUseLocalizeCloud)
     && (allowedVoiceEngines === null || allowedVoiceEngines.includes(next))
   );
 
