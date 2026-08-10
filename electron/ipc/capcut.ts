@@ -5,7 +5,8 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { CapCutDraftExportArgs, CapCutDraftExportResult } from '../../src/shared/types';
+import type { CapCutDraftExportArgs, CapCutDraftExportResult, SourceVideoValidationResult } from '../../src/shared/types';
+import type { AppErrorCode, AppErrorContext } from '../../src/shared/appErrors';
 import { buildCapCutDraftSpec, safeCapCutProjectName, synchronizeCapCutCaptionSemantics, synchronizeCapCutVoiceTiming, type CapCutCompileSpec } from '../../src/shared/capcutDraft';
 import {
   applyCapCutCompatibilityProfile,
@@ -116,10 +117,9 @@ function validateExportArgs(value: unknown): asserts value is CapCutDraftExportA
   if (!isRecord(value)
     || typeof value.projectId !== 'string' || !value.projectId.trim()
     || typeof value.projectName !== 'string'
-    || typeof value.sourceVideoPath !== 'string' || !path.isAbsolute(value.sourceVideoPath)
     || (value.sourceDurationSec !== undefined
       && (typeof value.sourceDurationSec !== 'number' || !Number.isFinite(value.sourceDurationSec) || value.sourceDurationSec <= 0))
-    || !Array.isArray(value.segments) || value.segments.length === 0 || value.segments.length > MAX_SEGMENTS
+    || !Array.isArray(value.segments) || value.segments.length === 0
     || typeof value.subtitles !== 'boolean'
     || (value.captionLanguage !== undefined && (typeof value.captionLanguage !== 'string' || value.captionLanguage.length > 32))
     || typeof value.originalAudioVolume !== 'number' || !Number.isFinite(value.originalAudioVolume)
@@ -127,34 +127,70 @@ function validateExportArgs(value: unknown): asserts value is CapCutDraftExportA
     || (value.draftsDirectory !== undefined && (typeof value.draftsDirectory !== 'string' || !path.isAbsolute(value.draftsDirectory)))) {
     throw appFailure('CAPCUT_EXPORT_INPUT_INVALID', undefined, { operation: 'draft-validate' });
   }
-  value.segments.forEach((segment) => {
-    if (!isRecord(segment)
-      || typeof segment.audioPath !== 'string' || !path.isAbsolute(segment.audioPath)
-      || typeof segment.sourceStart !== 'number' || !Number.isFinite(segment.sourceStart) || segment.sourceStart < 0
+  if (typeof value.sourceVideoPath !== 'string' || !path.isAbsolute(value.sourceVideoPath)) {
+    throw appFailure('CAPCUT_SOURCE_UNAVAILABLE', undefined, { operation: 'draft-validate', classifier: 'source-path' });
+  }
+  const segments = value.segments as unknown[];
+  if (segments.length > MAX_SEGMENTS) {
+    throw appFailure('CAPCUT_SEGMENT_LIMIT', undefined, { operation: 'draft-validate', segmentCount: segments.length });
+  }
+  segments.forEach((segment, index) => {
+    const context = { segmentNumber: index + 1, segmentCount: segments.length };
+    if (!isRecord(segment)) {
+      throw appFailure('CAPCUT_TIMELINE_INVALID', context, { operation: 'draft-validate', classifier: 'segment-shape' });
+    }
+    if (typeof segment.audioPath !== 'string' || !path.isAbsolute(segment.audioPath)) {
+      throw appFailure('CAPCUT_VOICE_UNAVAILABLE', context, { operation: 'draft-validate', classifier: 'voice-path' });
+    }
+    if (typeof segment.sourceStart !== 'number' || !Number.isFinite(segment.sourceStart) || segment.sourceStart < 0
       || typeof segment.sourceEnd !== 'number' || !Number.isFinite(segment.sourceEnd) || segment.sourceEnd <= segment.sourceStart
-      || typeof segment.audioDuration !== 'number' || !Number.isFinite(segment.audioDuration) || segment.audioDuration <= 0
       || typeof segment.text !== 'string') {
-      throw appFailure('CAPCUT_EXPORT_INPUT_INVALID', undefined, { operation: 'draft-validate' });
+      throw appFailure('CAPCUT_TIMELINE_INVALID', context, { operation: 'draft-validate', classifier: 'segment-timing' });
+    }
+    if (typeof segment.audioDuration !== 'number' || !Number.isFinite(segment.audioDuration) || segment.audioDuration <= 0) {
+      throw appFailure('CAPCUT_VOICE_UNREADABLE', context, { operation: 'draft-validate', classifier: 'voice-duration' });
     }
   });
 }
 
-async function assertReadableInputs(args: CapCutDraftExportArgs): Promise<void> {
-  const inputs = [args.sourceVideoPath, ...args.segments.map((segment) => segment.audioPath)];
-  if (args.musicPath) inputs.push(args.musicPath);
+async function assertReadableFile(
+  input: string,
+  unavailableCode: AppErrorCode,
+  unreadableCode: AppErrorCode,
+  context: AppErrorContext | undefined,
+  classifier: string,
+): Promise<void> {
   try {
-    await Promise.all(inputs.map(async (input) => {
-      const stat = await fs.stat(input);
-      if (!stat.isFile() || stat.size <= 0) throw new Error('invalid input');
-      await fs.access(input, fsConstants.R_OK);
-    }));
+    const stat = await fs.stat(input);
+    if (!stat.isFile() || stat.size <= 0) {
+      throw appFailure(unreadableCode, context, { operation: 'draft-inputs', classifier });
+    }
+    await fs.access(input, fsConstants.R_OK);
   } catch (error) {
+    if (error instanceof AppFailure) throw error;
     const code = systemCode(error);
-    throw appFailure(
-      code === 'EACCES' || code === 'EPERM' ? 'CAPCUT_EXPORT_PERMISSION_DENIED' : 'CAPCUT_EXPORT_INPUT_INVALID',
-      undefined,
-      { operation: 'draft-inputs', systemCode: code },
+    if (code === 'EACCES' || code === 'EPERM') {
+      throw appFailure('CAPCUT_EXPORT_PERMISSION_DENIED', context, { operation: 'draft-inputs', classifier, systemCode: code });
+    }
+    throw appFailure(code === 'ENOENT' ? unavailableCode : unreadableCode, context, {
+      operation: 'draft-inputs', classifier, systemCode: code,
+    });
+  }
+}
+
+async function assertReadableInputs(args: CapCutDraftExportArgs): Promise<void> {
+  await assertReadableFile(args.sourceVideoPath, 'CAPCUT_SOURCE_UNAVAILABLE', 'CAPCUT_SOURCE_UNREADABLE', undefined, 'source-file');
+  for (let index = 0; index < args.segments.length; index += 1) {
+    await assertReadableFile(
+      args.segments[index].audioPath,
+      'CAPCUT_VOICE_UNAVAILABLE',
+      'CAPCUT_VOICE_UNREADABLE',
+      { segmentNumber: index + 1, segmentCount: args.segments.length },
+      'voice-file',
     );
+  }
+  if (args.musicPath) {
+    await assertReadableFile(args.musicPath, 'BACKGROUND_AUDIO_UNAVAILABLE', 'BACKGROUND_AUDIO_UNREADABLE', undefined, 'background-file');
   }
 }
 
@@ -237,7 +273,11 @@ async function launchCapCut(): Promise<boolean> {
   });
 }
 
-async function probeSourceVideo(sourceVideoPath: string): Promise<{ width: number; height: number; durationSec: number }> {
+async function probeSourceVideo(
+  sourceVideoPath: string,
+  failureCode: AppErrorCode = 'CAPCUT_SOURCE_UNREADABLE',
+  operation = 'draft-probe',
+): Promise<SourceVideoValidationResult> {
   return await new Promise((resolve, reject) => {
     const child = spawn(ffprobeBinary(), [
       '-v', 'error', '-select_streams', 'v:0',
@@ -258,10 +298,33 @@ async function probeSourceVideo(sourceVideoPath: string): Promise<{ width: numbe
         if (code !== 0 || !stream?.width || !stream.height || !(durationSec > 0)) throw new Error('invalid media');
         resolve({ width: stream.width, height: stream.height, durationSec });
       } catch {
-        reject(appFailure('CAPCUT_EXPORT_INPUT_INVALID', undefined, { operation: 'draft-probe' }));
+        reject(appFailure(failureCode, undefined, { operation, classifier: 'source-media' }));
       }
     });
   });
+}
+
+async function validateSourceVideo(sourceVideoPath: string): Promise<SourceVideoValidationResult> {
+  if (!sourceVideoPath || !path.isAbsolute(sourceVideoPath)) {
+    throw appFailure('VIDEO_SOURCE_UNAVAILABLE', undefined, { operation: 'source-preflight', classifier: 'source-path' });
+  }
+  try {
+    const stat = await fs.stat(sourceVideoPath);
+    if (!stat.isFile() || stat.size <= 0) {
+      throw appFailure('VIDEO_SOURCE_UNREADABLE', undefined, { operation: 'source-preflight', classifier: 'source-file' });
+    }
+    await fs.access(sourceVideoPath, fsConstants.R_OK);
+  } catch (error) {
+    if (error instanceof AppFailure) throw error;
+    const code = systemCode(error);
+    if (code === 'EACCES' || code === 'EPERM') {
+      throw appFailure('VIDEO_SOURCE_PERMISSION_DENIED', undefined, { operation: 'source-preflight', classifier: 'source-file', systemCode: code });
+    }
+    throw appFailure(code === 'ENOENT' ? 'VIDEO_SOURCE_UNAVAILABLE' : 'VIDEO_SOURCE_UNREADABLE', undefined, {
+      operation: 'source-preflight', classifier: 'source-file', systemCode: code,
+    });
+  }
+  return probeSourceVideo(sourceVideoPath, 'VIDEO_SOURCE_UNREADABLE', 'source-preflight');
 }
 
 function packageCliPath(): string {
@@ -790,6 +853,17 @@ export function registerCapCutDraftIpc(): void {
       return appFailureResult<CapCutDraftExportResult>(error, 'CAPCUT_EXPORT_FAILED', {
         operation: 'draft-export',
         segmentCount: isRecord(args) && Array.isArray(args.segments) ? args.segments.length : undefined,
+      });
+    }
+  });
+
+  ipcMain.handle('capcut:validateSource', async (_event, sourceVideoPath: unknown) => {
+    try {
+      if (typeof sourceVideoPath !== 'string') throw appFailure('VIDEO_SOURCE_UNAVAILABLE');
+      return appSuccess(await validateSourceVideo(sourceVideoPath));
+    } catch (error) {
+      return appFailureResult<SourceVideoValidationResult>(error, 'VIDEO_SOURCE_UNREADABLE', {
+        operation: 'source-preflight',
       });
     }
   });

@@ -28,6 +28,7 @@ const ipcSource = await readFile(path.resolve('electron/ipc/capcut.ts'), 'utf8')
 const studioSource = await readFile(path.resolve('src/steps/NarrationStudio.tsx'), 'utf8');
 const localizeStudioSource = await readFile(path.resolve('src/steps/LocalizeStudio.tsx'), 'utf8');
 const preloadSource = await readFile(path.resolve('electron/preload.ts'), 'utf8');
+const projectIpcSource = await readFile(path.resolve('electron/ipc/project.ts'), 'utf8');
 const { buildCapCutDraftSpec, safeCapCutProjectName, synchronizeCapCutCaptionSemantics, synchronizeCapCutVoiceTiming } = await loadTypeScriptModule(file);
 const {
   applyCapCutCompatibilityProfile,
@@ -216,7 +217,16 @@ assert.match(ipcSource, /synchronizeVoiceTiming/, 'Voice speed metadata must be 
 assert.match(ipcSource, /capcut:launch/, 'The desktop bridge must expose a dedicated editor launch action.');
 assert.match(ipcSource, /shell\.openPath\(candidate\)/, 'The editor must be launched through the main process.');
 assert.match(ipcSource, /CAPCUT_APP_UNAVAILABLE/, 'A missing editor installation must return a structured error.');
+for (const code of ['CAPCUT_SOURCE_UNAVAILABLE', 'CAPCUT_SOURCE_UNREADABLE', 'CAPCUT_VOICE_UNAVAILABLE', 'CAPCUT_VOICE_UNREADABLE', 'CAPCUT_TIMELINE_INVALID', 'CAPCUT_SEGMENT_LIMIT']) {
+  assert.match(ipcSource, new RegExp(code), `Draft preflight must preserve the specific ${code} cause.`);
+}
+assert.match(ipcSource, /segmentNumber:\s*index \+ 1/, 'Voice/timeline failures must identify the safe segment number.');
+assert.match(ipcSource, /capcut:validateSource/, 'Persisted source checkpoints must be revalidated before reuse.');
 assert.match(preloadSource, /capcut:launch/, 'The renderer bridge must expose the structured editor launch action.');
+assert.match(preloadSource, /capcut:validateSource/, 'The renderer bridge must expose source checkpoint validation.');
+assert.match(projectIpcSource, /AUDIO_EXTENSIONS/, 'Project recovery must restrict voice candidates to supported audio files.');
+assert.match(projectIpcSource, /\.partial\./, 'Project recovery must reject interrupted voice artifacts.');
+assert.match(projectIpcSource, /stat\.size > 0/, 'Project recovery must reject empty voice artifacts.');
 assert.match(localizeStudioSource, />Mở CapCut</, 'The completed project card must offer CapCut as the primary action.');
 assert.match(localizeStudioSource, />Mở thư mục</, 'The completed project card must retain a folder fallback.');
 const registration = updateCapCutRegistrationMetadata({

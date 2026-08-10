@@ -48,6 +48,7 @@ import type {
   NarrationRewriteArgs,
   CapCutDraftExportArgs,
   CapCutDraftExportResult,
+  SourceVideoValidationResult,
 } from '../src/shared/types';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -152,6 +153,14 @@ function isCapCutDraftExportResult(value: unknown): value is CapCutDraftExportRe
     && Object.keys(value).length === 2
     && typeof value.draftPath === 'string' && value.draftPath.trim().length > 0
     && typeof value.projectName === 'string' && value.projectName.trim().length > 0;
+}
+
+function isSourceVideoValidationResult(value: unknown): value is SourceVideoValidationResult {
+  if (!isRecord(value)) return false;
+  return Object.keys(value).every((key) => ['width', 'height', 'durationSec'].includes(key))
+    && typeof value.width === 'number' && Number.isFinite(value.width) && value.width > 0
+    && typeof value.height === 'number' && Number.isFinite(value.height) && value.height > 0
+    && typeof value.durationSec === 'number' && Number.isFinite(value.durationSec) && value.durationSec > 0;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -293,6 +302,11 @@ const bridge: GensuiteBridge = {
       'capcut:exportDraft',
       args,
       isCapCutDraftExportResult,
+    ),
+    validateSource: (sourceVideoPath: string) => invokeStructured(
+      'capcut:validateSource',
+      sourceVideoPath,
+      isSourceVideoValidationResult,
     ),
     selectDraftsDirectory: () => invokeStructured(
       'capcut:selectDraftsDirectory',

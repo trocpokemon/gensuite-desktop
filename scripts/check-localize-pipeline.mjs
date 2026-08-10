@@ -156,6 +156,16 @@ if (!voicePanel.includes("'Chọn nhà cung cấp trước'")
 if (!studio.includes('await recognizeAndTranslate(sourcePath)') || !studio.includes('await createVoices()') || !studio.includes('await createCapCutDraft()')) {
   violations.push('Thứ tự nhận dạng → dịch → voice → CapCut chưa được khóa rõ ràng.');
 }
+if (!studio.includes('window.gensuite.capcut.validateSource(current.sourceVideoPath)')
+  || !studio.includes("sourceInputMode !== 'link' || !requestedUrl")
+  || !studio.includes('Video cần được tải lại')) {
+  violations.push('Checkpoint video cũ chưa được kiểm tra và tự tải lại khi nguồn liên kết không còn hợp lệ.');
+}
+if (!studio.includes("['CAPCUT_VOICE_UNAVAILABLE', 'CAPCUT_VOICE_UNREADABLE']")
+  || !studio.includes('Đang phục hồi câu ${segmentNumber}')
+  || !studio.includes("audioPath: undefined, audioDuration: undefined")) {
+  violations.push('Pipeline chưa tự tạo lại đúng câu voice mất/hỏng trước khi xuất dự án.');
+}
 if (!studio.includes('window.gensuite.capcut.exportDraft') || !studio.includes('subtitles: true')) {
   violations.push('Luồng dịch chưa đưa track phụ đề chữ thuần vào dự án CapCut.');
 }
@@ -187,6 +197,11 @@ if (!panel.includes('seconds >= 30') || !panel.includes('seconds >= 90')) {
 }
 for (const code of ['TRANSLATION_REQUEST_TIMEOUT', 'TRANSLATION_UNEXPECTED', 'VOICE_CREDITS_INSUFFICIENT', 'CAPCUT_EXPORT_FAILED']) {
   if (!appErrors.includes(`${code}:`)) violations.push(`Thiếu mã lỗi ${code}.`);
+}
+const outerDiagnosticIndex = mainErrors.indexOf('...diagnostics,', mainErrors.indexOf('const internalDiagnostics'));
+const innerDiagnosticIndex = mainErrors.indexOf('...safeUnexpectedMetadata(error)', mainErrors.indexOf('const internalDiagnostics'));
+if (outerDiagnosticIndex < 0 || innerDiagnosticIndex < outerDiagnosticIndex) {
+  violations.push('Log hỗ trợ vẫn để operation/classifier bên ngoài ghi đè nguyên nhân gốc của lỗi.');
 }
 
 if (violations.length) {

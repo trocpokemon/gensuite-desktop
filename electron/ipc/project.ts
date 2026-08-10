@@ -71,15 +71,28 @@ async function directorySize(dir: string): Promise<number> {
   return sizes.reduce((total, size) => total + size, 0);
 }
 
+const AUDIO_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.webm']);
+
+async function usableAudioCandidate(filePath?: string): Promise<boolean> {
+  if (!filePath || !AUDIO_EXTENSIONS.has(path.extname(filePath).toLowerCase())) return false;
+  const fileName = path.basename(filePath).toLowerCase();
+  if (['.partial.', '.part.', '.backup.', '.chunk-', '.concat.', '.parts.'].some((marker) => fileName.includes(marker))) return false;
+  const stat = await fs.stat(filePath).catch(() => null);
+  return Boolean(stat?.isFile() && stat.size > 0);
+}
+
 async function latestSceneFile(dir: string, sceneId: string): Promise<string | undefined> {
   const prefix = sanitize(sceneId);
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
   const candidates = entries.filter((entry) => entry.isFile() &&
+    AUDIO_EXTENSIONS.has(path.extname(entry.name).toLowerCase()) &&
+    !['.partial.', '.part.', '.backup.', '.chunk-', '.concat.', '.parts.'].some((marker) => entry.name.toLowerCase().includes(marker)) &&
     (entry.name.startsWith(`${prefix}.`) || entry.name.startsWith(`${prefix}-`)));
-  const withStats = await Promise.all(candidates.map(async (entry) => ({
-    path: path.join(dir, entry.name),
-    mtimeMs: (await fs.stat(path.join(dir, entry.name))).mtimeMs,
-  })));
+  const withStats = (await Promise.all(candidates.map(async (entry) => {
+    const candidatePath = path.join(dir, entry.name);
+    const stat = await fs.stat(candidatePath).catch(() => null);
+    return stat?.isFile() && stat.size > 0 ? { path: candidatePath, mtimeMs: stat.mtimeMs } : null;
+  }))).filter((entry): entry is { path: string; mtimeMs: number } => Boolean(entry));
   return withStats.sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.path;
 }
 
@@ -97,10 +110,13 @@ async function reconcileProjectFiles(state: ProjectState): Promise<{ project: Pr
         changed = true;
       }
     }
-    if (!(await exists(scene.audioPath))) {
+    if (!(await usableAudioCandidate(scene.audioPath))) {
       const recovered = await latestSceneFile(path.join(dir, 'audio'), scene.id);
       if (recovered) {
         next = { ...next, audioPath: recovered };
+        changed = true;
+      } else if (scene.audioPath || scene.audioDuration) {
+        next = { ...next, audioPath: undefined, audioDuration: undefined };
         changed = true;
       }
     }

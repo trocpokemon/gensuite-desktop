@@ -393,13 +393,23 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
 
   const ensureSourceVideo = async (): Promise<string> => {
     const current = useProjectStore.getState().project;
+    if (current.id !== project.id) throw clientAppError('LOCALIZE_JOB_OWNERSHIP_CONFLICT');
     const requestedUrl = url.trim();
     const preparedForSelectedMode = current.sourceVideoPath
       && current.settings.localizePreparedSourceMode === sourceInputMode
       && (sourceInputMode === 'file' || !requestedUrl || requestedUrl === current.settings.localizePreparedSourceUrl);
     if (preparedForSelectedMode && current.sourceVideoPath) {
-      completeStage('download', 'Video đã sẵn sàng');
-      return current.sourceVideoPath;
+      touchStage('download', 1, 'Đang kiểm tra video đã lưu', 'preflight');
+      const validation = await window.gensuite.capcut.validateSource(current.sourceVideoPath);
+      if (validation.ok) {
+        completeStage('download', 'Video đã sẵn sàng');
+        return current.sourceVideoPath;
+      }
+      // A persisted link checkpoint is recoverable without asking the user to
+      // understand or repair internal project files. File imports require an
+      // explicit re-selection because the app has no safe source to fetch.
+      if (sourceInputMode !== 'link' || !requestedUrl) throw validation.error;
+      touchStage('download', 0, 'Video cần được tải lại', 'preflight');
     }
     if (!url.trim()) throw clientAppError('VIDEO_SOURCE_REQUIRED');
     setStage('download');
@@ -408,6 +418,8 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
     touchStage('download', 0, 'Đang chuẩn bị');
     const path = await window.gensuite.ytdlp.download({ projectId: current.id, url: url.trim() });
     if (!path) throw clientAppError('VIDEO_SOURCE_UNREADABLE');
+    const validation = await window.gensuite.capcut.validateSource(path);
+    if (!validation.ok) throw validation.error;
     useProjectStore.getState().setSourceVideo(path);
     useProjectStore.getState().patchSettings({ localizePreparedSourceMode: 'link', localizeSourceInputMode: 'link', localizeSourceUrl: requestedUrl, localizePreparedSourceUrl: requestedUrl });
     completeStage('download', 'Video đã tải xong');
@@ -416,6 +428,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
 
   const recognizeAndTranslate = async (sourcePath: string) => {
     let current = useProjectStore.getState().project;
+    if (current.id !== project.id) throw clientAppError('LOCALIZE_JOB_OWNERSHIP_CONFLICT');
     const scenes = validScenes(current);
     const cached = current.transcriptionVersion === 4 && Boolean(current.transcript?.length) && scenes.length > 0
       && current.sourceLanguage === sourceLanguage && current.targetLanguage === targetLanguage;
@@ -467,6 +480,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
 
   const createVoices = async () => {
     const current = useProjectStore.getState().project;
+    if (current.id !== project.id) throw clientAppError('LOCALIZE_JOB_OWNERSHIP_CONFLICT');
     const scenes = validScenes(current);
     if (!scenes.length) throw clientAppError('VIDEO_SEGMENTS_EMPTY');
     setStage('voice');
@@ -516,6 +530,7 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
                   progress.phase === 'assembling' ? 'validating' : 'running');
               },
             });
+            if (useProjectStore.getState().project.id !== project.id) throw clientAppError('LOCALIZE_JOB_OWNERSHIP_CONFLICT');
             useProjectStore.getState().updateScene(item.scene.id, { audioPath: result.audioPath, audioDuration: result.durationSec });
             progressByIndex.set(item.index, 1);
             const completed = [...progressByIndex.values()].filter((value) => value >= 1).length;
@@ -536,28 +551,48 @@ export function LocalizeStudio({ onOpenSettings, setupStep, onSetupStepChange, o
   };
 
   const createCapCutDraft = async () => {
-    const current = useProjectStore.getState().project;
-    const scenes = validScenes(current);
-    if (!current.sourceVideoPath || !scenes.length || scenes.some((scene) => !scene.audioPath || !scene.audioDuration)) throw clientAppError('CAPCUT_EXPORT_INPUT_INVALID');
+    const exportPreparedDraft = async () => {
+      const current = useProjectStore.getState().project;
+      if (current.id !== project.id) throw clientAppError('LOCALIZE_JOB_OWNERSHIP_CONFLICT');
+      const scenes = validScenes(current);
+      if (!current.sourceVideoPath || !scenes.length || scenes.some((scene) => !scene.audioPath || !scene.audioDuration)) throw clientAppError('CAPCUT_EXPORT_INPUT_INVALID');
+      const sourceValidation = await window.gensuite.capcut.validateSource(current.sourceVideoPath);
+      if (!sourceValidation.ok) throw sourceValidation.error;
+      return window.gensuite.capcut.exportDraft({
+        projectId: current.id,
+        projectName: current.name,
+        sourceVideoPath: current.sourceVideoPath,
+        segments: scenes.map((scene) => ({
+          audioPath: scene.audioPath as string,
+          sourceStart: scene.sourceStart as number,
+          sourceEnd: scene.sourceEnd as number,
+          text: scene.narration,
+          audioDuration: scene.audioDuration as number,
+        })),
+        // Plain editable captions only. Styling and effects belong in CapCut.
+        subtitles: true,
+        captionLanguage: current.targetLanguage,
+        originalAudioVolume: 0,
+        draftsDirectory: current.settings.capcutDraftsDirectory || undefined,
+      });
+    };
+
     setStage('capcut');
     touchStage('capcut', 10, 'Đang kiểm tra dữ liệu dự án', 'preflight');
-    const result = await window.gensuite.capcut.exportDraft({
-      projectId: current.id,
-      projectName: current.name,
-      sourceVideoPath: current.sourceVideoPath,
-      segments: scenes.map((scene) => ({
-        audioPath: scene.audioPath as string,
-        sourceStart: scene.sourceStart as number,
-        sourceEnd: scene.sourceEnd as number,
-        text: scene.narration,
-        audioDuration: scene.audioDuration as number,
-      })),
-      // Plain editable captions only. Styling and effects belong in CapCut.
-      subtitles: true,
-      captionLanguage: current.targetLanguage,
-      originalAudioVolume: 0,
-      draftsDirectory: current.settings.capcutDraftsDirectory || undefined,
-    });
+    let result = await exportPreparedDraft();
+    if (!result.ok && ['CAPCUT_VOICE_UNAVAILABLE', 'CAPCUT_VOICE_UNREADABLE'].includes(result.error.code)) {
+      const segmentNumber = result.error.context?.segmentNumber;
+      const brokenScene = segmentNumber ? validScenes(useProjectStore.getState().project)[segmentNumber - 1] : undefined;
+      if (brokenScene) {
+        useProjectStore.getState().updateScene(brokenScene.id, { audioPath: undefined, audioDuration: undefined });
+        setStage('voice');
+        touchStage('voice', 0, `Đang phục hồi câu ${segmentNumber}`, 'preflight');
+        await createVoices();
+        setStage('capcut');
+        touchStage('capcut', 10, 'Đang kiểm tra lại dữ liệu dự án', 'preflight');
+        result = await exportPreparedDraft();
+      }
+    }
     if (!result.ok) throw result.error;
     useProjectStore.getState().setCapCutDraft(result.value);
     completeStage('capcut', 'Dự án đã sẵn sàng');

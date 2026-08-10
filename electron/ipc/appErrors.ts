@@ -128,8 +128,11 @@ export function appFailureResult<T>(
   // Only normalized, allowlisted metadata reaches diagnostics. Paths, source
   // text, command output and service details never leave the process boundary.
   const internalDiagnostics = sanitizedDiagnostics({
-    ...safeUnexpectedMetadata(error),
     ...diagnostics,
+    // A known failure carries the most precise classifier/operation. Keep it
+    // after the handler fallback so support logs do not collapse every failure
+    // into a generic outer operation such as `draft-export`.
+    ...safeUnexpectedMetadata(error),
   });
   rememberInternalDiagnostic(diagnosticId, internalDiagnostics);
 

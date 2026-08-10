@@ -192,6 +192,13 @@ export interface CapCutDraftExportResult {
   projectName: string;
 }
 
+/** Safe metadata returned after verifying that a source contains usable video. */
+export interface SourceVideoValidationResult {
+  width: number;
+  height: number;
+  durationSec: number;
+}
+
 /** GGML model sizes for local whisper.cpp. Larger = more accurate, slower, bigger download. */
 export type WhisperModelName = 'tiny' | 'base' | 'small' | 'medium';
 
@@ -888,6 +895,8 @@ export interface GensuiteBridge {
     launch(): Promise<IpcResult<boolean>>;
     /** Create a real editable project with separate video, narration, music and subtitle tracks. */
     exportDraft(args: CapCutDraftExportArgs): Promise<IpcResult<CapCutDraftExportResult>>;
+    /** Verify a persisted/downloaded source before a checkpoint is trusted. */
+    validateSource(sourceVideoPath: string): Promise<IpcResult<SourceVideoValidationResult>>;
     /** Choose the project-store directory when it cannot be detected automatically. */
     selectDraftsDirectory(): Promise<IpcResult<string | null>>;
   };
