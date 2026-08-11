@@ -9,6 +9,8 @@ import type {
   AudioDownloadArgs,
   AudioPersistResult,
   AudioProbeArgs,
+  AudioTimelineAssembleArgs,
+  AudioTimelinePart,
   AudioWriteArgs,
 } from '../../src/shared/types';
 import type { IpcResult } from '../../src/shared/appErrors';
@@ -18,6 +20,8 @@ const AUDIO_DOWNLOAD_TIMEOUT_MS = 60_000;
 const AUDIO_PROBE_TIMEOUT_MS = 30_000;
 const AUDIO_ASSEMBLY_TIMEOUT_MS = 2 * 60_000;
 const MAX_AUDIO_BYTES = 200 * 1024 * 1024;
+const TIMELINE_INPUT_BATCH = 80;
+const MAX_TIMELINE_PARTS = 2_000;
 
 function sanitize(name: string): string {
   return name.replace(/[^a-z0-9_-]/gi, '_');
@@ -237,6 +241,88 @@ async function assembleAudio(args: AudioAssembleArgs): Promise<AudioPersistResul
   }
 }
 
+async function renderTimelineMix(
+  parts: Array<{ audioPath: string; delayMs: number }>,
+  outputPath: string,
+  filterPath: string,
+): Promise<void> {
+  const chains = parts.map((part, index) =>
+    `[${index}:a]aresample=async=1:first_pts=0,adelay=${part.delayMs}:all=1[a${index}]`);
+  chains.push(`${parts.map((_part, index) => `[a${index}]`).join('')}amix=inputs=${parts.length}:duration=longest:dropout_transition=0:normalize=0[out]`);
+  await fs.writeFile(filterPath, chains.join(';\n'), 'utf8').catch((error) => { throw audioOutputFailure(error); });
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(ffmpegBinary(), [
+      '-y', '-v', 'error',
+      ...parts.flatMap((part) => ['-i', part.audioPath]),
+      '-filter_complex_script', filterPath,
+      '-map', '[out]', '-vn', '-c:a', 'libmp3lame', '-q:a', '3', outputPath,
+    ], { cwd: path.dirname(ffmpegBinary()), stdio: ['ignore', 'ignore', 'pipe'] });
+    let settled = false;
+    const timeoutMs = Math.max(AUDIO_ASSEMBLY_TIMEOUT_MS, parts.length * 5_000);
+    const timer = setTimeout(() => {
+      child.kill();
+      if (!settled) { settled = true; reject(appFailure('VOICE_AUDIO_ASSEMBLY_TIMEOUT')); }
+    }, timeoutMs);
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer); reject(audioOutputFailure(error));
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      code === 0 ? resolve() : reject(appFailure('VOICE_AUDIO_ASSEMBLY_FAILED', undefined, { exitCode: code ?? undefined }));
+    });
+  });
+}
+
+async function assembleTimelineAudio(args: AudioTimelineAssembleArgs): Promise<AudioPersistResult> {
+  if (!Array.isArray(args.parts) || !args.parts.length) throw appFailure('VOICE_INPUT_INVALID');
+  if (args.parts.length > MAX_TIMELINE_PARTS) throw appFailure('VOICE_TEXT_TOO_LONG', { chunkCount: args.parts.length });
+  const parts: AudioTimelinePart[] = [...args.parts].sort((left, right) => left.startTime - right.startTime);
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (!part?.audioPath || !Number.isFinite(part.startTime) || !Number.isFinite(part.endTime)
+      || part.startTime < 0 || part.endTime <= part.startTime || part.endTime > 24 * 60 * 60) {
+      throw appFailure('VOICE_INPUT_INVALID', { chunkNumber: index + 1, chunkCount: parts.length });
+    }
+    try {
+      await validateAudioFile(part.audioPath);
+    } catch (error) {
+      if (error instanceof AppFailure) throw appFailure(error.code, { chunkNumber: index + 1, chunkCount: parts.length }, error.internalDiagnostics);
+      throw error;
+    }
+  }
+
+  const audioDir = path.join(projectDir(args.projectId), 'audio');
+  await fs.mkdir(audioDir, { recursive: true }).catch((error) => { throw audioOutputFailure(error); });
+  const dest = path.join(audioDir, `${sanitize(args.segmentId)}.mp3`);
+  const partial = `${dest}.partial.mp3`;
+  const temporaryPaths: string[] = [];
+  try {
+    const groups: string[] = [];
+    for (let offset = 0; offset < parts.length; offset += TIMELINE_INPUT_BATCH) {
+      const group = parts.slice(offset, offset + TIMELINE_INPUT_BATCH);
+      const groupOutput = parts.length <= TIMELINE_INPUT_BATCH ? partial : `${dest}.timeline-${groups.length}.mp3`;
+      const filterPath = `${dest}.timeline-${groups.length}.filter.txt`;
+      temporaryPaths.push(filterPath);
+      if (groupOutput !== partial) temporaryPaths.push(groupOutput);
+      await renderTimelineMix(group.map((part) => ({ audioPath: part.audioPath, delayMs: Math.round(part.startTime * 1000) })), groupOutput, filterPath);
+      groups.push(groupOutput);
+    }
+    if (groups.length > 1) {
+      const finalFilter = `${dest}.timeline-final.filter.txt`;
+      temporaryPaths.push(finalFilter);
+      await renderTimelineMix(groups.map((audioPath) => ({ audioPath, delayMs: 0 })), partial, finalFilter);
+    }
+    const validated = await validateAudioFile(partial);
+    await replaceAudioFile(partial, dest);
+    return { audioPath: dest, durationSec: validated.durationSec };
+  } finally {
+    await Promise.all(temporaryPaths.map((filePath) => fs.rm(filePath, { force: true }).catch(() => undefined)));
+    await fs.rm(partial, { force: true }).catch(() => undefined);
+  }
+}
+
 export function registerAudioIpc(): void {
   ipcMain.handle('audio:write', async (_e, args: AudioWriteArgs): Promise<IpcResult<AudioPersistResult>> => {
     try {
@@ -266,6 +352,15 @@ export function registerAudioIpc(): void {
       return appSuccess(await assembleAudio(args));
     } catch (error) {
       return appFailureResult(error, 'VOICE_AUDIO_ASSEMBLY_FAILED', { operation: 'assemble-audio', chunkCount: args?.partPaths?.length });
+    }
+  });
+
+  ipcMain.handle('audio:assembleTimeline', async (_e, args: AudioTimelineAssembleArgs): Promise<IpcResult<AudioPersistResult>> => {
+    try {
+      if (!args?.projectId || !args.segmentId || !Array.isArray(args.parts)) throw appFailure('VOICE_INPUT_INVALID');
+      return appSuccess(await assembleTimelineAudio(args));
+    } catch (error) {
+      return appFailureResult(error, 'VOICE_AUDIO_ASSEMBLY_FAILED', { operation: 'assemble-timeline-audio', chunkCount: args?.parts?.length });
     }
   });
 

@@ -19,6 +19,7 @@ import type {
   AudioDownloadArgs,
   AudioPersistResult,
   AudioAssembleArgs,
+  AudioTimelineAssembleArgs,
   AudioProbeArgs,
   EdgeTtsSynthesizeResult,
   EdgeTtsVoice,
@@ -271,6 +272,7 @@ const bridge: GensuiteBridge = {
     write: (args: AudioWriteArgs) => invokeStructured('audio:write', args, isAudioPersistResult),
     download: (args: AudioDownloadArgs) => invokeStructured('audio:download', args, isAudioPersistResult),
     assemble: (args: AudioAssembleArgs) => invokeStructured('audio:assemble', args, isAudioPersistResult),
+    assembleTimeline: (args: AudioTimelineAssembleArgs) => invokeStructured('audio:assembleTimeline', args, isAudioPersistResult),
     probe: (args: AudioProbeArgs) => invokeStructured('audio:probe', args, isAudioPersistResult),
   },
   edgetts: {

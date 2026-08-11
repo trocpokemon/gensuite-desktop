@@ -641,6 +641,18 @@ export interface AudioAssembleArgs {
   partPaths: string[];
 }
 
+export interface AudioTimelinePart {
+  audioPath: string;
+  startTime: number;
+  endTime: number;
+}
+
+export interface AudioTimelineAssembleArgs {
+  projectId: string;
+  segmentId: string;
+  parts: AudioTimelinePart[];
+}
+
 export interface AudioProbeArgs {
   audioPath: string;
 }
@@ -892,6 +904,7 @@ export interface GensuiteBridge {
     write(args: AudioWriteArgs): Promise<IpcResult<AudioPersistResult>>;
     download(args: AudioDownloadArgs): Promise<IpcResult<AudioPersistResult>>;
     assemble(args: AudioAssembleArgs): Promise<IpcResult<AudioPersistResult>>;
+    assembleTimeline(args: AudioTimelineAssembleArgs): Promise<IpcResult<AudioPersistResult>>;
     probe(args: AudioProbeArgs): Promise<IpcResult<AudioPersistResult>>;
   };
   edgetts: {

@@ -13,7 +13,7 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   fileName: sourcePath,
 }).outputText + `
-module.exports.__transcriptionChunkingTest = { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine, modelPreflightExitFailure };
+module.exports.__transcriptionChunkingTest = { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine, modelPreflightExitFailure, recognitionComponentFailure };
 `;
 
 const module = { exports: {} };
@@ -35,14 +35,35 @@ new Function('require', 'module', 'exports', compiled)((name) => {
   return requireNode(name);
 }, module, module.exports);
 
-const { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine, modelPreflightExitFailure } = module.exports.__transcriptionChunkingTest;
+const { buildTranscriptionChunks, mergeTranscriptionChunks, offsetRecognitionWindowSegments, recognitionProgressFromLine, modelPreflightExitFailure, recognitionComponentFailure } = module.exports.__transcriptionChunkingTest;
 const violations = [];
 const duration = 1_205;
 const chunks = buildTranscriptionChunks(duration);
 const missingRuntime = modelPreflightExitFailure(3221225781);
-if (missingRuntime.code !== 'TRANSCRIPTION_COMPONENT_UNAVAILABLE'
-  || missingRuntime.internalDiagnostics?.classifier !== 'runtime-dependency-missing') {
-  violations.push('Mã thoát thiếu thành phần chạy vẫn bị phân loại nhầm thành dữ liệu nhận dạng hỏng.');
+if (missingRuntime.code !== 'TRANSCRIPTION_SYSTEM_SUPPORT_MISSING'
+  || missingRuntime.internalDiagnostics?.classifier !== 'system-support-loader-failure') {
+  violations.push('Mã thoát thiếu gói hỗ trợ Windows vẫn bị phân loại nhầm.');
+}
+const incompleteInstallation = recognitionComponentFailure(2, 0, false);
+if (incompleteInstallation?.code !== 'TRANSCRIPTION_INSTALLATION_INCOMPLETE'
+  || incompleteInstallation.internalDiagnostics?.componentCount !== 2) {
+  violations.push('Tệp đi kèm bị thiếu chưa được tách khỏi lỗi gói hỗ trợ hệ thống.');
+}
+const quarantinedComponent = recognitionComponentFailure(1, 0, true);
+if (quarantinedComponent?.code !== 'TRANSCRIPTION_COMPONENT_QUARANTINED'
+  || quarantinedComponent.internalDiagnostics?.classifier !== 'security-quarantine-confirmed') {
+  violations.push('Tệp bị cách ly chưa có mã lỗi và chẩn đoán riêng.');
+}
+const missingSystemSupport = recognitionComponentFailure(0, 3, false);
+if (missingSystemSupport?.code !== 'TRANSCRIPTION_SYSTEM_SUPPORT_MISSING'
+  || missingSystemSupport.internalDiagnostics?.componentCount !== 3) {
+  violations.push('Thiếu gói hỗ trợ Windows chưa có mã lỗi riêng.');
+}
+if (!/WINDOWS_BUNDLED_RECOGNITION_FILES/u.test(source)
+  || !/WINDOWS_RECOGNITION_SUPPORT_FILES/u.test(source)
+  || !/windowsSecurityQuarantineEvidence/u.test(source)
+  || !/ensureRecognitionComponentAvailable/u.test(source)) {
+  violations.push('Preflight chưa kiểm tra đủ tệp đi kèm, gói hỗ trợ và bằng chứng cách ly.');
 }
 if (!/error instanceof AppFailure\) \|\| error\.code !== 'TRANSCRIPTION_MODEL_INVALID'/u.test(source)) {
   violations.push('Dữ liệu nhận dạng hợp lệ vẫn có nguy cơ bị xóa khi thành phần chạy trên máy bị thiếu.');

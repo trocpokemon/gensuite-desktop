@@ -72,6 +72,7 @@ export function voiceRequestKey(req: VoiceRequest, engine: string): string {
     pitch: req.pitch,
     volume: req.volume,
     deliveryMode: req.deliveryMode,
+    srt: req.srt,
   }));
 }
 

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Check, Download, FileText, FolderOpen, KeyRound, Languages, Loader2, LogIn, Mic, Save, Trash2, Upload } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, Check, Download, FileText, FolderOpen, KeyRound, Languages, Loader2, LogIn, Mic, Save, Subtitles, Trash2, Upload, X } from 'lucide-react';
 import { AudioPlayer } from './AudioPlayer';
 import { EngineToggle } from './EngineToggle';
 import { AppSelect } from './AppSelect';
@@ -12,6 +12,7 @@ import { getTranscriptionProvider } from '../providers/transcription';
 import { getScriptProvider } from '../providers/script';
 import { errorMessage, loginRequiredPlatform, missingKeyService, serviceLabel, type VideoLoginPlatform } from '../providers/errors';
 import { localFileUrl } from '../shared/localFile';
+import { buildSrtContent, formatSrtPreviewTime, parseSrt, type SrtEntry } from '../shared/srt';
 import type { ScriptEngine, TranscriptSegment } from '../shared/types';
 
 export type QuickToolId = 'download' | 'voice' | 'srt' | 'translate' | 'image';
@@ -200,25 +201,114 @@ function DownloadTool() {
 function VoiceTool({ onOpenSettings }: { onOpenSettings: () => void }) {
   const project = useProjectStore((state) => state.project);
   const keys = useSettingsStore((state) => state.keys);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [mode, setMode] = useState<'text' | 'srt'>('text');
   const [text, setText] = useState('');
+  const [srtEntries, setSrtEntries] = useState<SrtEntry[]>([]);
+  const [srtFileName, setSrtFileName] = useState('');
+  const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [progressLabel, setProgressLabel] = useState('');
   const [audioPath, setAudioPath] = useState('');
   const [savedPath, setSavedPath] = useState('');
   const [missingKey, setMissingKey] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const clearResult = () => { setAudioPath(''); setSavedPath(''); setError(''); setProgress(0); setProgressLabel(''); };
+  const loadSrtFile = async (file: File) => {
+    clearResult();
+    if (!file.name.toLowerCase().endsWith('.srt')) { setError('Hãy chọn đúng tệp phụ đề có định dạng .SRT.'); return; }
+    try {
+      const entries = parseSrt(await file.text());
+      if (!entries.length) { setError('Tệp SRT không có câu phụ đề hợp lệ. Hãy kiểm tra lại mốc thời gian và nội dung.'); return; }
+      setSrtEntries(entries);
+      setSrtFileName(file.name);
+    } catch {
+      setError('Không thể đọc tệp SRT này. Hãy kiểm tra tệp rồi thử lại.');
+    }
+  };
+  const voiceRequest = (
+    segmentId: string,
+    content: string,
+    onProgress?: Parameters<ReturnType<typeof getVoiceProvider>['synthesize']>[0]['onProgress'],
+    srt?: { content: string; fileName: string },
+  ) => {
+    const engine = project.settings.voiceEngine;
+    const config = project.settings.voiceConfigs[engine];
+    return getVoiceProvider(engine, keys).synthesize({
+      projectId: project.id,
+      segmentId,
+      text: content,
+      voiceId: config.voiceId,
+      modelId: config.modelId,
+      language: config.language,
+      speed: config.speed,
+      temperature: config.temperature,
+      stability: config.stability,
+      similarityBoost: config.similarityBoost,
+      style: config.style,
+      useSpeakerBoost: config.useSpeakerBoost,
+      pitch: config.pitch,
+      volume: config.volume,
+      deliveryMode: config.deliveryMode,
+      srt,
+      onProgress,
+    });
+  };
   const synthesize = async () => {
-    if (!text.trim() || busy) return;
+    const hasInput = mode === 'text' ? Boolean(text.trim()) : srtEntries.length > 0;
+    if (!hasInput || busy) return;
     const engine = project.settings.voiceEngine;
     const config = project.settings.voiceConfigs[engine];
     if ((engine === 'elevenlabs' || engine === 'minimax') && !GENMAX_LANGUAGE_IDS.includes(config.language)) { setError('Hãy chọn ngôn ngữ trước khi tạo giọng.'); return; }
-    setBusy(true); setError(''); setMissingKey(null); setSavedPath('');
+    setBusy(true); setError(''); setMissingKey(null); setSavedPath(''); setAudioPath(''); setProgress(0);
     try {
-      const result = await getVoiceProvider(engine, keys).synthesize({ projectId: project.id, segmentId: uid('quick_voice_'), text: text.trim(), voiceId: config.voiceId, modelId: config.modelId, language: config.language, speed: config.speed, temperature: config.temperature, stability: config.stability, similarityBoost: config.similarityBoost, style: config.style, useSpeakerBoost: config.useSpeakerBoost, pitch: config.pitch, volume: config.volume, deliveryMode: config.deliveryMode });
-      setAudioPath(result.audioPath);
+      if (mode === 'text') {
+        setProgressLabel('Đang tạo giọng…');
+        const result = await voiceRequest(uid('quick_voice_'), text.trim(), (event) => {
+          const chunkProgress = event.totalChunks > 0 ? event.completedChunks / event.totalChunks : 0;
+          setProgress(Math.min(95, Math.round(chunkProgress * 100)));
+        });
+        setAudioPath(result.audioPath);
+      } else if (engine === 'elevenlabs' || engine === 'minimax') {
+        setProgressLabel('Đang xử lý toàn bộ tệp SRT và căn thời gian…');
+        const result = await voiceRequest(
+          uid('quick_srt_native_'),
+          srtEntries.map((entry) => entry.text).join('\n'),
+          (event) => {
+            const current = event.totalChunks > 0 ? event.completedChunks / event.totalChunks : 0;
+            setProgress(Math.min(95, Math.round(current * 100)));
+          },
+          { content: buildSrtContent(srtEntries), fileName: srtFileName || 'subtitles.srt' },
+        );
+        setAudioPath(result.audioPath);
+      } else {
+        const timelineParts: Array<{ audioPath: string; startTime: number; endTime: number }> = [];
+        for (let index = 0; index < srtEntries.length; index += 1) {
+          const entry = srtEntries[index];
+          setProgressLabel(`Đang tạo giọng cho câu ${index + 1}/${srtEntries.length}`);
+          setProgress(Math.round(index / srtEntries.length * 90));
+          const result = await voiceRequest(uid(`quick_srt_${index + 1}_`), entry.text, (event) => {
+            const current = event.totalChunks > 0 ? event.completedChunks / event.totalChunks : 0;
+            setProgress(Math.round(((index + current) / srtEntries.length) * 90));
+          });
+          timelineParts.push({ audioPath: result.audioPath, startTime: entry.startTime, endTime: entry.endTime });
+        }
+        setProgress(92);
+        setProgressLabel('Đang ghép giọng theo mốc thời gian SRT…');
+        const assembled = await window.gensuite.audio.assembleTimeline({ projectId: project.id, segmentId: uid('quick_srt_timeline_'), parts: timelineParts });
+        if (!assembled.ok) throw assembled.error;
+        setAudioPath(assembled.value.audioPath);
+      }
+      setProgress(100);
+      setProgressLabel('Hoàn tất');
     } catch (err) { const service = missingKeyService(err); if (service) setMissingKey(service); else setError(errorMessage(err)); } finally { setBusy(false); }
   };
   const save = async () => { if (audioPath) { const path = await window.gensuite.files.saveCopy({ sourcePath: audioPath, defaultName: 'gensuite-voice.mp3' }); if (path) setSavedPath(path); } };
-  return <div className="flex min-h-0 flex-1"><section className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-3xl px-8 py-10"><div className="workspace-panel rounded-2xl p-7"><div className="mb-5 inline-flex rounded-xl bg-violet-400/10 p-3 text-violet-300"><Mic size={23} /></div><h2 className="text-lg font-bold">Nội dung cần đọc</h2><textarea autoFocus value={text} onChange={(event) => setText(event.target.value)} rows={10} placeholder="Nhập hoặc dán văn bản tại đây…" className="field-surface mt-5 w-full resize-y rounded-xl p-4 text-sm leading-6 outline-none" /><div className="mt-2 text-right text-[11px] text-white/30">{text.trim().length.toLocaleString('vi-VN')} ký tự</div>{missingKey && <div className="mt-4 flex items-center justify-between rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-sm text-amber-100/75"><span><KeyRound size={15} className="mr-2 inline" />Thiếu API key cho {serviceLabel(missingKey)}</span><button onClick={onOpenSettings} className="rounded-lg bg-amber-300 px-3 py-1.5 text-xs font-bold text-black">Cài đặt</button></div>}{error && <p className="mt-4 text-sm text-red-300">{error}</p>}<button onClick={() => void synthesize()} disabled={!text.trim() || busy} className="primary-action mt-4 flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-40">{busy ? <Loader2 size={16} className="animate-spin" /> : <Mic size={16} />}{busy ? 'Đang tạo giọng…' : 'Tạo Voice AI'}</button>{audioPath && <div className="mt-5 rounded-xl border border-white/10 bg-black/15 p-4"><AudioPlayer src={localFileUrl(audioPath)!} /><button onClick={() => void save()} className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-bold text-white/65 hover:bg-white/5"><Save size={14} />Lưu audio</button></div>}<ResultPath path={savedPath} /></div></div></section><aside className="relative flex h-full w-[400px] shrink-0 flex-col border-l border-white/10 bg-[#0f0f10]"><VoiceConfigPanel onMissingKey={setMissingKey} /></aside></div>;
+  const totalChars = srtEntries.reduce((sum, entry) => sum + entry.text.length, 0);
+  const totalDuration = srtEntries.length ? srtEntries[srtEntries.length - 1].endTime : 0;
+  const canGenerate = mode === 'text' ? Boolean(text.trim()) : srtEntries.length > 0;
+  return <div className="flex min-h-0 flex-1"><section className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-3xl px-8 py-10"><div className="workspace-panel rounded-2xl p-7"><div className="mb-5 inline-flex rounded-xl bg-violet-400/10 p-3 text-violet-300"><Mic size={23} /></div><h2 className="text-lg font-bold">Nội dung cần đọc</h2><div className="mt-5 grid grid-cols-2 rounded-xl border border-white/10 bg-black/15 p-1"><button onClick={() => { setMode('text'); clearResult(); }} disabled={busy} className={`rounded-lg px-4 py-2.5 text-sm font-bold transition ${mode === 'text' ? 'bg-white/10 text-white shadow-sm' : 'text-white/40 hover:text-white/70'}`}><FileText size={15} className="mr-2 inline" />Văn bản</button><button onClick={() => { setMode('srt'); clearResult(); }} disabled={busy} className={`rounded-lg px-4 py-2.5 text-sm font-bold transition ${mode === 'srt' ? 'bg-white/10 text-white shadow-sm' : 'text-white/40 hover:text-white/70'}`}><Subtitles size={15} className="mr-2 inline" />Tệp SRT</button></div>{mode === 'text' ? <><textarea autoFocus value={text} onChange={(event) => { setText(event.target.value); clearResult(); }} rows={10} placeholder="Nhập hoặc dán văn bản tại đây…" className="field-surface mt-5 w-full resize-y rounded-xl p-4 text-sm leading-6 outline-none" /><div className="mt-2 text-right text-[11px] text-white/30">{text.trim().length.toLocaleString('vi-VN')} ký tự</div></> : <><input ref={fileInputRef} type="file" accept=".srt,application/x-subrip" className="hidden" onChange={(event) => { const file = event.target.files?.[0]; if (file) void loadSrtFile(file); event.currentTarget.value = ''; }} />{srtEntries.length ? <div className="mt-5"><div className="flex items-center justify-between gap-4 rounded-xl border border-violet-300/20 bg-violet-400/[0.06] p-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-violet-400/10 text-violet-300"><Subtitles size={19} /></div><div className="min-w-0"><div className="truncate text-sm font-bold">{srtFileName}</div><div className="mt-1 text-[11px] text-white/35">{srtEntries.length.toLocaleString('vi-VN')} câu · {totalChars.toLocaleString('vi-VN')} ký tự · {formatSrtPreviewTime(totalDuration)}</div></div></div><button onClick={() => { setSrtEntries([]); setSrtFileName(''); clearResult(); }} disabled={busy} aria-label="Xóa tệp SRT" className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-white/35 hover:bg-white/5 hover:text-white"><X size={16} /></button></div><div className="mt-3 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-white/8 bg-black/15 p-3">{srtEntries.slice(0, 8).map((entry) => <div key={`${entry.id}-${entry.startTime}`} className="flex items-start gap-3 rounded-lg px-2 py-1.5"><span className="shrink-0 font-mono text-[10px] tabular-nums text-violet-300/65">{formatSrtPreviewTime(entry.startTime)}</span><span className="line-clamp-2 text-xs leading-5 text-white/50">{entry.text}</span></div>)}{srtEntries.length > 8 && <div className="pt-1 text-center text-[10px] text-white/25">Còn {srtEntries.length - 8} câu khác</div>}</div><button onClick={() => fileInputRef.current?.click()} disabled={busy} className="mt-3 w-full rounded-lg border border-white/10 px-3 py-2 text-xs font-bold text-white/50 hover:bg-white/5 hover:text-white/75">Chọn tệp khác</button></div> : <button onClick={() => fileInputRef.current?.click()} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files?.[0]; if (file) void loadSrtFile(file); }} className={`mt-5 flex min-h-64 w-full flex-col items-center justify-center rounded-xl border-2 border-dashed transition ${dragging ? 'border-violet-300 bg-violet-400/10' : 'border-white/10 bg-black/10 hover:border-violet-300/35 hover:bg-violet-400/[0.04]'}`}><span className="grid h-14 w-14 place-items-center rounded-2xl border border-white/10 bg-white/[0.03] text-violet-300"><Upload size={25} /></span><span className="mt-4 text-sm font-bold text-white/70">Chọn hoặc thả tệp SRT vào đây</span><span className="mt-2 text-xs text-white/30">Giọng đọc sẽ được đặt đúng theo mốc thời gian phụ đề</span></button>}</>}{busy && <div className="mt-4 rounded-xl border border-violet-300/15 bg-violet-400/[0.05] p-3"><div className="flex items-center justify-between gap-3 text-xs"><span className="truncate text-violet-100/70">{progressLabel}</span><strong className="text-violet-200">{progress}%</strong></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-violet-300 transition-all" style={{ width: `${progress}%` }} /></div></div>}{missingKey && <div className="mt-4 flex items-center justify-between rounded-xl border border-amber-400/25 bg-amber-400/10 p-3 text-sm text-amber-100/75"><span><KeyRound size={15} className="mr-2 inline" />Thiếu API key cho {serviceLabel(missingKey)}</span><button onClick={onOpenSettings} className="rounded-lg bg-amber-300 px-3 py-1.5 text-xs font-bold text-black">Cài đặt</button></div>}{error && <p className="mt-4 text-sm text-red-300">{error}</p>}<button onClick={() => void synthesize()} disabled={!canGenerate || busy} className="primary-action mt-4 flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold disabled:opacity-40">{busy ? <Loader2 size={16} className="animate-spin" /> : <Mic size={16} />}{busy ? 'Đang tạo giọng…' : mode === 'srt' ? 'Tạo giọng theo SRT' : 'Tạo Voice AI'}</button>{audioPath && <div className="mt-5 rounded-xl border border-white/10 bg-black/15 p-4"><AudioPlayer src={localFileUrl(audioPath)!} /><button onClick={() => void save()} className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-bold text-white/65 hover:bg-white/5"><Save size={14} />Lưu audio</button></div>}<ResultPath path={savedPath} /></div></div></section><aside className="relative flex h-full w-[400px] shrink-0 flex-col border-l border-white/10 bg-[#0f0f10]"><VoiceConfigPanel onMissingKey={setMissingKey} /></aside></div>;
 }
 
 function SrtTool() {

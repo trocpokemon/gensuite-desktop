@@ -36,6 +36,11 @@ export interface VoiceRequest {
   pitch: number;
   volume: number;
   deliveryMode: 'STABLE' | 'BALANCED' | 'CREATIVE';
+  /** Full validated subtitle timeline for engines that provide native SRT alignment. */
+  srt?: {
+    content: string;
+    fileName: string;
+  };
   /** Optional renderer heartbeat used by long-video workflows. */
   onProgress?: (progress: VoiceSynthesisProgress) => void;
 }

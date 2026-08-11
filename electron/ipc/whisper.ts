@@ -29,10 +29,129 @@ import { AppFailure, appFailure, appFailureResult, appSuccess } from './appError
 // exactly what whisper.cpp expects.
 
 function whisperBinary(): string {
-  const base = app.isPackaged
+  const base = whisperComponentDir();
+  return path.join(base, process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli');
+}
+
+function whisperComponentDir(): string {
+  return app.isPackaged
     ? path.join(process.resourcesPath, 'resources', 'whisper')
     : path.join(app.getAppPath(), 'resources', 'whisper');
-  return path.join(base, process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli');
+}
+
+const WINDOWS_BUNDLED_RECOGNITION_FILES = [
+  'whisper-cli.exe',
+  'whisper.dll',
+  'ggml.dll',
+  'ggml-base.dll',
+  'ggml-cpu-x64.dll',
+] as const;
+
+const WINDOWS_RECOGNITION_SUPPORT_FILES = [
+  'VCOMP140.DLL',
+  'MSVCP140.dll',
+  'VCRUNTIME140.dll',
+  'VCRUNTIME140_1.dll',
+] as const;
+
+function recognitionComponentFailure(
+  missingBundledCount: number,
+  missingSupportCount: number,
+  quarantineConfirmed: boolean,
+): AppFailure | null {
+  if (missingBundledCount > 0 && quarantineConfirmed) {
+    return appFailure('TRANSCRIPTION_COMPONENT_QUARANTINED', undefined, {
+      classifier: 'security-quarantine-confirmed',
+      componentCount: missingBundledCount,
+    });
+  }
+  if (missingBundledCount > 0) {
+    return appFailure('TRANSCRIPTION_INSTALLATION_INCOMPLETE', undefined, {
+      classifier: 'bundled-component-missing',
+      componentCount: missingBundledCount,
+    });
+  }
+  if (missingSupportCount > 0) {
+    return appFailure('TRANSCRIPTION_SYSTEM_SUPPORT_MISSING', undefined, {
+      classifier: 'system-support-missing',
+      componentCount: missingSupportCount,
+    });
+  }
+  return null;
+}
+
+async function existingFile(filePath: string): Promise<boolean> {
+  const stat = await fs.stat(filePath).catch(() => null);
+  return Boolean(stat?.isFile() && stat.size > 0);
+}
+
+async function windowsSecurityQuarantineEvidence(missingFileNames: readonly string[]): Promise<boolean> {
+  if (process.platform !== 'win32' || missingFileNames.length === 0) return false;
+  const windowsDir = process.env.WINDIR || process.env.SystemRoot;
+  if (!windowsDir) return false;
+  const eventTool = path.join(windowsDir, 'System32', 'wevtutil.exe');
+  if (!(await existingFile(eventTool))) return false;
+
+  return await new Promise<boolean>((resolve) => {
+    const child = spawn(eventTool, [
+      'qe',
+      'Microsoft-Windows-Windows Defender/Operational',
+      '/q:*[System[(EventID=1116 or EventID=1117) and TimeCreated[timediff(@SystemTime) <= 604800000]]]',
+      '/rd:true',
+      '/c:64',
+      '/f:text',
+    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let output = '';
+    let settled = false;
+    const finish = (found: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(found);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(false);
+    }, 3_000);
+    child.stdout?.on('data', (data) => {
+      if (output.length < 512_000) output += String(data);
+    });
+    child.on('error', () => finish(false));
+    child.on('close', () => {
+      const normalized = output.toLowerCase();
+      finish(missingFileNames.some((name) => normalized.includes(name.toLowerCase())));
+    });
+  });
+}
+
+async function ensureRecognitionComponentAvailable(): Promise<void> {
+  const binary = whisperBinary();
+  if (process.platform !== 'win32') {
+    if (!(await existingFile(binary))) throw appFailure('TRANSCRIPTION_INSTALLATION_INCOMPLETE', undefined, {
+      classifier: 'bundled-component-missing', componentCount: 1,
+    });
+    return;
+  }
+
+  const componentDir = whisperComponentDir();
+  const bundledChecks = await Promise.all(WINDOWS_BUNDLED_RECOGNITION_FILES.map(async (name) => ({
+    name,
+    available: await existingFile(path.join(componentDir, name)),
+  })));
+  const missingBundled = bundledChecks.filter((item) => !item.available).map((item) => item.name);
+  if (missingBundled.length > 0) {
+    const quarantined = await windowsSecurityQuarantineEvidence(missingBundled);
+    throw recognitionComponentFailure(missingBundled.length, 0, quarantined)!;
+  }
+
+  const windowsDir = process.env.WINDIR || process.env.SystemRoot || 'C:\\Windows';
+  const systemDir = path.join(windowsDir, 'System32');
+  const supportChecks = await Promise.all(WINDOWS_RECOGNITION_SUPPORT_FILES.map(async (name) => ({
+    available: await existingFile(path.join(componentDir, name)) || await existingFile(path.join(systemDir, name)),
+  })));
+  const missingSupportCount = supportChecks.filter((item) => !item.available).length;
+  const failure = recognitionComponentFailure(0, missingSupportCount, false);
+  if (failure) throw failure;
 }
 
 function modelsDir(): string {
@@ -199,9 +318,9 @@ function modelPreflightExitFailure(code: number | null): AppFailure {
   // the downloaded model. Keeping these distinct prevents pointless model
   // deletion/redownload loops on affected client machines.
   if (unsigned === 0xC0000135) {
-    return appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE', undefined, {
+    return appFailure('TRANSCRIPTION_SYSTEM_SUPPORT_MISSING', undefined, {
       exitCode: unsigned,
-      classifier: 'runtime-dependency-missing',
+      classifier: 'system-support-loader-failure',
     });
   }
   if (unsigned === 0xC0000017) {
@@ -223,6 +342,7 @@ function modelPreflightExitFailure(code: number | null): AppFailure {
 }
 
 async function validateModelRuntime(model: WhisperModelName, filePath: string): Promise<void> {
+  await ensureRecognitionComponentAvailable();
   const stat = await fs.stat(filePath);
   const binaryStat = await fs.stat(whisperBinary());
   const stampPath = `${filePath}.verified.json`;
@@ -1115,7 +1235,7 @@ export function registerWhisperIpc(): void {
 
       const win = BrowserWindow.fromWebContents(e.sender);
       const binary = whisperBinary();
-      if (!(await fileExists(binary))) throw appFailure('TRANSCRIPTION_COMPONENT_UNAVAILABLE');
+      await ensureRecognitionComponentAvailable();
       let modelFile: string;
       let vadFile: string;
       try {

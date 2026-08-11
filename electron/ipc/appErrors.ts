@@ -34,6 +34,7 @@ const SAFE_DIAGNOSTIC_KEYS = new Set([
   'errorType',
   'chunkCount',
   'chunkNumber',
+  'componentCount',
   'textLength',
   'attempt',
   'statusCode',

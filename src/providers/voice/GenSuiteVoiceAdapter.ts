@@ -225,6 +225,13 @@ export async function getGenSuiteVoicePreview(request: {
 }
 
 function requestSettings(engine: GenSuiteVoiceEngine, req: VoiceRequest): Record<string, unknown> {
+  const nativeSrtSettings = req.srt && (engine === 'elevenlabs' || engine === 'minimax')
+    ? {
+        _srt_full: true,
+        _srt_content: req.srt.content,
+        _srt_file_name: req.srt.fileName || 'subtitles.srt',
+      }
+    : {};
   if (engine === 'genvoice') {
     return req.modelId === 'genvoice-tts-2'
       ? { speed: req.speed, delivery_mode: req.deliveryMode }
@@ -233,7 +240,7 @@ function requestSettings(engine: GenSuiteVoiceEngine, req: VoiceRequest): Record
   if (engine === 'elevenlabs') {
     const language = GENMAX_LANGUAGES.find((item) => item.id === req.language);
     const languageSettings = { genmax_language: req.language, language_code: language?.elevenCode };
-    if (req.modelId === 'eleven_v3') return { stability: req.stability, ...languageSettings };
+    if (req.modelId === 'eleven_v3') return { stability: req.stability, ...languageSettings, ...nativeSrtSettings };
     return {
       ...languageSettings,
       speed: req.speed,
@@ -241,10 +248,18 @@ function requestSettings(engine: GenSuiteVoiceEngine, req: VoiceRequest): Record
       similarity_boost: req.similarityBoost,
       style: req.style,
       use_speaker_boost: req.useSpeakerBoost,
+      ...nativeSrtSettings,
     };
   }
   const language = GENMAX_LANGUAGES.find((item) => item.id === req.language);
-  return { speed: req.speed, pitch: req.pitch, vol: req.volume, genmax_language: req.language, language_code: language?.minimaxName };
+  return {
+    speed: req.speed,
+    pitch: req.pitch,
+    vol: req.volume,
+    genmax_language: req.language,
+    language_code: language?.minimaxName,
+    ...nativeSrtSettings,
+  };
 }
 
 const GENMAX_LANGUAGES = [
@@ -384,7 +399,10 @@ export class GenSuiteVoiceAdapter implements IVoiceProvider {
     if (req.text.length > MAX_DESKTOP_VOICE_CHARS) throw clientAppError('VOICE_TEXT_TOO_LONG');
     this.controller = new AbortController();
     const signal = this.controller.signal;
-    const chunks = splitVoiceText(req.text, 900);
+    // ElevenLabs/MiniMax align the whole subtitle document provider-side.
+    // Splitting this request would destroy the original SRT timeline.
+    const nativeSrt = Boolean(req.srt && (this.engine === 'elevenlabs' || this.engine === 'minimax'));
+    const chunks = nativeSrt ? [req.text.trim()] : splitVoiceText(req.text, 900);
     const requestKey = voiceRequestKey(req, this.engine);
     const checkpoint = await loadVoiceCheckpoint(req.projectId, req.segmentId, requestKey)
       ?? createVoiceCheckpoint(requestKey, chunks.length);

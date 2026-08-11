@@ -53,6 +53,7 @@ try {
   const valid = generated.status === 0 ? await readFile(fixture) : Buffer.alloc(0);
   const write = handlers.get('audio:write');
   const assemble = handlers.get('audio:assemble');
+  const assembleTimeline = handlers.get('audio:assembleTimeline');
   const probe = handlers.get('audio:probe');
 
   const first = await write?.(null, { projectId: 'p', segmentId: 'stable', base64: valid.toString('base64'), ext: 'mp3' });
@@ -70,6 +71,18 @@ try {
     : null;
   if (!merged?.ok || merged.value.durationSec < 0.5) violations.push('Không ghép và xác minh được nhiều phần giọng.');
 
+  const timeline = first?.ok && second?.ok
+    ? await assembleTimeline?.(null, {
+      projectId: 'p',
+      segmentId: 'timeline',
+      parts: [
+        { audioPath: first.value.audioPath, startTime: 0, endTime: 0.4 },
+        { audioPath: second.value.audioPath, startTime: 0.8, endTime: 1.2 },
+      ],
+    })
+    : null;
+  if (!timeline?.ok || timeline.value.durationSec < 1.05) violations.push('Không giữ được khoảng lặng và mốc bắt đầu khi ghép SRT.');
+
   const missing = await probe?.(null, { audioPath: path.join(testRoot, 'missing.mp3') });
   if (missing?.ok || missing?.error?.code !== 'VOICE_AUDIO_RESULT_UNAVAILABLE') violations.push('Tệp giọng bị mất chưa trả đúng nguyên nhân.');
 
@@ -82,4 +95,4 @@ if (violations.length) {
   console.error(`Kiểm tra pipeline âm thanh thất bại:\n${violations.map((item) => `- ${item}`).join('\n')}`);
   process.exit(1);
 }
-console.log('Kiểm tra pipeline âm thanh: đạt (xác minh, rollback, ghép phần và phân loại tệp mất).');
+console.log('Kiểm tra pipeline âm thanh: đạt (xác minh, rollback, ghép phần, timeline SRT và phân loại tệp mất).');

@@ -1,7 +1,7 @@
 {
   "name": "gensuite-desktop",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "GenSuite Desktop - topic-driven YouTube production studio (Content, Storyboard, Voice, Video)",
   "author": "GenSuite",
   "main": "dist-electron/main.js",
@@ -10,6 +10,7 @@
     "ui:check": "node scripts/check-ui-consistency.mjs",
     "errors:check": "node scripts/check-error-contract.mjs",
     "voice:check": "node scripts/check-voice-batching.mjs",
+    "voice-srt:check": "node --no-warnings --experimental-strip-types scripts/check-voice-srt.mjs",
     "video:check": "node scripts/check-video-watchdog.mjs",
     "narration:check": "node scripts/check-narration-tail-coverage.mjs",
     "transcription:check": "node scripts/check-transcription-chunking.mjs",
@@ -23,9 +24,9 @@
     "google-api:check": "node --no-warnings --experimental-strip-types scripts/check-google-api-errors.mjs",
     "update:check": "node scripts/check-update-watchdog.mjs",
     "capcut:check": "node scripts/check-capcut-draft.mjs",
-    "build": "npm run ui:check && npm run errors:check && npm run voice:check && npm run free-voice:check && npm run entitlements:check && npm run image-studio:check && npm run google-api:check && npm run audio:check && npm run video:check && npm run narration:check && npm run transcription:check && npm run translation:check && npm run localize:check && npm run media:check && npm run update:check && npm run capcut:check && tsc -p tsconfig.node.json --noEmit && tsc --noEmit && vite build",
+    "build": "npm run ui:check && npm run errors:check && npm run voice:check && npm run voice-srt:check && npm run free-voice:check && npm run entitlements:check && npm run image-studio:check && npm run google-api:check && npm run audio:check && npm run video:check && npm run narration:check && npm run transcription:check && npm run translation:check && npm run localize:check && npm run media:check && npm run update:check && npm run capcut:check && tsc -p tsconfig.node.json --noEmit && tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "npm run ui:check && npm run errors:check && npm run voice:check && npm run free-voice:check && npm run entitlements:check && npm run image-studio:check && npm run google-api:check && npm run audio:check && npm run video:check && npm run narration:check && npm run transcription:check && npm run translation:check && npm run localize:check && npm run media:check && npm run update:check && npm run capcut:check && tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "npm run ui:check && npm run errors:check && npm run voice:check && npm run voice-srt:check && npm run free-voice:check && npm run entitlements:check && npm run image-studio:check && npm run google-api:check && npm run audio:check && npm run video:check && npm run narration:check && npm run transcription:check && npm run translation:check && npm run localize:check && npm run media:check && npm run update:check && npm run capcut:check && tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
     "dist": "vite build && electron-builder",
     "release": "vite build && electron-builder --publish always"
   },
